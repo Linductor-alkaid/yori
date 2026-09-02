@@ -1,8 +1,8 @@
 # Yori 实施总计划
 
 > 状态：Active
-> 版本：1.0
-> 更新日期：2026-09-02
+> 版本：1.1
+> 更新日期：2026-09-03
 > 负责人：Linductor-alkaid
 > 设计依据：[Yori 项目设计文档](../design/yori-project-design.md)（v0.2）
 > 治理依据：[AGENTS.md](../../AGENTS.md)、[项目管理与工程规范](../project/project-standards.md)
@@ -12,12 +12,18 @@
 
 ## 1. 当前整体状态
 
-- 仓库处于初始化阶段：尚无产品代码；Executor 已按
+- M0（工程骨架与基线）已完成：CMake 五预设、Executor pin 校验、格式/静态检查、
+  Linux GCC/Clang CI 基线与测试标签体系全部落地，CI 全绿（证据见
+  [M0 验证记录](m0-engineering-baseline.md)；合并 PR
+  [#1](https://github.com/Linductor-alkaid/yori/pull/1) 待评审）。仓库无产品
+  功能代码；Executor 按
   [DEC-001](../decisions/DEC-001-executor-pinning.md) 以 git submodule +
-  `dependencies.lock.json` 锁定引入（`v0.4.0-82-g4fd8e60`，MIT）。
-- 当前里程碑：M0（工程骨架与基线，`In Progress`）。
+  `dependencies.lock.json` 锁定（`v0.4.0-82-g4fd8e60`，MIT），尚未接入构建
+  （M1-01 起接入）。
+- 当前里程碑：M1（核心域契约与进程内调度闭环，`Planned`，计划见
+  [M1 里程碑文档](m1-core-contracts.md)）。
 - MVP 端到端验收以设计文档第 19 节判据为准，由 M7 执行并记录证据（见第 10 节）。
-- 里程碑文档在各自启动时创建（工程规范第 2 节）；当前仅 M0 存在实体文件。
+- 里程碑文档在各自启动时创建（工程规范第 2 节）；当前实体文件：M0、M1。
 
 ## 2. 交付边界（SCOPE）
 
@@ -91,7 +97,7 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 
 | 里程碑 | 名称 | 前置 | 能力增量 | 建议发布点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| M0 | 工程骨架与基线 | 无 | CMake/CI/测试标签/规范工具/文档框架、Executor 锁定校验 | 无（内部基线） | In Progress |
+| M0 | 工程骨架与基线 | 无 | CMake/CI/测试标签/规范工具/文档框架、Executor 锁定校验 | 无（内部基线） | Completed |
 | M1 | 核心域契约与进程内调度闭环 | M0 | JobSpec、状态机、全局队列、FIFO 调度、GPU lease 记账；内存 StateStore 与伪 GpuProvider 下的进程内可测闭环 | 无 | Planned |
 | M2 | 进程守护与启动适配 | M1 | ProcessSupervisor（spawn、进程组、取消、退出回收）、LaunchProfile、`exec` 前降权、日志捕获与落盘 | 无 | Planned |
 | M3 | NVML 真实 GPU 集成 | M2 | `GpuProvider` NVML 适配：发现、UUID 身份、遥测、外部占用检测（`EXTERNAL_BUSY`） | 无 | Planned |
@@ -102,7 +108,8 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 
 - M3 与 M4 在 M2 完成后可并行推进。
 - 里程碑文件命名 `m<N>-<scope>.md`，在该里程碑启动时创建；当前实体文件：
-  [M0 工程骨架与基线](m0-engineering-baseline.md)。
+  [M0 工程骨架与基线](m0-engineering-baseline.md)、
+  [M1 核心域契约与进程内调度闭环](m1-core-contracts.md)。
 
 ## 6. 暂定默认值与未决问题
 
@@ -179,7 +186,9 @@ CI 无法覆盖的项按工程规范第 4 节保持未勾选并记录原因与�
 
 - 设计：[Yori 项目设计文档](../design/yori-project-design.md)
 - 规范：[项目管理与工程规范](../project/project-standards.md)、[AGENTS.md](../../AGENTS.md)
-- 计划：[M0 工程骨架与基线](m0-engineering-baseline.md)（M1 起随里程碑创建）
+- 计划：[M0 工程骨架与基线](m0-engineering-baseline.md)、
+  [M1 核心域契约与进程内调度闭环](m1-core-contracts.md)
+  （M2 起随里程碑创建）
 - 决策：[DEC-001 Executor 依赖引入与锁定](../decisions/DEC-001-executor-pinning.md)、
   [DEC-002 MVP 纳入训练观察面](../decisions/DEC-002-mvp-observability.md)、
   [DEC-003 TensorBoard 由 CLI 拉起](../decisions/DEC-003-tensorboard-cli-hosting.md)、
