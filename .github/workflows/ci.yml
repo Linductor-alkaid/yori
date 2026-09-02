@@ -126,7 +126,11 @@ jobs:
           submodules: recursive
       - name: 篡改 submodule commit 后 configure 必须失败
         run: |
-          git -C third_party/executor checkout HEAD~1
+          # actions/checkout 的 submodule 为浅克隆（depth=1），需补取父提交
+          pin=$(git -C third_party/executor rev-parse HEAD)
+          git -C third_party/executor fetch --depth=2 origin "$pin"
+          parent=$(git -C third_party/executor rev-parse "$pin^")
+          git -C third_party/executor checkout "$parent"
           set +e
           cmake -S . -B build/tamper -G Ninja -DCMAKE_BUILD_TYPE=Debug \
             -DYORI_FETCH_DEPENDENCIES=OFF > tamper.log 2>&1
