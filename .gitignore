@@ -1,0 +1,24 @@
+# 构建目录
+build/
+build-*/
+out/
+cmake-build-*/
+
+# 生成文件
+compile_commands.json
+.cache/
+
+# IDE 与编辑器
+.idea/
+.vscode/
+*.swp
+*~
+
+# 日志与运行产物
+*.log
+/run/
+
+# 凭据与本地环境
+.env
+*.pem
+*.key

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "dependencies": [
+    {
+      "name": "executor",
+      "source": "https://github.com/Linductor-alkaid/executor.git",
+      "path": "third_party/executor",
+      "ref": "origin/master",
+      "ref_date": "2026-09-02",
+      "version": "v0.4.0-82-g4fd8e60",
+      "commit": "4fd8e6097879a56c7c3ad33b10f803cfe2e2e4d9",
+      "license": "MIT",
+      "license_file": "third_party/executor/LICENSE",
+      "introduced_by": "初始引入：直接固定 origin/master（2026-09-02），见 docs/design/yori-project-design.md 第 14 节"
+    }
+  ]
+}
