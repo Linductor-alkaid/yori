@@ -1,0 +1,148 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  format:
+    name: clang-format 检查
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 clang-format-18
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang-format-18
+      - name: 格式检查（--Werror）
+        run: |
+          mapfile -t files < <(git ls-files '*.cpp' '*.hpp' '*.h' '*.h.in')
+          printf '待检查文件 %d 个\n' "${#files[@]}"
+          clang-format-18 --dry-run --Werror "${files[@]}"
+
+  tidy:
+    name: clang-tidy 检查
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: 安装 clang-tidy-18
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang-tidy-18
+      - name: configure（生成 compile_commands.json）
+        run: cmake --preset debug -DYORI_FETCH_DEPENDENCIES=OFF
+      - name: 静态检查
+        run: |
+          mapfile -t files < <(git ls-files '*.cpp')
+          clang-tidy-18 -p build/debug "${files[@]}"
+
+  build:
+    name: ${{ matrix.compiler }} / ${{ matrix.preset }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc-13, clang-18]
+        preset: [debug, release]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: 安装 clang-18
+        if: matrix.compiler == 'clang-18'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang-18
+      - name: 设置编译器
+        run: |
+          comp="${{ matrix.compiler }}"
+          case "$comp" in
+            gcc-*)   cc="$comp"; cxx="g++${comp#gcc}" ;;
+            clang-*) cc="$comp"; cxx="clang++${comp#clang}" ;;
+          esac
+          echo "CC=$cc" >> "$GITHUB_ENV"
+          echo "CXX=$cxx" >> "$GITHUB_ENV"
+      - name: configure
+        run: cmake --preset ${{ matrix.preset }} -DYORI_FETCH_DEPENDENCIES=OFF
+      - name: build
+        run: cmake --build --preset ${{ matrix.preset }}
+      - name: test
+        run: ctest --preset ${{ matrix.preset }}
+      - name: 测试标签与显式 skip 演示（M0-06）
+        run: |
+          ctest --test-dir build/${{ matrix.preset }} -N --print-labels
+          ctest --test-dir build/${{ matrix.preset }} \
+            -L 'gpu|multi-user|ipc|recovery|fuzz|performance' -V
+      - name: install
+        run: cmake --install build/${{ matrix.preset }} --prefix build/${{ matrix.preset }}/install
+      - name: 安装后最小 consumer 编译与运行（M0-05）
+        run: |
+          cmake -S tests/consumer -B build/consumer -G Ninja \
+            -DCMAKE_PREFIX_PATH="$PWD/build/${{ matrix.preset }}/install" \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/consumer
+          ./build/consumer/consumer | tee consumer.out
+          grep -q "consumer linked against yori" consumer.out
+
+  sanitizers:
+    name: sanitizers（gcc / asan+ubsan+tsan）
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: 逐预设 configure/build/test
+        run: |
+          for preset in asan ubsan; do
+            echo "=== $preset ==="
+            cmake --preset "$preset" -DYORI_FETCH_DEPENDENCIES=OFF
+            cmake --build --preset "$preset"
+            ctest --preset "$preset"
+          done
+          # tsan：新内核高 ASLR 熵与 GCC libtsan shadow mapping 冲突，
+          # 以 setarch -R（关闭 ASLR）运行，见 docs/plans/m0-engineering-baseline.md。
+          echo "=== tsan ==="
+          cmake --preset tsan -DYORI_FETCH_DEPENDENCIES=OFF
+          cmake --build --preset tsan
+          setarch -R ctest --preset tsan
+
+  dependency-pin:
+    name: 依赖锁定校验（M0-03）
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: 篡改 submodule commit 后 configure 必须失败
+        run: |
+          git -C third_party/executor checkout --detach HEAD~1
+          set +e
+          cmake -S . -B build/tamper -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DYORI_FETCH_DEPENDENCIES=OFF > tamper.log 2>&1
+          rc=$?
+          set -e
+          cat tamper.log
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::configure 未拦截被篡改的 submodule commit"
+            exit 1
+          fi
+          grep -q "dependencies.lock.json" tamper.log || {
+            echo "::error::失败信息未指向依赖锁定校验"
+            exit 1
+          }
+      - name: 恢复 pin 后 OFF 只校验路径必须成功
+        run: |
+          git submodule update --init third_party/executor
+          cmake -S . -B build/verify -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DYORI_FETCH_DEPENDENCIES=OFF
