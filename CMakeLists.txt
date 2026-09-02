@@ -24,6 +24,14 @@ option(YORI_FETCH_DEPENDENCIES
   "允许 configure 阶段初始化缺失的依赖 submodule；OFF 表示不执行任何拉取，仅做一致性校验（离线/CI 默认路径）"
   ON)
 
+# ---- pinned 依赖校验（M0-03，工程规范 9.1/10.7）--------------------------
+include(cmake/Dependencies.cmake)
+yori_validate_pinned_dependencies()
+
+# ---- 供应链报告骨架（依赖策略第 6 节）------------------------------------
+include(cmake/SupplyChain.cmake)
+yori_add_supply_chain_report_target()
+
 # ---- 编译警告政策 --------------------------------------------------------
 include(cmake/CompilerWarnings.cmake)
 
