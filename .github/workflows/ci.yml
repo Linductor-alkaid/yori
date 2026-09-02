@@ -126,7 +126,7 @@ jobs:
           submodules: recursive
       - name: 篡改 submodule commit 后 configure 必须失败
         run: |
-          git -C third_party/executor checkout --detach HEAD~1
+          git -C third_party/executor checkout HEAD~1
           set +e
           cmake -S . -B build/tamper -G Ninja -DCMAKE_BUILD_TYPE=Debug \
             -DYORI_FETCH_DEPENDENCIES=OFF > tamper.log 2>&1
