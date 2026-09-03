@@ -1,0 +1,11 @@
+#pragma once
+
+namespace yori {
+
+/// 项目版本字符串（语义化版本），与 CMake project 版本保持一致。
+inline constexpr char kVersion[] = "@PROJECT_VERSION@";
+
+/// 返回 kVersion；定义于 yori_core，供链接方获取构建期版本。
+const char* version() noexcept;
+
+}  // namespace yori
