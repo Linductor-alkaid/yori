@@ -1,9 +1,8 @@
 # Yori 项目设计文档
 
 > **定位**：单节点多用户 GPU 训练任务排队、调度与进程守护系统\
-> **状态**：设计草案 v0.2（新增第 11 节训练状态观察；`yori logs -f` 与 `yori tensorboard`
-> 纳入 MVP）\
-> **日期**：2026-09-02
+> **状态**：设计草案 v0.3（冻结 M1 Job 契约与 `DEC-005` 全局 FIFO 语义）\
+> **日期**：2026-09-04
 
 ## 1. 项目摘要
 
@@ -212,22 +211,46 @@ JobSpec
   submit_time
 ```
 
+M1 冻结的 C++20 契约位于 `include/yori/job/job.hpp`：`JobId` 是非零
+`uint64_t` 强类型；`owner_uid == 0` 被拒绝，保证 root 提交不会进入可执行 Job。
+M5 从 IPC 建立 `JobSpec` 时，owner 字段只能取自 `SO_PEERCRED`，客户端同名字段
+不构成可信输入。`gpu_request` 在 MVP 必须为 1，`submit_time` 必须晚于 Unix epoch，
+以便 `DEC-005` 的 `(submit_time, JobId)` 排序稳定。
+
+所有可变长字段在进入 Job 前校验：
+
+| 字段 | M1 上限 / 规则 |
+| --- | --- |
+| `argv` | 1..256 项；单项 16 KiB；总计 64 KiB；`argv[0]` 非空；不得含 NUL |
+| `cwd` | 绝对路径；1..4096 bytes；不得含 NUL |
+| `env` | 最多 256 项；name 最多 255 bytes 且非空、不含 `=`/NUL；value 最多 32 KiB；name+value 总计 256 KiB |
+| `launch_profile` | 可选；存在时 1..128 bytes；不得含 NUL |
+| `tensorboard_logdir` | 可选；存在时为 cwd 下相对路径，1..4096 bytes，不得含 NUL、绝对路径或 `..` 路径分量 |
+
+校验拒绝通过 `JobSpecValidationResult` 返回稳定错误码和可选条目下标；Job 创建
+失败通过 `JobCreationError` 区分无效 JobId 与无效 JobSpec，不以截断或静默修复
+接受输入。
+
 ### 6.2 状态机
 
 ``` text
 QUEUED
-   │
-   ▼
-STARTING ───────► FAILED
-   │
-   ▼
-RUNNING
-   │
-   ├────────────► FINISHED
-   ├────────────► FAILED
-   ├─ cancel ───► STOPPING ───► CANCELLED
-   └─ recovery ─► LOST
+   ├────────────► STARTING ───► RUNNING ───► FINISHED
+   │                  │             │
+   │                  ├─────────────┼──────► FAILED
+   │                  ├─────────────┼──────► LOST
+   │                  └─ cancel ────┴──────► STOPPING ───► CANCELLED
+   │                                                ├────► FAILED
+   │                                                └────► LOST
+   └─ queued cancel ─────────────────────────────────────► CANCELLED
 ```
+
+`FINISHED`、`FAILED`、`CANCELLED`、`LOST` 是终态。每个合法转换都是 O(1) 的
+单步推进并使 `revision` 加一。转换返回 `TransitionResult`：合法推进为 `APPLIED`；
+活动状态的非法边为 `REJECTED`；对同一终态的重复结果为
+`IDEMPOTENT_TERMINAL`；终态后的不同迟到结果为 `IGNORED_AFTER_TERMINAL`。
+后三者均不改变状态或 revision，使上层能够记录拒绝与丢弃事件，同时保证终态
+Job 不复活。
 
 未来如果加入自动重试，可以增加：
 
@@ -904,7 +927,13 @@ checkpoint、模型等产物未来也可以按需要复用 Heyaki 文件传输�
 
 ### 16.1 MVP
 
-MVP 推荐：
+MVP 调度策略已由
+[DEC-005](../decisions/DEC-005-global-fifo-scheduling.md)冻结为严格全局 FIFO：
+可调度 Job 按 `(submit_time, JobId)` 升序排列；当前单 GPU Job 在队首等待
+`FREE` GPU 时不做 backfill。调度只由提交、退出、取消、GPU 状态变化、恢复完成
+和管理员操作等事件触发。
+
+MVP 采用：
 
 -   单服务器。
 -   多 NVIDIA GPU。

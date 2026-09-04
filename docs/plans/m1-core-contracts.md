@@ -1,11 +1,11 @@
 # M1：核心域契约与进程内调度闭环
 
-> 状态：Planned
+> 状态：In Progress
 > 负责人：Linductor-alkaid
 > 所属计划：[Yori 实施总计划](yori-implementation-plan.md)
 > 前置：M0（[工程骨架与基线](m0-engineering-baseline.md)）
 > 建议发布点：无
-> 更新日期：2026-09-03
+> 更新日期：2026-09-04
 
 ## 目标
 
@@ -60,7 +60,7 @@ Core 接口（伪 GPU 与内存 StateStore 实现）。本里程碑同时把 pin
   owner 语义在构建层可见。
 - [ ] `M1-02` 冻结并实现 `JobSpec`、JobId 与 Job 显式状态机公开契约：有界
   推进步骤、终态幂等、迟到结果丢弃可观测。
-- - [ ] `M1-03` 冻结 `GpuProvider` 与 `StateStore` Core 接口，交付伪 GpuProvider
+- [ ] `M1-03` 冻结 `GpuProvider` 与 `StateStore` Core 接口，交付伪 GpuProvider
   与内存 StateStore 实现（GPU 逻辑状态 `FREE/ALLOCATED/EXTERNAL_BUSY/
   UNAVAILABLE` 观测事实与 lease 事实分列）。
 - [ ] `M1-04` 实现服务器级全局队列与准入：容量上限显式、提交拒绝为明确结果
@@ -71,7 +71,7 @@ Core 接口（伪 GPU 与内存 StateStore 实现）。本里程碑同时把 pin
   启动 `PhaseGate` 按语义选型 `executor::comm` 组件，不自建队列。
 - [ ] `M1-07` 交付进程内调度闭环集成测试：六场景 + 状态机转换矩阵 + 终态
   幂等 + 队列拒绝/上限；ASAN/UBSAN/TSAN 通过。
-- [ ] `M1-08` 冻结调度策略暂定默认值（全局 FIFO）：实现前确认或另立决策
+- [x] `M1-08` 冻结调度策略暂定默认值（全局 FIFO）：实现前确认或另立决策
   记录，同步设计与总计划第 6 节。
 
 ## 风险与阻塞
@@ -88,13 +88,43 @@ Core 接口（伪 GPU 与内存 StateStore 实现）。本里程碑同时把 pin
   -> 终态 -> lease 释放 -> 下一轮调度，全程在 Executor 任务视图内可观测。
 - [ ] 新增并发路径覆盖六场景（正常完成、任务异常、提交拒绝、执行中取消、
   超时、shutdown）。
-- [ ] 状态机转换矩阵与终态幂等测试通过；非法转换被拒绝且可观测。
+- [x] 状态机转换矩阵与终态幂等测试通过；非法转换被拒绝且可观测。
 - [ ] 队列容量与拒绝路径负向测试通过；无静默丢弃。
-- [ ] "公共头不暴露第三方类型"编译边界测试进入常规 ctest。
+- [x] "公共头不暴露第三方类型"编译边界测试进入常规 ctest。
 - [ ] `debug`/`release`/`asan`/`ubsan`/`tsan` 预设全部通过；CI（GCC/Clang
   矩阵）全绿。
 - [ ] 设计文档（状态机、调度、接口清单）与总计划 `EXEC` 条目同步更新。
 
 ## 验证记录
 
-（待启动后按日期追加。）
+### 2026-09-04：M1-01/M1-02 基础契约、M1-08 FIFO 冻结
+
+- 范围：工作树 `codex/feat-m1-foundation`。pinned Executor 通过
+  `add_subdirectory` 接入，关闭其测试、示例和 GPU 后端；新增进程私有
+  `yori_runtime` owner、finite task/future/shutdown 生命周期测试和公共头编译
+  边界测试。冻结非零 `JobId`、有界 `JobSpec` 与显式状态机契约；新增 64 组合
+  转换矩阵、终态幂等、迟到结果和输入边界负向测试。新增并接受
+  [DEC-005](../decisions/DEC-005-global-fifo-scheduling.md)，冻结严格全局 FIFO。
+- 依据：设计第 7、9、14、16.1 节，`DEC-001`、`DEC-005`，总计划
+  `EXEC-01`/`EXEC-06`，pinned Executor integration skill 的 Quick Start 与
+  Tasks And Lifecycle capability card。
+- 环境：Linux x86_64，内核 `7.0.0-31-generic`，GCC 13.3.0，Executor
+  `4fd8e6097879a56c7c3ad33b10f803cfe2e2e4d9`；GPU/CUDA/OpenCL 关闭。
+- 通过：`cmake --preset <debug|release|asan|ubsan> -DYORI_FETCH_DEPENDENCIES=OFF &&
+  cmake --build --preset <preset> -j2 && ctest --preset <preset>
+  --output-on-failure`；每套 13 个用例为 7 passed、6 个既有环境/后续里程碑
+  占位用例 skipped。TSAN 依 CI 规定执行 `cmake --preset tsan
+  -DYORI_FETCH_DEPENDENCIES=OFF && cmake --build --preset tsan -j2 && setarch -R
+  ctest --preset tsan --output-on-failure`，结果相同且无 race 报告。直接运行 TSAN
+  会因宿主高熵 ASLR 报 `unexpected memory mapping`，不作为规定门禁。
+  `cmake --install build/debug --prefix build/m1-install` 后，仅安装 `yori_core`、
+  Yori 公开头和两个程序；安装产物的 `tests/consumer` configure/build/run 通过并
+  实际创建 Job。`public_header_boundary_test` 的编译命令只有 Yori 源码与生成头
+  include path，无 Executor include path。
+- 限制：本机没有 `clang-tidy-18` 和 Clang C++ 编译器，远端 CI 尚未触发；因此
+  `M1-01`、`M1-02` 保持未完成。负责人：Linductor-alkaid；补跑条件：在安装
+  clang-tidy-18 的环境按 `.github/workflows/ci.yml` 对全部自研 `.cpp` 执行静态
+  检查，并由 PR CI 完成 GCC 13/Clang 18 的 Debug/Release 矩阵；全绿后勾选。
+- 同步：已更新设计第 6/16.1 节、安全威胁模型、安装 consumer、总计划当前状态/
+  决策表/文档地图、M1 状态与验证记录；未修改 pinned Executor，也未登记能力
+  缺口。

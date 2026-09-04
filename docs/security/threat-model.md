@@ -2,7 +2,7 @@
 
 > 状态：Draft（骨架版；完整 STRIDE 分析随 M2/M5/M6 工作项完成，完成后升级为
 > Active）
-> 日期：2026-09-02
+> 日期：2026-09-04
 > 负责人：Linductor-alkaid
 > 依据：[设计文档](../design/yori-project-design.md)第 5、11.5、17 节、
 > [AGENTS.md](../../AGENTS.md) 安全条款、[DEC-004](../decisions/DEC-004-privileged-daemon-demotion.md)
@@ -58,6 +58,7 @@ yori CLI（用户会话） --> tensorboard 子进程（用户身份，默认 127
 | 9 | 特权 daemon 的 IPC parser 与 launch path 保持最小 | root 进程 RCE | M5 | fuzz + 设计评审 |
 | 10 | 外部 GPU 进程只影响资源状态，不主动终止或接管 | 误杀用户进程 | M3 | `EXTERNAL_BUSY` 测试 |
 | 11 | 长期拆分 privileged launcher（`yori-launch-helper`） | 缩小 TCB | `POST-09` | 非本 MVP |
+| 12 | Job 创建拒绝 root owner，并在 IPC 前以固定上限校验 argv/env/cwd/profile/logdir | root workload、内存耗尽、路径逃逸 | M1/M5 | `JobSpec` 上限与 root/路径负向测试；M5 parser 边界测试 |
 
 ## 5. 初步威胁清单（待细化）
 

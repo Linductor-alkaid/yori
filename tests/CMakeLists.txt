@@ -11,6 +11,35 @@ yori_apply_warnings(unit_version_test)
 add_test(NAME example.unit.version COMMAND unit_version_test)
 set_tests_properties(example.unit.version PROPERTIES LABELS "unit" TIMEOUT 60)
 
+# ---- unit：Executor owner 生命周期（M1-01）-------------------------------
+add_executable(unit_executor_runtime_test unit_executor_runtime_test.cpp)
+target_link_libraries(unit_executor_runtime_test PRIVATE yori::runtime executor::executor)
+yori_apply_warnings(unit_executor_runtime_test)
+add_test(NAME m1.unit.executor-runtime COMMAND unit_executor_runtime_test)
+set_tests_properties(m1.unit.executor-runtime PROPERTIES LABELS "unit" TIMEOUT 60)
+
+# ---- compile boundary：Yori 公共头不得依赖 Executor 头（M1-01）-----------
+# 该目标只获得 yori_core 的公开 include path，故任何 <executor/...> 泄漏都会在
+# 编译阶段失败；它也覆盖安装集合中的全部源码公共头。
+add_executable(public_header_boundary_test public_header_boundary_test.cpp)
+target_link_libraries(public_header_boundary_test PRIVATE yori::yori_core)
+yori_apply_warnings(public_header_boundary_test)
+add_test(NAME m1.unit.public-header-boundary COMMAND public_header_boundary_test)
+set_tests_properties(m1.unit.public-header-boundary PROPERTIES LABELS "unit" TIMEOUT 60)
+
+# ---- unit：JobSpec 与状态机（M1-02）--------------------------------------
+add_executable(unit_job_spec_test unit_job_spec_test.cpp)
+target_link_libraries(unit_job_spec_test PRIVATE yori::yori_core)
+yori_apply_warnings(unit_job_spec_test)
+add_test(NAME m1.unit.job-spec COMMAND unit_job_spec_test)
+set_tests_properties(m1.unit.job-spec PROPERTIES LABELS "unit" TIMEOUT 60)
+
+add_executable(unit_job_state_machine_test unit_job_state_machine_test.cpp)
+target_link_libraries(unit_job_state_machine_test PRIVATE yori::yori_core)
+yori_apply_warnings(unit_job_state_machine_test)
+add_test(NAME m1.unit.job-state-machine COMMAND unit_job_state_machine_test)
+set_tests_properties(m1.unit.job-state-machine PROPERTIES LABELS "unit" TIMEOUT 60)
+
 # ---- integration：CLI/daemon 冒烟 ----------------------------------------
 add_test(NAME example.integration.yori-version COMMAND $<TARGET_FILE:yori> --version)
 set_tests_properties(example.integration.yori-version PROPERTIES

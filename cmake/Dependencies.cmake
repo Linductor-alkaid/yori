@@ -108,3 +108,24 @@ function(yori_validate_pinned_dependencies)
     message(STATUS "依赖校验：${name} ${version} @ ${head_short}（${license}）与锁文件一致")
   endforeach()
 endfunction()
+
+# 将已校验的 pinned Executor 作为 Yori 私有构建依赖接入。M1 当前只需要普通
+# finite-task facade，因此关闭上游测试、示例和 GPU 后端；后续工作项需要新能力时，
+# 必须先按 pinned 集成指南复核并在这里显式开启。
+function(yori_add_pinned_dependencies)
+  set(EXECUTOR_BUILD_TESTS OFF CACHE BOOL "Yori 不构建 Executor 自身测试" FORCE)
+  set(EXECUTOR_BUILD_EXAMPLES OFF CACHE BOOL "Yori 不构建 Executor 示例" FORCE)
+  set(EXECUTOR_BUILD_SHARED OFF CACHE BOOL "Yori 静态链接 pinned Executor" FORCE)
+  set(EXECUTOR_ENABLE_GPU OFF CACHE BOOL "M1 不使用 Executor GPU 后端" FORCE)
+  set(EXECUTOR_ENABLE_CUDA OFF CACHE BOOL "M1 不使用 Executor CUDA 后端" FORCE)
+  set(EXECUTOR_ENABLE_OPENCL OFF CACHE BOOL "M1 不使用 Executor OpenCL 后端" FORCE)
+
+  add_subdirectory(
+    "${YORI_DEPS_SOURCE_DIR}/third_party/executor"
+    "${PROJECT_BINARY_DIR}/third_party/executor"
+    EXCLUDE_FROM_ALL)
+
+  # 上游 facade 作为第三方系统头消费；Yori 自研目标继续使用 -Werror，但不把
+  # pinned 依赖头中的诊断归属为 Yori 错误。Executor 自身仍按其构建规则编译。
+  set_target_properties(executor PROPERTIES SYSTEM TRUE)
+endfunction()

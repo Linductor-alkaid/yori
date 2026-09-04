@@ -5,7 +5,9 @@ configure_file(
   "${PROJECT_BINARY_DIR}/generated/yori/version.h"
   @ONLY)
 
-add_library(yori_core version.cpp)
+add_library(yori_core
+  job/job.cpp
+  version.cpp)
 add_library(yori::yori_core ALIAS yori_core)
 
 target_include_directories(yori_core
@@ -15,6 +17,18 @@ target_include_directories(yori_core
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
 yori_apply_warnings(yori_core)
+
+# 进程私有的 Executor owner 边界。该目标不安装、不从 yori_core 传递，确保
+# Core 公开契约不暴露第三方类型。当前仅 yorid 持有它；无状态 CLI 在出现异步
+# 工作前不创建 Executor，届时必须由 CLI 主生命周期建立独立 owner。
+add_library(yori_runtime STATIC
+  runtime/executor_runtime.cpp)
+add_library(yori::runtime ALIAS yori_runtime)
+target_include_directories(yori_runtime
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
+target_link_libraries(yori_runtime PRIVATE executor::executor)
+yori_apply_warnings(yori_runtime)
 
 set_target_properties(yori_core PROPERTIES
   VERSION ${PROJECT_VERSION}
