@@ -55,17 +55,17 @@ Core 接口（伪 GPU 与内存 StateStore 实现）。本里程碑同时把 pin
 
 ## 工作项
 
-- [ ] `M1-01` 将 pinned Executor 接入构建（公共 facade、按语义只编译所需
+- [x] `M1-01` 将 pinned Executor 接入构建（公共 facade、按语义只编译所需
   组件），提供"公共头不包含第三方类型"的编译边界测试；daemon/CLI 的 Executor
   owner 语义在构建层可见。
-- [ ] `M1-02` 冻结并实现 `JobSpec`、JobId 与 Job 显式状态机公开契约：有界
+- [x] `M1-02` 冻结并实现 `JobSpec`、JobId 与 Job 显式状态机公开契约：有界
   推进步骤、终态幂等、迟到结果丢弃可观测。
-- [ ] `M1-03` 冻结 `GpuProvider` 与 `StateStore` Core 接口，交付伪 GpuProvider
+- [x] `M1-03` 冻结 `GpuProvider` 与 `StateStore` Core 接口，交付伪 GpuProvider
   与内存 StateStore 实现（GPU 逻辑状态 `FREE/ALLOCATED/EXTERNAL_BUSY/
   UNAVAILABLE` 观测事实与 lease 事实分列）。
-- [ ] `M1-04` 实现服务器级全局队列与准入：容量上限显式、提交拒绝为明确结果
+- [x] `M1-04` 实现服务器级全局队列与准入：容量上限显式、提交拒绝为明确结果
   与事件，队列恢复语义与内存 StateStore 一致。
-- [ ] `M1-05` 实现事件驱动 FIFO 调度器与 GPU lease 记账（`EXEC-06`：有限
+- [x] `M1-05` 实现事件驱动 FIFO 调度器与 GPU lease 记账（`EXEC-06`：有限
   任务 + 句柄持有 + 取消路径；调度触发事件可注入测试）。
 - [ ] `M1-06` 落地状态推进通信（`EXEC-09`）：Job 状态更新、GPU/调度快照、
   启动 `PhaseGate` 按语义选型 `executor::comm` 组件，不自建队列。
@@ -212,3 +212,23 @@ Core 接口（伪 GPU 与内存 StateStore 实现）。本里程碑同时把 pin
   检查及 GCC 13/Clang 18 Debug/Release PR CI 全绿后勾选。
 - 同步：已更新设计第 9 节、安全威胁模型、总计划设计版本、公开/私有边界、测试
   与本计划；未修改 `third_party/`，未发现 Executor 能力缺口。
+
+### 2026-09-04：M1-01～M1-05 PR CI 收尾
+
+- 范围：PR [#2](https://github.com/Linductor-alkaid/yori/pull/2)，提交
+  `da97f0d`、`637fda3`、`581cbc2`、`3138f81` 及 CI 修复 `444c5ef`；目标
+  `master` 为 `394e5f6`，创建 PR 前已确认与 `origin/master` 同步且无冲突。
+- 首轮 CI run
+  [33850665778](https://github.com/Linductor-alkaid/yori/actions/runs/33850665778)
+  的 8 个 job 中 7 个通过，`clang-tidy` 暴露 5 个 warnings-as-errors。修复
+  `StopToken` 不必要值复制、无效 `std::move`、测试入口异常逃逸，并为故意构造
+  非法枚举值的 adapter 边界测试增加精确单行分析器豁免；未改变产品行为。
+- 最终 CI run
+  [33851194487](https://github.com/Linductor-alkaid/yori/actions/runs/33851194487)
+  8/8 全绿：clang-format 18、clang-tidy 18、GCC 13/Clang 18 的
+  Debug/Release configure/build/test/install/consumer、ASAN/UBSAN/TSAN，以及依赖
+  pin 篡改/恢复门禁全部通过。每套 ctest 仍为 12 passed、6 个后续里程碑或外部
+  环境占位用例显式 skipped；这些 skip 不构成对应能力已验证。
+- 结论：`M1-01`～`M1-05` 的实现、文档与适用门禁证据完整，工作项勾选完成。
+  `M1-06`、`M1-07` 未实现且保持未勾选；按 2026-09-04 的范围决定，本次不继续
+  推进后续 M1 工作，M1 里程碑整体仍为 `In Progress`。
