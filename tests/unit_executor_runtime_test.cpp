@@ -1,10 +1,12 @@
+#include <cstdio>
+#include <exception>
 #include <executor/executor.hpp>
 #include <string>
 
 #include "runtime/executor_runtime.hpp"
 #include "yori_test.hpp"
 
-int main() {
+int run_test() {
   yori::runtime::ExecutorRuntime runtime;
   std::string error_message;
 
@@ -27,4 +29,15 @@ int main() {
   // 外部 owner 的显式 shutdown 必须可重复，不依赖析构时机。
   YORI_CHECK(runtime.shutdown() == yori::runtime::ExecutorRuntimeShutdownResult::kNotInitialized);
   return yori::testing::failure_count == 0 ? 0 : 1;
+}
+
+int main() noexcept {
+  try {
+    return run_test();
+  } catch (const std::exception& error) {
+    std::fprintf(stderr, "unexpected exception: %s\n", error.what());
+  } catch (...) {
+    std::fputs("unexpected non-standard exception\n", stderr);
+  }
+  return 1;
 }

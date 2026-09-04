@@ -78,7 +78,7 @@ const yori::scheduler::ScheduleResult& require_schedule_result(
 
 }  // namespace
 
-int main() {
+int run_test() {
   using yori::runtime::ExecutorRuntimeShutdownResult;
   using yori::runtime::SchedulerTaskCancelCode;
   using yori::runtime::SchedulerTaskCompletionCode;
@@ -177,4 +177,15 @@ int main() {
   YORI_CHECK(capacity_runtime.shutdown() == ExecutorRuntimeShutdownResult::kCompleted);
 
   return yori::testing::failure_count == 0 ? 0 : 1;
+}
+
+int main() noexcept {
+  try {
+    return run_test();
+  } catch (const std::exception& error) {
+    std::fprintf(stderr, "unexpected exception: %s\n", error.what());
+  } catch (...) {
+    std::fputs("unexpected non-standard exception\n", stderr);
+  }
+  return 1;
 }

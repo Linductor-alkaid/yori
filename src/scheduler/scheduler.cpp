@@ -13,8 +13,8 @@ ScheduleResult result(SchedulerTrigger trigger, ScheduleResultCode code,
                       queue::QueueErrorCode queue_error = queue::QueueErrorCode::kNone,
                       std::uint64_t store_revision = 0) {
   return {code,
-          {trigger, code, std::move(job_id), std::move(gpu_uuid), gpu_validation, store_error,
-           queue_error, store_revision}};
+          {trigger, code, job_id, std::move(gpu_uuid), gpu_validation, store_error, queue_error,
+           store_revision}};
 }
 
 bool leased(const store::StateSnapshot& snapshot, const gpu::GpuUuid& uuid) noexcept {

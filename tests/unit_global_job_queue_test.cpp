@@ -148,7 +148,9 @@ int main() {
                   3);
 
   auto invalid_state = queued(41, std::chrono::seconds{30});
-  invalid_state.state = static_cast<JobState>(999);
+  // Exercise the adapter-boundary guard with a deliberately invalid serialized value.
+  invalid_state.state =
+      static_cast<JobState>(999);  // NOLINT(clang-analyzer-optin.core.EnumCastOutOfRange)
   rejected = queue->admit(invalid_state);
   check_rejection(rejected, QueueEventKind::kAdmissionRejected, QueueErrorCode::kInvalidJobState,
                   3);

@@ -89,7 +89,7 @@ SchedulerTaskSubmitResult SchedulerTaskRunner::trigger(scheduler::SchedulerTrigg
   try {
     auto submission = impl_->executor.submit_cancellable(
         [scheduler = &impl_->scheduler, trigger,
-         snapshot = std::move(snapshot)](executor::StopToken token) mutable {
+         snapshot = std::move(snapshot)](const executor::StopToken& token) mutable {
           if (token.stop_requested()) {
             return scheduler::FifoScheduler::cancelled(trigger);
           }
