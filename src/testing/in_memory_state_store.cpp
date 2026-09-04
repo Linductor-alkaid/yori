@@ -32,6 +32,14 @@ void InMemoryStateStore::fail_with(store::StateStoreErrorCode error) noexcept {
   failure_ = error;
 }
 
+void InMemoryStateStore::fail_next_apply_with(store::StateStoreErrorCode error) noexcept {
+  if (error == store::StateStoreErrorCode::kNone) {
+    next_apply_failure_.reset();
+    return;
+  }
+  next_apply_failure_ = error;
+}
+
 void InMemoryStateStore::clear_failure() noexcept { failure_.reset(); }
 
 store::StateStoreLoadResult InMemoryStateStore::load() {
@@ -57,6 +65,11 @@ store::StateStoreLoadResult InMemoryStateStore::load() {
 store::StateStoreWriteResult InMemoryStateStore::apply(const store::StateMutation& mutation) {
   if (failure_) {
     return failure(*failure_, revision_);
+  }
+  if (next_apply_failure_) {
+    const auto error = *next_apply_failure_;
+    next_apply_failure_.reset();
+    return failure(error, revision_);
   }
   if (mutation.expected_revision != revision_) {
     return failure(store::StateStoreErrorCode::kRevisionConflict, revision_);

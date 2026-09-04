@@ -180,3 +180,35 @@ Core 接口（伪 GPU 与内存 StateStore 实现）。本里程碑同时把 pin
 - 同步：已更新设计第 9 节（与 16.1 节既有决策一致）、安全威胁模型、总计划
   设计版本、公开头、安装 consumer、测试与本计划；本工作项不新增并发路径，无
   Executor 能力缺口，未修改 `third_party/`。
+
+### 2026-09-04：M1-05 事件驱动 FIFO 调度与 lease
+
+- 范围：基于 `581cbc2` 的工作树。交付公开的单 owner `FifoScheduler` 与进程私有
+  `SchedulerTaskRunner`。每个注入触发最多调度一个队首 Job；Core 只依赖
+  `GlobalJobQueue`/`StateStore`/GPU observation，Executor 类型不进入公开头。
+- 不变量：严格队首、不 backfill；只选观测为 `FREE` 且无现有 lease 的 GPU，多
+  候选按 physical index 确定性选择但持久化 UUID。`QUEUED -> STARTING` 与 lease
+  在一个 StateStore mutation 中提交；显式写失败会把暂时移除的队首恢复到原排序
+  位置，不静默重试。队列/存储分歧、无效 GPU 快照和后端失败均结构化返回。
+- Executor 路径：依 pinned integration skill 的 Scenarios router 与 Tasks And
+  Lifecycle capability card，使用 `submit_cancellable()`、保留 handle/future、
+  `request_task_cancel()` 协作取消。Runner 同时只接纳一个任务；未消费、停止生产、
+  Executor 总量准入拒绝、取消与任务异常均显式可观察，析构仅作取消并消费兜底，
+  正常关闭仍要求外部 owner 先停生产者并显式消费结果。
+- 验证：Linux x86_64、GCC 13.3.0、Executor pin `4fd8e6097879`。最终工作树的
+  `debug`/`release`/`asan`/`ubsan` 均执行 configure/build/ctest；TSAN 按 CI
+  方式以 `setarch -R ctest --preset tsan` 执行。每套 18 个用例为 12 passed、
+  6 个既有环境/后续里程碑占位 skipped。新增 Core/Runtime 用例覆盖队列空闲、
+  队首阻塞、稳定 FIFO、确定性 GPU 选择、已有 lease 排除、原子状态/lease 提交、
+  StateStore load/write 失败、队列回滚、QUEUED 数量/全局最早键分歧、任务 BUSY、
+  排队取消、future 消费及 Executor `max_in_flight_tasks` 拒绝。Debug 首轮因新
+  runtime 构造参数遮蔽成员触发
+  `-Wshadow -Werror`，修正命名后 Debug/Release 严格告警构建通过。
+- 安装：`cmake --install build/debug --prefix build/m1-install` 后，独立 consumer
+  configure/build/run 通过；安装的 scheduler 公共头及其编译边界无 Executor
+  include path，进程私有 Runner 与测试支持实现不进入安装产物。
+- 限制：本机仍无 clang-tidy-18/Clang，PR CI 尚未触发，故 `M1-05` 保持未
+  勾选。负责人：Linductor-alkaid；补跑条件与既有记录相同：clang-tidy-18
+  检查及 GCC 13/Clang 18 Debug/Release PR CI 全绿后勾选。
+- 同步：已更新设计第 9 节、安全威胁模型、总计划设计版本、公开/私有边界、测试
+  与本计划；未修改 `third_party/`，未发现 Executor 能力缺口。

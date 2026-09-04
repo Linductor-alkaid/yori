@@ -1,7 +1,7 @@
 # Yori 项目设计文档
 
 > **定位**：单节点多用户 GPU 训练任务排队、调度与进程守护系统\
-> **状态**：设计草案 v0.4（冻结 M1 Job/GPU/StateStore/Queue 契约与 `DEC-005` 全局 FIFO 语义）\
+> **状态**：设计草案 v0.5（冻结 M1 Core/FIFO Scheduler 契约与 Executor 任务边界）\
 > **日期**：2026-09-04
 
 ## 1. 项目摘要
@@ -481,6 +481,27 @@ M1-04 冻结的服务器级队列契约位于
 StateStore 仍是持久化权威。M1-05 的 JobManager/Scheduler 在同一个 Executor
 串行有限任务中协调队列修改与 StateStore mutation，并仅在持久化操作成功后发布
 候选队列事件；daemon 重启时始终通过 `load()` + `restore()` 重建派生索引。
+
+M1-05 的 `FifoScheduler::run_once()` 将每个调度事件实现为一个有界推进单元：
+
+1. 校验最新 GPU observation snapshot，读取唯一全局队首和 StateStore 一致快照；
+   每次核对 Store 中 `QUEUED` 数量和全局最早排序键，防止派生队列漏项后绕过
+   更早 Job；队列为空、观测无效、存储失败与任意分歧均返回结构化结果。
+2. 只考察队首 Job。没有未被 lease 的 `FREE` GPU 时返回 `HEAD_BLOCKED`，不查看或
+   启动后续 Job；有多个候选时按当前 physical index 升序选择，lease 仍保存稳定
+   GPU UUID。
+3. 单次调用最多推进一个 Job。先从派生队列暂时移除队首，再以一个 StateStore
+   mutation 原子提交 `QUEUED -> STARTING` 和 GPU lease；写入失败时按稳定排序键
+   原子回滚队列，不静默重试。成功结果携带 JobId、GPU UUID 与新 store revision。
+
+触发类别固定为新提交、Job 退出、Job 取消、GPU 状态变化、恢复完成和管理员状态
+变化；调用本身不包含循环或定时器。进程私有 `SchedulerTaskRunner` 使用 Executor
+`submit_cancellable()` 承载该有限单元，始终保留 task handle 与 future：前一结果
+未消费时新触发明确返回 `BUSY`，停止生产后返回 `NOT_ACCEPTING`，排队取消通过
+`request_task_cancel()` 进入 Executor 生命周期，future 的完成、取消、总量准入拒绝
+与异常均映射为显式结果。运行中取消只在进入有界 Core 单元前协作检查，不抢占已经
+开始的 StateStore 原子操作。M1-06 再用 Executor comm 组件承接并合并并发触发，
+本适配器不自建事件队列、锁或线程。
 
 ------------------------------------------------------------------------
 

@@ -38,6 +38,15 @@ const yori::store::StoredJob& require_job(const yori::store::StateSnapshot& snap
   std::exit(1);
 }
 
+yori::queue::QueueEntry require_front(const yori::queue::GlobalJobQueue& queue) {
+  const auto front = queue.front();
+  if (!front) {
+    std::fprintf(stderr, "required queue front is missing\n");
+    std::exit(1);
+  }
+  return *front;
+}
+
 std::unique_ptr<yori::queue::GlobalJobQueue> make_queue(std::size_t capacity) {
   yori::queue::QueueErrorCode error{};
   auto queue = yori::queue::GlobalJobQueue::create({capacity}, error);
@@ -103,7 +112,7 @@ int main() {
   YORI_CHECK(queue->entries()[0].job_id == JobId{10});
   YORI_CHECK(queue->entries()[1].job_id == JobId{20});
   YORI_CHECK(queue->entries()[2].job_id == JobId{30});
-  YORI_CHECK(queue->front()->job_id == JobId{10});
+  YORI_CHECK(require_front(*queue).job_id == JobId{10});
   YORI_CHECK(queue->contains(JobId{20}));
 
   auto rejected = queue->admit(queued(20, std::chrono::seconds{30}));
@@ -162,7 +171,7 @@ int main() {
   admission = queue->admit(queued(40, std::chrono::seconds{5}));
   YORI_CHECK(admission);
   YORI_CHECK(admission.position == 0);
-  YORI_CHECK(queue->front()->job_id == JobId{40});
+  YORI_CHECK(require_front(*queue).job_id == JobId{40});
 
   yori::testing::InMemoryStateStore store{{4, 1}};
   yori::store::StateMutation create;
@@ -211,13 +220,13 @@ int main() {
   YORI_CHECK(recovered->size() == 1);
   YORI_CHECK(!recovered->contains(cancelled.id));
 
-  const auto retained_front = recovered->front();
+  const auto retained_front = require_front(*recovered);
   auto invalid_snapshot = stored.snapshot;
   invalid_snapshot.revision = 0;
   auto restore_rejected = recovered->restore(invalid_snapshot);
   check_rejection(restore_rejected, QueueEventKind::kRestoreRejected,
                   QueueErrorCode::kInvalidSnapshotRevision, 1);
-  YORI_CHECK(recovered->front()->job_id == retained_front->job_id);
+  YORI_CHECK(require_front(*recovered).job_id == retained_front.job_id);
 
   invalid_snapshot = stored.snapshot;
   invalid_snapshot.jobs.push_back(invalid_snapshot.jobs.front());
@@ -225,7 +234,7 @@ int main() {
   check_rejection(restore_rejected, QueueEventKind::kRestoreRejected, QueueErrorCode::kDuplicateJob,
                   1);
   YORI_CHECK(restore_rejected.item_index == invalid_snapshot.jobs.size() - 1);
-  YORI_CHECK(recovered->front()->job_id == retained_front->job_id);
+  YORI_CHECK(require_front(*recovered).job_id == retained_front.job_id);
 
   auto capacity_one = make_queue(1);
   restore_rejected = capacity_one->restore(all_queued_snapshot);

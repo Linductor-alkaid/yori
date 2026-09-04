@@ -9,6 +9,7 @@ add_library(yori_core
   gpu/gpu_provider.cpp
   job/job.cpp
   queue/job_queue.cpp
+  scheduler/scheduler.cpp
   store/state_store.cpp
   version.cpp)
 add_library(yori::yori_core ALIAS yori_core)
@@ -25,12 +26,13 @@ yori_apply_warnings(yori_core)
 # Core 公开契约不暴露第三方类型。当前仅 yorid 持有它；无状态 CLI 在出现异步
 # 工作前不创建 Executor，届时必须由 CLI 主生命周期建立独立 owner。
 add_library(yori_runtime STATIC
-  runtime/executor_runtime.cpp)
+  runtime/executor_runtime.cpp
+  runtime/scheduler_task_runner.cpp)
 add_library(yori::runtime ALIAS yori_runtime)
 target_include_directories(yori_runtime
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
-target_link_libraries(yori_runtime PRIVATE executor::executor)
+target_link_libraries(yori_runtime PRIVATE executor::executor yori::yori_core)
 yori_apply_warnings(yori_runtime)
 
 if(YORI_BUILD_TESTS AND PROJECT_IS_TOP_LEVEL)

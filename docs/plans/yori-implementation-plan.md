@@ -4,7 +4,7 @@
 > 版本：1.1
 > 更新日期：2026-09-04
 > 负责人：Linductor-alkaid
-> 设计依据：[Yori 项目设计文档](../design/yori-project-design.md)（v0.4）
+> 设计依据：[Yori 项目设计文档](../design/yori-project-design.md)（v0.5）
 > 治理依据：[AGENTS.md](../../AGENTS.md)、[项目管理与工程规范](../project/project-standards.md)
 
 本文是 Yori 交付范围与进度的唯一入口（工程规范第 3.1 节）。里程碑细节与逐轮实施

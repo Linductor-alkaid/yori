@@ -80,7 +80,8 @@ int main() {
   YORI_CHECK(invalid_update.validation.code == GpuObservationErrorCode::kInvalidUtilization);
 
   auto invalid_memory = gpu("GPU-cccc", 0, GpuObservedState::kFree);
-  invalid_memory.telemetry.memory_used_bytes = *invalid_memory.telemetry.memory_total_bytes + 1;
+  invalid_memory.telemetry.memory_used_bytes =
+      invalid_memory.telemetry.memory_total_bytes.value_or(0) + 1;
   const auto invalid_memory_update = provider.replace_observations({invalid_memory}, kObservedAt);
   YORI_CHECK(invalid_memory_update.validation.code ==
              GpuObservationErrorCode::kInvalidMemoryTelemetry);

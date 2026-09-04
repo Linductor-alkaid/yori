@@ -19,6 +19,7 @@ class InMemoryStateStore final : public store::StateStore {
   explicit InMemoryStateStore(InMemoryStateStoreConfig config = {}) : config_(config) {}
 
   void fail_with(store::StateStoreErrorCode error) noexcept;
+  void fail_next_apply_with(store::StateStoreErrorCode error) noexcept;
   void clear_failure() noexcept;
 
   [[nodiscard]] store::StateStoreLoadResult load() override;
@@ -30,6 +31,7 @@ class InMemoryStateStore final : public store::StateStore {
   std::map<job::JobId, store::StoredJob> jobs_;
   std::map<gpu::GpuUuid, gpu::GpuLease> leases_;
   std::optional<store::StateStoreErrorCode> failure_;
+  std::optional<store::StateStoreErrorCode> next_apply_failure_;
 };
 
 }  // namespace yori::testing

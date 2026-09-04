@@ -60,6 +60,20 @@ yori_apply_warnings(unit_global_job_queue_test)
 add_test(NAME m1.unit.global-job-queue COMMAND unit_global_job_queue_test)
 set_tests_properties(m1.unit.global-job-queue PROPERTIES LABELS "unit" TIMEOUT 60)
 
+# ---- unit：事件驱动 FIFO 调度、lease 与 Executor 任务边界（M1-05）-------
+add_executable(unit_fifo_scheduler_test unit_fifo_scheduler_test.cpp)
+target_link_libraries(unit_fifo_scheduler_test PRIVATE yori::test_support)
+yori_apply_warnings(unit_fifo_scheduler_test)
+add_test(NAME m1.unit.fifo-scheduler COMMAND unit_fifo_scheduler_test)
+set_tests_properties(m1.unit.fifo-scheduler PROPERTIES LABELS "unit" TIMEOUT 60)
+
+add_executable(unit_scheduler_task_runner_test unit_scheduler_task_runner_test.cpp)
+target_link_libraries(unit_scheduler_task_runner_test
+  PRIVATE yori::runtime yori::test_support executor::executor)
+yori_apply_warnings(unit_scheduler_task_runner_test)
+add_test(NAME m1.unit.scheduler-task-runner COMMAND unit_scheduler_task_runner_test)
+set_tests_properties(m1.unit.scheduler-task-runner PROPERTIES LABELS "unit" TIMEOUT 60)
+
 # ---- integration：CLI/daemon 冒烟 ----------------------------------------
 add_test(NAME example.integration.yori-version COMMAND $<TARGET_FILE:yori> --version)
 set_tests_properties(example.integration.yori-version PROPERTIES

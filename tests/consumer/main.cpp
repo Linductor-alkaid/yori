@@ -7,6 +7,7 @@
 #include <yori/gpu/gpu_provider.hpp>
 #include <yori/job/job.hpp>
 #include <yori/queue/job_queue.hpp>
+#include <yori/scheduler/scheduler.hpp>
 #include <yori/store/state_store.hpp>
 
 // 安装后最小 consumer（M0-05）：验证安装的公共头与导出库可用。
@@ -40,6 +41,11 @@ int main() {
   yori::queue::QueueErrorCode queue_error{};
   auto queue = yori::queue::GlobalJobQueue::create({1}, queue_error);
   if (!queue || queue_error != yori::queue::QueueErrorCode::kNone || !queue->empty()) {
+    return 1;
+  }
+
+  if (std::string(yori::scheduler::to_string(yori::scheduler::ScheduleResultCode::kQueueEmpty)) !=
+      "QUEUE_EMPTY") {
     return 1;
   }
 
