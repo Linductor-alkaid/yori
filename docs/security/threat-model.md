@@ -60,6 +60,7 @@ yori CLI（用户会话） --> tensorboard 子进程（用户身份，默认 127
 | 11 | 长期拆分 privileged launcher（`yori-launch-helper`） | 缩小 TCB | `POST-09` | 非本 MVP |
 | 12 | Job 创建拒绝 root owner，并在 IPC 前以固定上限校验 argv/env/cwd/profile/logdir | root workload、内存耗尽、路径逃逸 | M1/M5 | `JobSpec` 上限与 root/路径负向测试；M5 parser 边界测试 |
 | 13 | GPU snapshot 与 StateStore mutation 有固定条目上限；Job/lease 以 revision 原子提交 | 内存耗尽、状态篡改、部分写导致错误资源归属 | M1/M4 | Provider 边界、revision 冲突、容量与事务回滚负向测试 |
+| 14 | 全局队列只保存稳定排序键，默认 1024、硬上限 4096；所有拒绝返回结构化结果与事件 | 批量提交耗尽内存、静默丢弃或用户私有队列绕过全局顺序 | M1/M5 | 无效配置、容量、重复 Job、多用户稳定排序和恢复回滚负向测试 |
 
 ## 5. 初步威胁清单（待细化）
 

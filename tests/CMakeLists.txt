@@ -53,6 +53,13 @@ yori_apply_warnings(unit_in_memory_state_store_test)
 add_test(NAME m1.unit.in-memory-state-store COMMAND unit_in_memory_state_store_test)
 set_tests_properties(m1.unit.in-memory-state-store PROPERTIES LABELS "unit" TIMEOUT 60)
 
+# ---- unit：服务器级全局 FIFO 队列与准入（M1-04）-------------------------
+add_executable(unit_global_job_queue_test unit_global_job_queue_test.cpp)
+target_link_libraries(unit_global_job_queue_test PRIVATE yori::test_support)
+yori_apply_warnings(unit_global_job_queue_test)
+add_test(NAME m1.unit.global-job-queue COMMAND unit_global_job_queue_test)
+set_tests_properties(m1.unit.global-job-queue PROPERTIES LABELS "unit" TIMEOUT 60)
+
 # ---- integration：CLI/daemon 冒烟 ----------------------------------------
 add_test(NAME example.integration.yori-version COMMAND $<TARGET_FILE:yori> --version)
 set_tests_properties(example.integration.yori-version PROPERTIES

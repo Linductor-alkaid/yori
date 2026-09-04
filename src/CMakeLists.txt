@@ -8,6 +8,7 @@ configure_file(
 add_library(yori_core
   gpu/gpu_provider.cpp
   job/job.cpp
+  queue/job_queue.cpp
   store/state_store.cpp
   version.cpp)
 add_library(yori::yori_core ALIAS yori_core)

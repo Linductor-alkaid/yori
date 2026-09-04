@@ -6,6 +6,7 @@
 #include <yori/launch/launch_adapter.hpp>
 #include <yori/observe/observe.hpp>
 #include <yori/process/process_supervisor.hpp>
+#include <yori/queue/job_queue.hpp>
 #include <yori/scheduler/scheduler.hpp>
 #include <yori/store/state_store.hpp>
 

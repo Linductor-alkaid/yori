@@ -89,7 +89,7 @@ Core 接口（伪 GPU 与内存 StateStore 实现）。本里程碑同时把 pin
 - [ ] 新增并发路径覆盖六场景（正常完成、任务异常、提交拒绝、执行中取消、
   超时、shutdown）。
 - [x] 状态机转换矩阵与终态幂等测试通过；非法转换被拒绝且可观测。
-- [ ] 队列容量与拒绝路径负向测试通过；无静默丢弃。
+- [x] 队列容量与拒绝路径负向测试通过；无静默丢弃。
 - [x] "公共头不暴露第三方类型"编译边界测试进入常规 ctest。
 - [ ] `debug`/`release`/`asan`/`ubsan`/`tsan` 预设全部通过；CI（GCC/Clang
   矩阵）全绿。
@@ -156,3 +156,27 @@ Core 接口（伪 GPU 与内存 StateStore 实现）。本里程碑同时把 pin
   检查及 GCC 13/Clang 18 Debug/Release PR CI 全绿后勾选。
 - 同步：已更新设计第 7、12 节、安全威胁模型、总计划当前状态、公开头、安装
   consumer、测试与本计划；无 Executor 能力缺口，未修改 `third_party/`。
+
+### 2026-09-04：M1-04 全局队列与准入
+
+- 范围：基于 `637fda3` 的工作树。交付服务器级单 owner `GlobalJobQueue`、有界
+  配置、稳定 `(submit_time, JobId)` 排序、准入/移除/恢复结果以及可由上层发布的
+  结构化 `QueueEvent`。队列只保存排序键，不复制 JobSpec，也不建立用户私有队列。
+- 不变量：默认容量 1024、配置硬上限 4096；无效 Job、重复 Job 与容量耗尽均显式
+  拒绝且不改变队列。StateStore 是持久化权威，`restore()` 只恢复
+  `QUEUED/revision=0` Job，活动态和终态不重新入队；恢复失败原子保留旧队列。
+- 验证：Linux x86_64、GCC 13.3.0、Executor pin `4fd8e6097879`。最终工作树的
+  `debug`/`release`/`asan`/`ubsan` 均执行 configure/build/ctest；TSAN 按 CI
+  方式以 `setarch -R ctest --preset tsan` 执行。每套 16 个用例为 10 passed、
+  6 个既有环境/后续里程碑占位 skipped。新增队列用例覆盖零/超上限配置、跨用户
+  稳定排序、同时间 JobId 决胜、重复与容量拒绝事件、无效 ID/Spec/状态/revision、
+  移除、StateStore 恢复、活动态/终态过滤和失败回滚。
+- 安装：`cmake --install build/debug --prefix build/m1-install` 后，独立 consumer
+  仅使用安装的 Yori 配置/头/库，成功创建空队列；公共头编译命令无 Executor
+  include path，产品安装清单不含测试支持实现。
+- 限制：本机仍无 clang-tidy-18/Clang，PR CI 尚未触发，故 `M1-04` 保持未
+  勾选。负责人：Linductor-alkaid；补跑条件与既有记录相同：clang-tidy-18
+  检查及 GCC 13/Clang 18 Debug/Release PR CI 全绿后勾选。
+- 同步：已更新设计第 9 节（与 16.1 节既有决策一致）、安全威胁模型、总计划
+  设计版本、公开头、安装 consumer、测试与本计划；本工作项不新增并发路径，无
+  Executor 能力缺口，未修改 `third_party/`。

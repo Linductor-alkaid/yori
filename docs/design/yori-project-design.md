@@ -1,7 +1,7 @@
 # Yori 项目设计文档
 
 > **定位**：单节点多用户 GPU 训练任务排队、调度与进程守护系统\
-> **状态**：设计草案 v0.3（冻结 M1 Job/GPU/StateStore 契约与 `DEC-005` 全局 FIFO 语义）\
+> **状态**：设计草案 v0.4（冻结 M1 Job/GPU/StateStore/Queue 契约与 `DEC-005` 全局 FIFO 语义）\
 > **日期**：2026-09-04
 
 ## 1. 项目摘要
@@ -461,6 +461,26 @@ Scheduler 再次运行
 -   GPU 外部占用状态变化。
 -   daemon 恢复完成。
 -   管理员修改资源状态。
+
+M1-04 冻结的服务器级队列契约位于
+`include/yori/queue/job_queue.hpp`。`GlobalJobQueue` 是 `yorid` 单 owner 持有的
+同步 Core 派生索引，不是 Executor 任务队列，也不按用户拆分：
+
+- 队列仅保存 `(submit_time, JobId)`，不复制 JobSpec；严格按该二元组升序，
+  同一提交时间由 JobId 稳定决胜。默认容量 1024，配置硬上限 4096，零容量或
+  超上限配置无法创建队列。
+- `admit()` 只接受通过完整校验的 `QUEUED/revision=0` Job；无效 ID/Spec/状态、
+  重复 Job 和容量耗尽均返回稳定 `QueueErrorCode`，不会修改队列。
+- 每次准入、移除或恢复尝试都返回 `QueueOperationResult` 和结构化 `QueueEvent`，
+  事件包含操作类别、拒绝原因、JobId（若适用）、操作前后大小与容量。事件由上层
+  在整个状态操作成功后投递；队列内部不隐藏回调、事件缓冲、线程或重试。
+- `restore(StateSnapshot)` 以 StateStore 同一 revision 快照原子重建队列，只纳入
+  `QUEUED` Job；`STARTING/RUNNING/STOPPING` 与终态 Job 不会重新入队。恢复会重新
+  排序并校验 Job、重复 ID、revision 与容量，任一失败都保留原队列。
+
+StateStore 仍是持久化权威。M1-05 的 JobManager/Scheduler 在同一个 Executor
+串行有限任务中协调队列修改与 StateStore mutation，并仅在持久化操作成功后发布
+候选队列事件；daemon 重启时始终通过 `load()` + `restore()` 重建派生索引。
 
 ------------------------------------------------------------------------
 
