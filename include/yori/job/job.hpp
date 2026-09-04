@@ -100,6 +100,7 @@ enum class JobState {
 }
 
 [[nodiscard]] const char* to_string(JobState state) noexcept;
+[[nodiscard]] bool can_transition(JobState from, JobState to) noexcept;
 
 enum class TransitionOutcome {
   kApplied,

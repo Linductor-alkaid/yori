@@ -1,7 +1,7 @@
 # Yori 项目设计文档
 
 > **定位**：单节点多用户 GPU 训练任务排队、调度与进程守护系统\
-> **状态**：设计草案 v0.3（冻结 M1 Job 契约与 `DEC-005` 全局 FIFO 语义）\
+> **状态**：设计草案 v0.3（冻结 M1 Job/GPU/StateStore 契约与 `DEC-005` 全局 FIFO 语义）\
 > **日期**：2026-09-04
 
 ## 1. 项目摘要
@@ -314,6 +314,25 @@ GPU utilization 暂时降低
 
 对于 daemon 启动前已经存在的外部训练进程，可以通过 NVML 检测并将对应 GPU
 标记为 `EXTERNAL_BUSY`，但 Yori 不主动接管或终止这些进程。
+
+M1 冻结的 `GpuProvider` SPI 位于 `include/yori/gpu/gpu_provider.hpp`。Provider
+一次同步 `observe()` 只返回 `GpuObservationSnapshot`：
+
+- `GpuObservedState` 只有 `FREE / EXTERNAL_BUSY / UNAVAILABLE`，不包含
+  `ALLOCATED`；最多 128 台设备，GPU UUID 为 1..96 bytes，UUID 与 index 在同一
+  snapshot 中唯一。
+- snapshot revision 非零、观测时间晚于 Unix epoch；utilization 若存在则为
+  0..100，显存 used 必须同时带 total 且不超过 total。
+- `GpuLease {GPU UUID, JobId}` 是 Core 事实。逻辑状态先看 lease：有 lease 为
+  `ALLOCATED`；无 lease 时才映射 Provider 观测。原始观测始终保留，以便独立诊断
+  lease 与 `EXTERNAL_BUSY/UNAVAILABLE` 的冲突。
+- `observe()` 的 backend unavailable、permission denied 和 observation failed
+  均为显式错误。周期采样与任务生命周期由外部 Executor owner 承载，Provider
+  不得隐藏 timer、worker 或队列。
+
+M1 的 `FakeGpuProvider` 是单 owner、进程内测试实现：状态替换先完整校验，失败
+不覆盖上一份有效快照，并可显式注入 Provider 错误。它不安装为产品 API；M3 的
+NVML adapter 实现上述同一 SPI。
 
 ------------------------------------------------------------------------
 
@@ -702,6 +721,26 @@ SQLite 用于：
 -   状态持久化。
 -   审计。
 -   故障诊断。
+
+M1 冻结的 `StateStore` SPI 位于 `include/yori/store/state_store.hpp`，使用两个
+操作：`load()` 返回同一 store revision 下的 Job 与 GPU lease 一致快照；
+`apply()` 原子应用 `StateMutation`。mutation 最多 64 条，包含 Job create/update、
+lease acquire/release，并携带 `expected_revision`：
+
+- store revision 不匹配返回 `REVISION_CONFLICT`；成功 mutation 只增加一次
+  store revision。
+- 初始 Job 必须为 `QUEUED/revision=0`；更新必须保持 JobSpec 不变、Job revision
+  恰加一且遵守第 6.2 节转换矩阵。
+- `STARTING/RUNNING/STOPPING` Job 必须恰有一个 lease；`QUEUED` 与终态 Job
+  不得有 lease；GPU 与 Job 两侧均为一对一。
+- 任一条目无效、容量耗尽或 backend 失败时返回稳定错误码，整个 mutation 不得
+  留下部分写入。异步写入、FIFO 串行化与有界 admission 由 `EXEC-08` 的外部
+  Executor 路径负责，不在 adapter 内另建线程或写队列。
+
+`InMemoryStateStore` 是容量显式、单 owner 的 M1 测试实现，通过副本校验后一次
+提交保证原子性；M4 SQLite adapter 必须保持相同语义，并扩展进程身份与恢复字段，
+不得改变 Core 的 revision/原子性契约。两个 SPI 的公开头只使用 C++20 标准库与
+Yori Core 类型，不暴露 NVML、SQLite 或 Executor 类型。
 
 ------------------------------------------------------------------------
 

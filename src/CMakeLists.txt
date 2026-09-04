@@ -6,7 +6,9 @@ configure_file(
   @ONLY)
 
 add_library(yori_core
+  gpu/gpu_provider.cpp
   job/job.cpp
+  store/state_store.cpp
   version.cpp)
 add_library(yori::yori_core ALIAS yori_core)
 
@@ -29,6 +31,18 @@ target_include_directories(yori_runtime
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
 target_link_libraries(yori_runtime PRIVATE executor::executor)
 yori_apply_warnings(yori_runtime)
+
+if(YORI_BUILD_TESTS AND PROJECT_IS_TOP_LEVEL)
+  add_library(yori_test_support STATIC
+    testing/fake_gpu_provider.cpp
+    testing/in_memory_state_store.cpp)
+  add_library(yori::test_support ALIAS yori_test_support)
+  target_include_directories(yori_test_support
+    PUBLIC
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
+  target_link_libraries(yori_test_support PUBLIC yori::yori_core)
+  yori_apply_warnings(yori_test_support)
+endif()
 
 set_target_properties(yori_core PROPERTIES
   VERSION ${PROJECT_VERSION}

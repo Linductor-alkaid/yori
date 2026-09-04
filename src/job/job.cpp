@@ -42,7 +42,9 @@ bool is_valid_tensorboard_logdir(const std::string& path) noexcept {
   return true;
 }
 
-bool is_allowed_transition(JobState from, JobState to) noexcept {
+}  // namespace
+
+bool can_transition(JobState from, JobState to) noexcept {
   switch (from) {
     case JobState::kQueued:
       return to == JobState::kStarting || to == JobState::kCancelled;
@@ -62,8 +64,6 @@ bool is_allowed_transition(JobState from, JobState to) noexcept {
   }
   return false;
 }
-
-}  // namespace
 
 JobSpecValidationResult validate(const JobSpec& spec) noexcept {
   if (spec.owner_uid == 0) {
@@ -239,7 +239,7 @@ TransitionResult Job::transition_to(JobState requested) noexcept {
             revision_};
   }
 
-  if (!is_allowed_transition(from, requested)) {
+  if (!can_transition(from, requested)) {
     return {from, requested, TransitionOutcome::kRejected, revision_};
   }
 

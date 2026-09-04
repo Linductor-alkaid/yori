@@ -128,3 +128,31 @@ Core 接口（伪 GPU 与内存 StateStore 实现）。本里程碑同时把 pin
 - 同步：已更新设计第 6/16.1 节、安全威胁模型、安装 consumer、总计划当前状态/
   决策表/文档地图、M1 状态与验证记录；未修改 pinned Executor，也未登记能力
   缺口。
+
+### 2026-09-04：M1-03 GPU 与状态存储契约
+
+- 范围：基于 `da97f0d` 的工作树。冻结 `GpuProvider::observe()`、有界 GPU
+  observation snapshot、Core `GpuLease`/逻辑状态投影，以及 `StateStore::load()`/
+  `apply()` revision 一致性与原子 mutation 契约；交付测试私有的
+  `FakeGpuProvider` 和容量显式的 `InMemoryStateStore`，均为单 owner 且不隐藏
+  线程、锁、队列或重试。
+- 不变量：Provider 不产生 `ALLOCATED` 观测；有 lease 时由 Core 投影为
+  `ALLOCATED`。StateStore mutation 最多 64 条，JobSpec 创建后不可变，Job
+  revision 恰加一；`STARTING/RUNNING/STOPPING` Job 恰有一个 lease，`QUEUED`
+  与终态无 lease，GPU 与 Job 两侧一对一。失败与 revision 冲突全部显式返回，
+  内存实现不留下部分写入。
+- 验证：Linux x86_64、GCC 13.3.0、Executor pin `4fd8e6097879`。最终工作树的
+  `debug`/`release`/`asan`/`ubsan` 均执行 configure/build/ctest；TSAN 按 CI
+  方式以 `setarch -R ctest --preset tsan` 执行。每套 15 个用例为 9 passed、
+  6 个既有环境/后续里程碑占位 skipped；新增 Provider 与 StateStore 用例覆盖
+  UUID/index/telemetry、容量、后端失败、revision 冲突、非法转换、JobSpec
+  篡改、lease 一致性和事务回滚。Release 首轮因测试 helper 裸指针解引用触发
+  `-Wnull-dereference -Werror`，改为 fail-fast 引用 helper 后全量通过。
+- 安装：`cmake --install build/debug --prefix build/m1-install` 后，产品安装清单
+  不含两个测试实现；`tests/consumer` 仅使用安装的 Yori 配置/头/库，成功创建
+  Job、计算 GPU 逻辑状态并实例化 StateMutation。
+- 限制：本机仍无 clang-tidy-18/Clang，PR CI 尚未触发，故 `M1-03` 保持未
+  勾选。负责人：Linductor-alkaid；补跑条件与上一记录相同：clang-tidy-18
+  检查及 GCC 13/Clang 18 Debug/Release PR CI 全绿后勾选。
+- 同步：已更新设计第 7、12 节、安全威胁模型、总计划当前状态、公开头、安装
+  consumer、测试与本计划；无 Executor 能力缺口，未修改 `third_party/`。

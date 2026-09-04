@@ -4,7 +4,7 @@
 > 版本：1.1
 > 更新日期：2026-09-04
 > 负责人：Linductor-alkaid
-> 设计依据：[Yori 项目设计文档](../design/yori-project-design.md)（v0.2）
+> 设计依据：[Yori 项目设计文档](../design/yori-project-design.md)（v0.3）
 > 治理依据：[AGENTS.md](../../AGENTS.md)、[项目管理与工程规范](../project/project-standards.md)
 
 本文是 Yori 交付范围与进度的唯一入口（工程规范第 3.1 节）。里程碑细节与逐轮实施
@@ -17,8 +17,9 @@
   [M0 验证记录](m0-engineering-baseline.md)；PR
   [#1](https://github.com/Linductor-alkaid/yori/pull/1) 已合并）。Executor 按
   [DEC-001](../decisions/DEC-001-executor-pinning.md) 以 git submodule +
-  `dependencies.lock.json` 锁定（`v0.4.0-82-g4fd8e60`，MIT），尚未接入构建
-  （M1-01 已开始接入构建与进程私有 owner，TSAN 补跑前保持未完成）。
+  `dependencies.lock.json` 锁定（`v0.4.0-82-g4fd8e60`，MIT），已在 M1-01 接入
+  构建并形成进程私有 owner；本地五预设已通过，因 clang-tidy-18/Clang 与 PR CI
+  尚未补跑，工作项保持未完成。
 - 当前里程碑：M1（核心域契约与进程内调度闭环，`In Progress`，计划见
   [M1 里程碑文档](m1-core-contracts.md)）。
 - MVP 端到端验收以设计文档第 19 节判据为准，由 M7 执行并记录证据（见第 10 节）。

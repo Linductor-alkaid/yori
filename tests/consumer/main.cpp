@@ -2,8 +2,11 @@
 
 #include <chrono>
 #include <cstdio>
+#include <string>
 #include <utility>
+#include <yori/gpu/gpu_provider.hpp>
 #include <yori/job/job.hpp>
+#include <yori/store/state_store.hpp>
 
 // 安装后最小 consumer（M0-05）：验证安装的公共头与导出库可用。
 int main() {
@@ -18,6 +21,18 @@ int main() {
   auto job = yori::job::Job::create(yori::job::JobId{1}, std::move(spec), error);
   if (!job) {
     std::fprintf(stderr, "consumer failed to create Job (%d)\n", static_cast<int>(error.code));
+    return 1;
+  }
+
+  const auto logical_state =
+      yori::gpu::derive_logical_state(yori::gpu::GpuObservedState::kFree, false);
+  if (logical_state != yori::gpu::GpuLogicalState::kFree ||
+      std::string(yori::gpu::to_string(logical_state)) != "FREE") {
+    return 1;
+  }
+
+  yori::store::StateMutation empty_mutation;
+  if (empty_mutation.entry_count() != 0) {
     return 1;
   }
 

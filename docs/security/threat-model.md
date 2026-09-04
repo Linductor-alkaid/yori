@@ -59,6 +59,7 @@ yori CLI（用户会话） --> tensorboard 子进程（用户身份，默认 127
 | 10 | 外部 GPU 进程只影响资源状态，不主动终止或接管 | 误杀用户进程 | M3 | `EXTERNAL_BUSY` 测试 |
 | 11 | 长期拆分 privileged launcher（`yori-launch-helper`） | 缩小 TCB | `POST-09` | 非本 MVP |
 | 12 | Job 创建拒绝 root owner，并在 IPC 前以固定上限校验 argv/env/cwd/profile/logdir | root workload、内存耗尽、路径逃逸 | M1/M5 | `JobSpec` 上限与 root/路径负向测试；M5 parser 边界测试 |
+| 13 | GPU snapshot 与 StateStore mutation 有固定条目上限；Job/lease 以 revision 原子提交 | 内存耗尽、状态篡改、部分写导致错误资源归属 | M1/M4 | Provider 边界、revision 冲突、容量与事务回滚负向测试 |
 
 ## 5. 初步威胁清单（待细化）
 

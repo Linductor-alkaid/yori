@@ -40,6 +40,19 @@ yori_apply_warnings(unit_job_state_machine_test)
 add_test(NAME m1.unit.job-state-machine COMMAND unit_job_state_machine_test)
 set_tests_properties(m1.unit.job-state-machine PROPERTIES LABELS "unit" TIMEOUT 60)
 
+# ---- unit：GpuProvider / StateStore SPI 与进程内实现（M1-03）--------------
+add_executable(unit_fake_gpu_provider_test unit_fake_gpu_provider_test.cpp)
+target_link_libraries(unit_fake_gpu_provider_test PRIVATE yori::test_support)
+yori_apply_warnings(unit_fake_gpu_provider_test)
+add_test(NAME m1.unit.fake-gpu-provider COMMAND unit_fake_gpu_provider_test)
+set_tests_properties(m1.unit.fake-gpu-provider PROPERTIES LABELS "unit" TIMEOUT 60)
+
+add_executable(unit_in_memory_state_store_test unit_in_memory_state_store_test.cpp)
+target_link_libraries(unit_in_memory_state_store_test PRIVATE yori::test_support)
+yori_apply_warnings(unit_in_memory_state_store_test)
+add_test(NAME m1.unit.in-memory-state-store COMMAND unit_in_memory_state_store_test)
+set_tests_properties(m1.unit.in-memory-state-store PROPERTIES LABELS "unit" TIMEOUT 60)
+
 # ---- integration：CLI/daemon 冒烟 ----------------------------------------
 add_test(NAME example.integration.yori-version COMMAND $<TARGET_FILE:yori> --version)
 set_tests_properties(example.integration.yori-version PROPERTIES
