@@ -27,6 +27,7 @@ option(YORI_FETCH_DEPENDENCIES
 # ---- pinned 依赖校验（M0-03，工程规范 9.1/10.7）--------------------------
 include(cmake/Dependencies.cmake)
 yori_validate_pinned_dependencies()
+yori_add_pinned_dependencies()
 
 # ---- 供应链报告骨架（依赖策略第 6 节）------------------------------------
 include(cmake/SupplyChain.cmake)

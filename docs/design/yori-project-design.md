@@ -1,9 +1,8 @@
 # Yori 项目设计文档
 
 > **定位**：单节点多用户 GPU 训练任务排队、调度与进程守护系统\
-> **状态**：设计草案 v0.2（新增第 11 节训练状态观察；`yori logs -f` 与 `yori tensorboard`
-> 纳入 MVP）\
-> **日期**：2026-09-02
+> **状态**：设计草案 v0.5（冻结 M1 Core/FIFO Scheduler 契约与 Executor 任务边界）\
+> **日期**：2026-09-04
 
 ## 1. 项目摘要
 
@@ -212,22 +211,46 @@ JobSpec
   submit_time
 ```
 
+M1 冻结的 C++20 契约位于 `include/yori/job/job.hpp`：`JobId` 是非零
+`uint64_t` 强类型；`owner_uid == 0` 被拒绝，保证 root 提交不会进入可执行 Job。
+M5 从 IPC 建立 `JobSpec` 时，owner 字段只能取自 `SO_PEERCRED`，客户端同名字段
+不构成可信输入。`gpu_request` 在 MVP 必须为 1，`submit_time` 必须晚于 Unix epoch，
+以便 `DEC-005` 的 `(submit_time, JobId)` 排序稳定。
+
+所有可变长字段在进入 Job 前校验：
+
+| 字段 | M1 上限 / 规则 |
+| --- | --- |
+| `argv` | 1..256 项；单项 16 KiB；总计 64 KiB；`argv[0]` 非空；不得含 NUL |
+| `cwd` | 绝对路径；1..4096 bytes；不得含 NUL |
+| `env` | 最多 256 项；name 最多 255 bytes 且非空、不含 `=`/NUL；value 最多 32 KiB；name+value 总计 256 KiB |
+| `launch_profile` | 可选；存在时 1..128 bytes；不得含 NUL |
+| `tensorboard_logdir` | 可选；存在时为 cwd 下相对路径，1..4096 bytes，不得含 NUL、绝对路径或 `..` 路径分量 |
+
+校验拒绝通过 `JobSpecValidationResult` 返回稳定错误码和可选条目下标；Job 创建
+失败通过 `JobCreationError` 区分无效 JobId 与无效 JobSpec，不以截断或静默修复
+接受输入。
+
 ### 6.2 状态机
 
 ``` text
 QUEUED
-   │
-   ▼
-STARTING ───────► FAILED
-   │
-   ▼
-RUNNING
-   │
-   ├────────────► FINISHED
-   ├────────────► FAILED
-   ├─ cancel ───► STOPPING ───► CANCELLED
-   └─ recovery ─► LOST
+   ├────────────► STARTING ───► RUNNING ───► FINISHED
+   │                  │             │
+   │                  ├─────────────┼──────► FAILED
+   │                  ├─────────────┼──────► LOST
+   │                  └─ cancel ────┴──────► STOPPING ───► CANCELLED
+   │                                                ├────► FAILED
+   │                                                └────► LOST
+   └─ queued cancel ─────────────────────────────────────► CANCELLED
 ```
+
+`FINISHED`、`FAILED`、`CANCELLED`、`LOST` 是终态。每个合法转换都是 O(1) 的
+单步推进并使 `revision` 加一。转换返回 `TransitionResult`：合法推进为 `APPLIED`；
+活动状态的非法边为 `REJECTED`；对同一终态的重复结果为
+`IDEMPOTENT_TERMINAL`；终态后的不同迟到结果为 `IGNORED_AFTER_TERMINAL`。
+后三者均不改变状态或 revision，使上层能够记录拒绝与丢弃事件，同时保证终态
+Job 不复活。
 
 未来如果加入自动重试，可以增加：
 
@@ -291,6 +314,25 @@ GPU utilization 暂时降低
 
 对于 daemon 启动前已经存在的外部训练进程，可以通过 NVML 检测并将对应 GPU
 标记为 `EXTERNAL_BUSY`，但 Yori 不主动接管或终止这些进程。
+
+M1 冻结的 `GpuProvider` SPI 位于 `include/yori/gpu/gpu_provider.hpp`。Provider
+一次同步 `observe()` 只返回 `GpuObservationSnapshot`：
+
+- `GpuObservedState` 只有 `FREE / EXTERNAL_BUSY / UNAVAILABLE`，不包含
+  `ALLOCATED`；最多 128 台设备，GPU UUID 为 1..96 bytes，UUID 与 index 在同一
+  snapshot 中唯一。
+- snapshot revision 非零、观测时间晚于 Unix epoch；utilization 若存在则为
+  0..100，显存 used 必须同时带 total 且不超过 total。
+- `GpuLease {GPU UUID, JobId}` 是 Core 事实。逻辑状态先看 lease：有 lease 为
+  `ALLOCATED`；无 lease 时才映射 Provider 观测。原始观测始终保留，以便独立诊断
+  lease 与 `EXTERNAL_BUSY/UNAVAILABLE` 的冲突。
+- `observe()` 的 backend unavailable、permission denied 和 observation failed
+  均为显式错误。周期采样与任务生命周期由外部 Executor owner 承载，Provider
+  不得隐藏 timer、worker 或队列。
+
+M1 的 `FakeGpuProvider` 是单 owner、进程内测试实现：状态替换先完整校验，失败
+不覆盖上一份有效快照，并可显式注入 Provider 错误。它不安装为产品 API；M3 的
+NVML adapter 实现上述同一 SPI。
 
 ------------------------------------------------------------------------
 
@@ -419,6 +461,47 @@ Scheduler 再次运行
 -   GPU 外部占用状态变化。
 -   daemon 恢复完成。
 -   管理员修改资源状态。
+
+M1-04 冻结的服务器级队列契约位于
+`include/yori/queue/job_queue.hpp`。`GlobalJobQueue` 是 `yorid` 单 owner 持有的
+同步 Core 派生索引，不是 Executor 任务队列，也不按用户拆分：
+
+- 队列仅保存 `(submit_time, JobId)`，不复制 JobSpec；严格按该二元组升序，
+  同一提交时间由 JobId 稳定决胜。默认容量 1024，配置硬上限 4096，零容量或
+  超上限配置无法创建队列。
+- `admit()` 只接受通过完整校验的 `QUEUED/revision=0` Job；无效 ID/Spec/状态、
+  重复 Job 和容量耗尽均返回稳定 `QueueErrorCode`，不会修改队列。
+- 每次准入、移除或恢复尝试都返回 `QueueOperationResult` 和结构化 `QueueEvent`，
+  事件包含操作类别、拒绝原因、JobId（若适用）、操作前后大小与容量。事件由上层
+  在整个状态操作成功后投递；队列内部不隐藏回调、事件缓冲、线程或重试。
+- `restore(StateSnapshot)` 以 StateStore 同一 revision 快照原子重建队列，只纳入
+  `QUEUED` Job；`STARTING/RUNNING/STOPPING` 与终态 Job 不会重新入队。恢复会重新
+  排序并校验 Job、重复 ID、revision 与容量，任一失败都保留原队列。
+
+StateStore 仍是持久化权威。M1-05 的 JobManager/Scheduler 在同一个 Executor
+串行有限任务中协调队列修改与 StateStore mutation，并仅在持久化操作成功后发布
+候选队列事件；daemon 重启时始终通过 `load()` + `restore()` 重建派生索引。
+
+M1-05 的 `FifoScheduler::run_once()` 将每个调度事件实现为一个有界推进单元：
+
+1. 校验最新 GPU observation snapshot，读取唯一全局队首和 StateStore 一致快照；
+   每次核对 Store 中 `QUEUED` 数量和全局最早排序键，防止派生队列漏项后绕过
+   更早 Job；队列为空、观测无效、存储失败与任意分歧均返回结构化结果。
+2. 只考察队首 Job。没有未被 lease 的 `FREE` GPU 时返回 `HEAD_BLOCKED`，不查看或
+   启动后续 Job；有多个候选时按当前 physical index 升序选择，lease 仍保存稳定
+   GPU UUID。
+3. 单次调用最多推进一个 Job。先从派生队列暂时移除队首，再以一个 StateStore
+   mutation 原子提交 `QUEUED -> STARTING` 和 GPU lease；写入失败时按稳定排序键
+   原子回滚队列，不静默重试。成功结果携带 JobId、GPU UUID 与新 store revision。
+
+触发类别固定为新提交、Job 退出、Job 取消、GPU 状态变化、恢复完成和管理员状态
+变化；调用本身不包含循环或定时器。进程私有 `SchedulerTaskRunner` 使用 Executor
+`submit_cancellable()` 承载该有限单元，始终保留 task handle 与 future：前一结果
+未消费时新触发明确返回 `BUSY`，停止生产后返回 `NOT_ACCEPTING`，排队取消通过
+`request_task_cancel()` 进入 Executor 生命周期，future 的完成、取消、总量准入拒绝
+与异常均映射为显式结果。运行中取消只在进入有界 Core 单元前协作检查，不抢占已经
+开始的 StateStore 原子操作。M1-06 再用 Executor comm 组件承接并合并并发触发，
+本适配器不自建事件队列、锁或线程。
 
 ------------------------------------------------------------------------
 
@@ -680,6 +763,26 @@ SQLite 用于：
 -   审计。
 -   故障诊断。
 
+M1 冻结的 `StateStore` SPI 位于 `include/yori/store/state_store.hpp`，使用两个
+操作：`load()` 返回同一 store revision 下的 Job 与 GPU lease 一致快照；
+`apply()` 原子应用 `StateMutation`。mutation 最多 64 条，包含 Job create/update、
+lease acquire/release，并携带 `expected_revision`：
+
+- store revision 不匹配返回 `REVISION_CONFLICT`；成功 mutation 只增加一次
+  store revision。
+- 初始 Job 必须为 `QUEUED/revision=0`；更新必须保持 JobSpec 不变、Job revision
+  恰加一且遵守第 6.2 节转换矩阵。
+- `STARTING/RUNNING/STOPPING` Job 必须恰有一个 lease；`QUEUED` 与终态 Job
+  不得有 lease；GPU 与 Job 两侧均为一对一。
+- 任一条目无效、容量耗尽或 backend 失败时返回稳定错误码，整个 mutation 不得
+  留下部分写入。异步写入、FIFO 串行化与有界 admission 由 `EXEC-08` 的外部
+  Executor 路径负责，不在 adapter 内另建线程或写队列。
+
+`InMemoryStateStore` 是容量显式、单 owner 的 M1 测试实现，通过副本校验后一次
+提交保证原子性；M4 SQLite adapter 必须保持相同语义，并扩展进程身份与恢复字段，
+不得改变 Core 的 revision/原子性契约。两个 SPI 的公开头只使用 C++20 标准库与
+Yori Core 类型，不暴露 NVML、SQLite 或 Executor 类型。
+
 ------------------------------------------------------------------------
 
 ## 13. IPC 与 CLI
@@ -904,7 +1007,13 @@ checkpoint、模型等产物未来也可以按需要复用 Heyaki 文件传输�
 
 ### 16.1 MVP
 
-MVP 推荐：
+MVP 调度策略已由
+[DEC-005](../decisions/DEC-005-global-fifo-scheduling.md)冻结为严格全局 FIFO：
+可调度 Job 按 `(submit_time, JobId)` 升序排列；当前单 GPU Job 在队首等待
+`FREE` GPU 时不做 backfill。调度只由提交、退出、取消、GPU 状态变化、恢复完成
+和管理员操作等事件触发。
+
+MVP 采用：
 
 -   单服务器。
 -   多 NVIDIA GPU。

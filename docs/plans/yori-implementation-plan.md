@@ -2,9 +2,9 @@
 
 > 状态：Active
 > 版本：1.1
-> 更新日期：2026-09-03
+> 更新日期：2026-09-04
 > 负责人：Linductor-alkaid
-> 设计依据：[Yori 项目设计文档](../design/yori-project-design.md)（v0.2）
+> 设计依据：[Yori 项目设计文档](../design/yori-project-design.md)（v0.5）
 > 治理依据：[AGENTS.md](../../AGENTS.md)、[项目管理与工程规范](../project/project-standards.md)
 
 本文是 Yori 交付范围与进度的唯一入口（工程规范第 3.1 节）。里程碑细节与逐轮实施
@@ -14,13 +14,15 @@
 
 - M0（工程骨架与基线）已完成：CMake 五预设、Executor pin 校验、格式/静态检查、
   Linux GCC/Clang CI 基线与测试标签体系全部落地，CI 全绿（证据见
-  [M0 验证记录](m0-engineering-baseline.md)；合并 PR
-  [#1](https://github.com/Linductor-alkaid/yori/pull/1) 待评审）。仓库无产品
-  功能代码；Executor 按
+  [M0 验证记录](m0-engineering-baseline.md)；PR
+  [#1](https://github.com/Linductor-alkaid/yori/pull/1) 已合并）。Executor 按
   [DEC-001](../decisions/DEC-001-executor-pinning.md) 以 git submodule +
-  `dependencies.lock.json` 锁定（`v0.4.0-82-g4fd8e60`，MIT），尚未接入构建
-  （M1-01 起接入）。
-- 当前里程碑：M1（核心域契约与进程内调度闭环，`Planned`，计划见
+  `dependencies.lock.json` 锁定（`v0.4.0-82-g4fd8e60`，MIT）。M1-01～M1-05
+  已完成：Executor 进程私有 owner、Core 契约、全局队列与事件驱动 FIFO 调度
+  已落地，PR [#2](https://github.com/Linductor-alkaid/yori/pull/2) 的最终 CI
+  [全绿](https://github.com/Linductor-alkaid/yori/actions/runs/33851194487)；M1-06、
+  M1-07 尚未实现，本次收尾后不继续推进。
+- 当前里程碑：M1（核心域契约与进程内调度闭环，`In Progress`，计划见
   [M1 里程碑文档](m1-core-contracts.md)）。
 - MVP 端到端验收以设计文档第 19 节判据为准，由 M7 执行并记录证据（见第 10 节）。
 - 里程碑文档在各自启动时创建（工程规范第 2 节）；当前实体文件：M0、M1。
@@ -98,7 +100,7 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | 里程碑 | 名称 | 前置 | 能力增量 | 建议发布点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
 | M0 | 工程骨架与基线 | 无 | CMake/CI/测试标签/规范工具/文档框架、Executor 锁定校验 | 无（内部基线） | Completed |
-| M1 | 核心域契约与进程内调度闭环 | M0 | JobSpec、状态机、全局队列、FIFO 调度、GPU lease 记账；内存 StateStore 与伪 GpuProvider 下的进程内可测闭环 | 无 | Planned |
+| M1 | 核心域契约与进程内调度闭环 | M0 | JobSpec、状态机、全局队列、FIFO 调度、GPU lease 记账；内存 StateStore 与伪 GpuProvider 下的进程内可测闭环 | 无 | In Progress |
 | M2 | 进程守护与启动适配 | M1 | ProcessSupervisor（spawn、进程组、取消、退出回收）、LaunchProfile、`exec` 前降权、日志捕获与落盘 | 无 | Planned |
 | M3 | NVML 真实 GPU 集成 | M2 | `GpuProvider` NVML 适配：发现、UUID 身份、遥测、外部占用检测（`EXTERNAL_BUSY`） | 无 | Planned |
 | M4 | 持久化与恢复 | M2 | SQLite StateStore、daemon 重启恢复、PID reuse 核验、`LOST` 语义 | 无 | Planned |
@@ -114,11 +116,11 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 ## 6. 暂定默认值与未决问题
 
 以下选择为推进而暂定，或为已识别的设计缺口；冻结前变更不受罚，冻结时按工程规范
-第 6.2 节落为决策记录。已冻结的决策见 `docs/decisions/`（DEC-001 ~ DEC-004）。
+第 6.2 节落为决策记录。已冻结的决策见 `docs/decisions/`（DEC-001 ~ DEC-005）。
 
 | 项目 | 暂定默认值 / 未决问题 | 负责人 | 最迟冻结 | 冻结动作 |
 | --- | --- | --- | --- | --- |
-| 调度策略 | 全局 FIFO，无优先级与配额（设计 §16.1） | Linductor-alkaid | M1 | 实现前确认；变更需决策记录 |
+| 调度策略 | 已冻结：严格全局 FIFO，无优先级、配额或 backfill（[DEC-005](../decisions/DEC-005-global-fifo-scheduling.md)） | Linductor-alkaid | M1 | 已于 2026-09-04 冻结；变更需新决策记录替代 DEC-005 |
 | 取消 grace period | `SIGTERM` 后等待时长未定（暂定 10s 量级） | Linductor-alkaid | M2 | 写入设计与配置默认值 |
 | 环境变量白名单初版 | 继承集合未定 | Linductor-alkaid | M2 | 决策记录 + 设计 §17 条 5 细化 |
 | daemon 重启后的日志续捕 | 未决：训练进程 stdout/stderr 管道随 daemon 退出断裂，重启后如何续捕（信号语义、追加写回、`LOST` 边界）需设计补充 | Linductor-alkaid | M2（守护语义）、M6（观察面） | 设计补充 + 决策记录 |
@@ -192,7 +194,8 @@ CI 无法覆盖的项按工程规范第 4 节保持未勾选并记录原因与�
 - 决策：[DEC-001 Executor 依赖引入与锁定](../decisions/DEC-001-executor-pinning.md)、
   [DEC-002 MVP 纳入训练观察面](../decisions/DEC-002-mvp-observability.md)、
   [DEC-003 TensorBoard 由 CLI 拉起](../decisions/DEC-003-tensorboard-cli-hosting.md)、
-  [DEC-004 root daemon 与 exec 前降权](../decisions/DEC-004-privileged-daemon-demotion.md)
+  [DEC-004 root daemon 与 exec 前降权](../decisions/DEC-004-privileged-daemon-demotion.md)、
+  [DEC-005 MVP 全局 FIFO 调度策略](../decisions/DEC-005-global-fifo-scheduling.md)
 - 安全：[威胁模型（草案）](../security/threat-model.md)
 - 供应链：[依赖管理与供应链策略](../supply-chain/dependency-policy.md)
 - Executor 反馈：[能力缺口反馈台账](../executor_feedback/ledger.md)
