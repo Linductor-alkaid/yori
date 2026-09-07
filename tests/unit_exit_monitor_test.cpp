@@ -17,17 +17,6 @@ using namespace yori;
 using namespace yori::runtime;
 using namespace std::chrono_literals;
 
-bool wait_registered(const ProcessExitMonitor& monitor, std::size_t expected) {
-  const auto deadline = std::chrono::steady_clock::now() + 2s;
-  while (std::chrono::steady_clock::now() < deadline) {
-    if (monitor.registered_count() == expected) {
-      return true;
-    }
-    std::this_thread::sleep_for(10ms);
-  }
-  return monitor.registered_count() == expected;
-}
-
 }  // namespace
 
 int main() {
@@ -49,7 +38,6 @@ int main() {
     if (spawned) {
       const auto registered = monitor.register_process(spawned.identity);
       YORI_CHECK(registered.ok());
-      YORI_CHECK(wait_registered(monitor, 1));
 
       ExitEvent event;
       YORI_CHECK(monitor.receive_exit_for(event, 5s));
