@@ -122,3 +122,36 @@ blocking worker 与 delayed task 承载（总计划 `EXEC-03`、`EXEC-07`）。
 
 ## 验证记录
 
+### 2026-09-08：M2-01～M2-05 实现与本地验证（PR 前）
+
+- 范围：工作树 `feat/m2-process-supervision`。交付 `LaunchProfile`/
+  `DefaultLaunchAdapter`/`PosixIdentityResolver`（DEC-006 三层环境合并与保留键）、
+  `ProcessSupervisor` Linux 引擎（双端 setpgid、SIGPIPE 忽略、`close_range` 收敛、
+  fork 前构造 argv/envp/组列表、exec 报告管道、`/proc` 身份）、取消升级状态机
+  （DEC-007）、`LogSink`（0640/属主、轮转、drop 标记、offset 单调）与 Executor
+  承载（`ProcessExitMonitor`、`LogPump`、`GraceEscalation`）。
+- 测试：新增 7 个测试目标（launch-adapter、process-supervisor、log-sink、
+  exit-monitor、log-pump、integration、security 降权）覆盖六场景（正常完成、
+  任务异常=exec/chdir 失败结构化错误、提交拒绝=无效 plan/重复 spawn/无效宽限、
+  执行中取消=SIGTERM 组信号、超时=宽限到期升级 SIGKILL、shutdown=monitor/pump
+  stop 不终止训练）与 M2 特有场景（进程组孙进程终止、PID 身份 ticks、注册前退出
+  竞态、环境一致性、管道断裂后子进程存活、轮转分块与丢弃标记、多 Job 并发排
+  空、monitor 回收权与 supervisor 单回收纪律）。
+- 验证：Linux x86_64、内核 `7.0.0-31-generic`、GCC 13.3.0、Executor pin
+  `4fd8e6097879`。`debug`/`release`/`asan`/`ubsan`/`tsan` 五预设全部执行
+  configure/build/ctest（TSAN 按 CI 规定以 `setarch -R ctest --preset tsan` 执行），
+  每套 25 个用例为 18 passed、7 个环境/后续里程碑占位用例 skipped（GPU、
+  multi-user 两个、IPC、recovery、fuzz、performance），无失败、无 race 报告。
+  clang-format-18 全量格式化已执行。`cmake --install build/debug --prefix
+  build/m2-install` 后 `tests/consumer` 仅使用安装产物配置/编译/运行通过，新增
+  launch/process/observe 公共 API 进入 consumer 冒烟；`public_header_boundary_test`
+  已覆盖 `log_sink.hpp`。
+- 限制：本机无 clang-tidy-18 与 Clang 编译器，PR CI 尚未触发，`M2-01`～`M2-06`
+  保持未勾选；`m2.security.process-demotion` 在非 root 环境显式 skip（补跑条件：
+  root 下设置 `YORI_DEMOTION_TEST_UID`/`YORI_DEMOTION_TEST_GID` 后 `ctest -L
+  multi-user`）。负责人：Linductor-alkaid；补跑条件：PR CI 的 GCC 13/Clang 18
+  Debug/Release 矩阵、clang-format/clang-tidy 18 与 sanitizers 全绿后勾选。
+- 同步：设计第 8、10.2、11.2、17 节（v0.6）、威胁模型基线 16-19 与待完成项、
+  总计划第 1/5/6/11 节、DEC-006/007/008、安装 consumer 与本计划。未修改
+  `third_party/`，未发现 Executor 能力缺口（blocking worker 名称单次注册语义
+  按其 DuplicateName 语义以实例唯一名适配，属应用侧职责）。
