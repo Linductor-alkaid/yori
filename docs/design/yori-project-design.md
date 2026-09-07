@@ -1,8 +1,8 @@
 # Yori 项目设计文档
 
 > **定位**：单节点多用户 GPU 训练任务排队、调度与进程守护系统\
-> **状态**：设计草案 v0.5（冻结 M1 Core/FIFO Scheduler 契约与 Executor 任务边界）\
-> **日期**：2026-09-04
+> **状态**：设计草案 v0.6（冻结 M2 进程守护、启动适配与日志落盘契约）\
+> **日期**：2026-09-08
 
 ## 1. 项目摘要
 
@@ -409,6 +409,20 @@ CUDA_VISIBLE_DEVICES + cuda:0..N-1
 
 这样训练程序完全不需要知道服务器物理 GPU 编号。
 
+M2 冻结的公开契约位于 `include/yori/launch/launch_adapter.hpp`：
+
+- `LaunchProfile` 两种模式：`cuda_visible_devices`（设置
+  `CUDA_VISIBLE_DEVICES=<NVML 物理索引>` 与 `CUDA_DEVICE_ORDER=PCI_BUS_ID`，不改
+  argv）和 `physical_argument`（把 `<argument> <物理索引>` 追加到 argv，不设置 CUDA
+  变量，遗留程序自行解释编号）。参数名必须以 `-` 开头、无空白、有界。
+- `DefaultLaunchAdapter::prepare()` 按 DEC-006 三层合并生成 `LaunchPlan`：最终
+  argv、按键字典序唯一的环境条目、cwd、目标身份（uid/gid/username）与 fork 前已
+  解析的 supplementary groups。`LaunchPlan` 经独立复验（空 argv、绝对 cwd、环境
+  数量/尺寸上限、uid/gid 非 0）后才允许进入 spawn。
+- 提交用户身份由 `IdentityResolver`（默认 `PosixIdentityResolver`，`getpwuid_r` +
+  `getgrouplist`）在 fork 前解析；子进程内只执行 `setgroups -> setgid -> setuid`
+  三个 syscall 封装，保持 fork-exec 窗口的 async-signal-safe 纪律。
+
 ------------------------------------------------------------------------
 
 ## 9. 调度流程
@@ -542,7 +556,7 @@ process group / session
 ``` text
 SIGTERM
    ↓
-grace period
+grace period（默认 10 秒，DEC-007）
    ↓
 仍未退出
    ↓
@@ -560,6 +574,30 @@ start time / process identity
 避免 daemon 恢复时因为 PID reuse 错误接管其他进程。
 
 Linux 上后续可以考虑使用 `pidfd` 增强进程生命周期管理。
+
+M2 冻结的公开契约位于 `include/yori/process/process_supervisor.hpp`：
+
+- `ProcessSupervisor` 是单 owner、单进程的同步状态机
+  （`IDLE -> RUNNING -> TERMINATING -> EXITED`），无内部线程；异步承载由
+  Executor 适配层（`yori_runtime`）驱动。取消是 Yori 的外部进程语义，不与
+  Executor 任务取消混同。
+- `spawn(LaunchPlan)`：双端 `setpgid` 建立独立进程组；stdout/stderr 经管道捕获；
+  子进程在 exec 前将 `SIGPIPE` 置为忽略（DEC-008，daemon 退出不击杀训练）、
+  完成 `setgroups -> setgid -> setuid` 降权（目标即当前有效身份时为幂等空操
+  作）、`close_range` 收敛继承描述符；PATH 解析与 execve 失败经专用报告管道
+  回传，父进程在确认 exec 成功前不返回。`/proc/<pid>/stat` 的启动 ticks 与
+  PGID 构成 `ProcessIdentity`，是恢复与 PID reuse 核验依据。
+- `request_cancel()` 对整个进程组发送 SIGTERM 并记录宽限截止（steady_clock）；
+  `grace_expired()` 与 `escalate()` 完成升级；宽限未到时升级被显式拒绝，进程
+  已退出时升级为空操作（终态幂等）。
+- `poll_exit()` 以 `waitpid(WNOHANG)` 有界推进一步，`consume_exit()` 终态幂等；
+  退出状态区分正常退出（携带退出码）与信号终止（携带信号号）。析构对仍在运行
+  的进程组执行 SIGKILL 并有界回收，保证不留孤儿与僵尸。
+- Executor 承载（总计划 `EXEC-07`）：`ProcessExitMonitor` 以单个 blocking
+  worker 安装 SIGCHLD 自管道唤醒，按注册 PID 逐个核验身份后 `waitpid(WNOHANG)`
+  回收并投递 `ExitEvent`；注册/注销命令与事件均走有界 `MpscChannel`，事件容量
+  满时 worker 有界重试并经 comm 统计可见。宽限升级经 `submit_delayed` 一次性
+  任务承载（`GraceEscalation`，arm/disarm 显式消费 future）。
 
 ------------------------------------------------------------------------
 
@@ -610,14 +648,23 @@ yori tensorboard <job-id>          # 指标观察：以提交用户身份拉起 
 落盘规则：
 
 -   文件 owner 为提交用户、group 为 `yori`、mode `0640`；owner 可绕过 IPC 直接
-    `tail -f` 自己的日志文件。
+    `tail -f` 自己的日志文件。M2 落地为 `LogSink`（`include/yori/observe/log_sink.hpp`）：
+    打开即对两个流应用 `0640` 与属主（root 环境经 `fchmod`/`fchown`；非 root 测试
+    环境显式降级为仅权限位），单文件大小上限（默认 256 MiB，配置范围 4 KiB ~
+    1 GiB）与轮转保留数（默认 1 个历史文件，上限 4）。
 -   每个流有单文件大小上限（默认 256 MiB）与轮转保留数（默认 1 个历史文件，
     即 `stdout.log` + `stdout.log.1`）；磁盘占用存在全局预算。轮转对跟随会话
     透明：分发基于“逻辑 offset（已写入字节序号）”，轮转后按新文件内 offset
-    继续投递，不重发、不丢失标记。
+    继续投递，不重发、不丢失标记。M2 实现中逻辑 offset 只计接受字节、跨轮转
+    单调递增，单个超过上限的块自动跨轮转分块写入；既有文件原位追加
+    （`O_APPEND|O_NOFOLLOW`），daemon 重启后 offset 从文件大小继续（DEC-008）。
 -   训练进程大量写出导致落盘跟不上时，管道读端必须持续排空：优先保证训练
     不因管道写阻塞而停顿，超出保留策略的日志内容允许丢弃，并在流中插入
-    drop 标记帧（含丢弃字节数）。
+    drop 标记帧（含丢弃字节数）。M2 的承载为 `LogPump`（单个 blocking
+    worker，`poll` 排空多 Job 管道并同步写 `LogSink`）；写失败丢弃数据并
+    在下次成功写入前插入 `[yori] dropped N bytes` 标记，标记不计入逻辑
+    offset。停止日志泵只关闭读端，训练进程的后续写获得 `EPIPE`（SIGPIPE 已
+    忽略，DEC-008），不终止进程。
 
 ### 11.3 `yori logs`：快照与跟随
 
@@ -1076,12 +1123,22 @@ Yori 是系统级多用户服务，因此安全设计属于核心功能，而不
 2.  用户身份必须通过 `SO_PEERCRED` 等内核机制获得。
 3.  Job owner 不得由客户端任意指定。
 4.  `exec` 前正确执行 supplementary groups、`setgid`、`setuid`
-    等身份切换。
-5.  严格定义环境变量继承策略。
+    等身份切换。M2 细化：组列表在 fork 前经 `IdentityResolver` 解析，子进程内
+    仅执行 `setgroups -> setgid -> setuid`（目标即当前有效身份时幂等跳过）；
+    argv/envp 同样在 fork 前构造，子进程不分配内存。
+5.  严格定义环境变量继承策略。M2 冻结为 DEC-006 三层合并：身份块（HOME/USER/
+    LOGNAME/SHELL，值来自提交用户 passwd 记录）、daemon 白名单（PATH、LANG、
+    TERM、TZ 与 `LC_*` 前缀）、GPU 映射块（`CUDA_VISIBLE_DEVICES`、
+    `CUDA_DEVICE_ORDER=PCI_BUS_ID`）；用户变量最后应用，但保留键（身份块、
+    CUDA 两键、`LD_PRELOAD`、`LD_LIBRARY_PATH`）出现即拒绝整个启动计划。
 6.  限制 `/run/yori/yori.sock` 权限。
 7.  Job 查询、日志读取、取消等操作执行 owner/admin 授权。
-8.  防止日志路径、cwd、runtime 目录和持久化目录上的符号链接攻击。
-9.  特权 daemon 的 IPC parser 和 launch path 应尽可能简单。
+8.  防止日志路径、cwd、runtime 目录和持久化目录上的符号链接攻击。M2 已对
+    日志文件使用 `O_NOFOLLOW|O_APPEND` 打开；父目录链的属主校验在 M4/M7
+    落地。
+9.  特权 daemon 的 IPC parser 和 launch path 应尽可能简单。M2 的 launch
+    path 已收敛为：有界 `LaunchPlan` 复验 -> fork -> 仅 syscall 封装的子进程
+    路径 -> exec 报告管道确认；exec 未确认（10 秒超时）即击杀并回收。
 10. 外部 GPU 进程只影响资源状态，不主动终止或接管。
 11. 长期考虑将 privileged process launcher 从主 daemon 中拆分。
 

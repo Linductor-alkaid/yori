@@ -1,8 +1,8 @@
 # Yori 安全威胁模型（草案）
 
-> 状态：Draft（骨架版；完整 STRIDE 分析随 M2/M5/M6 工作项完成，完成后升级为
+> 状态：Draft（骨架版；完整 STRIDE 分析随 M5/M6 工作项完成，完成后升级为
 > Active）
-> 日期：2026-09-04
+> 日期：2026-09-08
 > 负责人：Linductor-alkaid
 > 依据：[设计文档](../design/yori-project-design.md)第 5、11.5、17 节、
 > [AGENTS.md](../../AGENTS.md) 安全条款、[DEC-004](../decisions/DEC-004-privileged-daemon-demotion.md)
@@ -62,6 +62,10 @@ yori CLI（用户会话） --> tensorboard 子进程（用户身份，默认 127
 | 13 | GPU snapshot 与 StateStore mutation 有固定条目上限；Job/lease 以 revision 原子提交 | 内存耗尽、状态篡改、部分写导致错误资源归属 | M1/M4 | Provider 边界、revision 冲突、容量与事务回滚负向测试 |
 | 14 | 全局队列只保存稳定排序键，默认 1024、硬上限 4096；所有拒绝返回结构化结果与事件 | 批量提交耗尽内存、静默丢弃或用户私有队列绕过全局顺序 | M1/M5 | 无效配置、容量、重复 Job、多用户稳定排序和恢复回滚负向测试 |
 | 15 | 调度只选未 lease 的 `FREE` GPU，并以单个 StateStore mutation 提交 `STARTING + lease`；失败恢复队首 | 重复分配 GPU、绕过 FIFO、写失败后丢失 Job | M1/M4 | 队首阻塞、确定性 GPU 选择、lease 冲突、写失败回滚和队列/存储分歧测试 |
+| 16 | launch path 的 argv/envp/组列表全部在 fork 前构造；子进程仅执行 `setpgid`/信号处置/`dup2`/`close_range`/`setgroups`/`setgid`/`setuid`/`chdir`/`execve` 等 syscall 封装 | fork-exec 窗口内的非 async-signal-safe 调用（NSS/malloc 锁）导致挂起或死锁 | M2 | 设计评审 + 守护进程引擎测试（M2 已落地，见 `M2-02`） |
+| 17 | 子进程继承描述符经 `close_range` 收敛；exec 报告管道以 `FD_CLOEXEC` 在成功 exec 时自动关闭 | daemon 内部 fd（socket、DB、日志）泄漏进训练进程 | M2 | 引擎审查；`M2-02` 集成路径无 fd 泄漏断言 |
+| 18 | 环境保留键（身份块、`CUDA_VISIBLE_DEVICES`、`CUDA_DEVICE_ORDER`、`LD_PRELOAD`、`LD_LIBRARY_PATH`）在 JobSpec.env 中出现即拒绝启动计划 | 用户覆盖 GPU 隔离或以动态链接注入攻击 root daemon 路径 | M2 | `M2-01` 保留键负向测试 |
+| 19 | exec 前 `SIGPIPE` 置为忽略（DEC-008）；日志文件 `O_APPEND|O_NOFOLLOW` 打开，`0640` 与属主显式设置 | daemon 退出误杀训练（可用性）；符号链接替换日志文件（路径逃逸） | M2 | 管道断裂存活测试；`M2-05` 权限与打开方式断言 |
 
 ## 5. 初步威胁清单（待细化）
 
@@ -81,8 +85,12 @@ yori CLI（用户会话） --> tensorboard 子进程（用户身份，默认 127
 
 ## 6. 待完成项
 
-- [ ] M2 实施前：launch path 与降权序列的完整威胁细化（含 env 白名单、cwd 与
-  日志路径处理）。
+- [x] M2 实施前：launch path 与降权序列的威胁细化 —— 已随 M2 落地为基线条目
+  16-19（fork 前构造、fd 收敛、保留键、SIGPIPE/日志打开方式）；cwd 父目录链
+  属主校验仍留给 M4/M7。
 - [ ] M5 实施前：IPC 协议、鉴权与 parser 的威胁细化（含 fuzz 范围声明）。
 - [ ] M6 实施前：观察面（流式跟随、背压、脱敏、tensorboard 网络边界）细化。
 - [ ] M7 发布前：全模型复查、残留风险清单定稿，本文件升级为 Active。
+- [ ] root 环境补跑：`m2.security.process-demotion`（DEC-004 降权身份断言，
+  非 root 环境显式 skip；补跑条件：root 下设置 `YORI_DEMOTION_TEST_UID`/
+  `YORI_DEMOTION_TEST_GID` 后运行 `ctest -L multi-user`）。

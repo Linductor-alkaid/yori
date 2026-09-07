@@ -1,8 +1,8 @@
 # Yori 实施总计划
 
 > 状态：Active
-> 版本：1.1
-> 更新日期：2026-09-04
+> 版本：1.2
+> 更新日期：2026-09-08
 > 负责人：Linductor-alkaid
 > 设计依据：[Yori 项目设计文档](../design/yori-project-design.md)（v0.5）
 > 治理依据：[AGENTS.md](../../AGENTS.md)、[项目管理与工程规范](../project/project-standards.md)
@@ -22,10 +22,15 @@
   已落地，PR [#2](https://github.com/Linductor-alkaid/yori/pull/2) 的最终 CI
   [全绿](https://github.com/Linductor-alkaid/yori/actions/runs/33851194487)；M1-06、
   M1-07 尚未实现，本次收尾后不继续推进。
-- 当前里程碑：M1（核心域契约与进程内调度闭环，`In Progress`，计划见
-  [M1 里程碑文档](m1-core-contracts.md)）。
+- M2（进程守护与启动适配）已完成：`LaunchProfile`/`LaunchAdapter`（DEC-006 环境
+  白名单）、`ProcessSupervisor` Linux 引擎与取消升级（DEC-007 宽限默认 10s）、
+  `LogSink` 落盘/轮转/drop 标记与 Executor 承载（`ProcessExitMonitor`/`LogPump`/
+  `GraceEscalation`）全部落地；PR [#3](https://github.com/Linductor-alkaid/yori/pull/3)
+  最终 CI [全绿](https://github.com/Linductor-alkaid/yori/actions/runs/34151784269)
+  （证据见 [M2 验证记录](m2-process-supervision.md)）。
+- 当前里程碑：无（M2 已完成；M3 NVML 集成与 M4 持久化恢复可并行启动，待排期）。
 - MVP 端到端验收以设计文档第 19 节判据为准，由 M7 执行并记录证据（见第 10 节）。
-- 里程碑文档在各自启动时创建（工程规范第 2 节）；当前实体文件：M0、M1。
+- 里程碑文档在各自启动时创建（工程规范第 2 节）；当前实体文件：M0、M1、M2。
 
 ## 2. 交付边界（SCOPE）
 
@@ -101,7 +106,7 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | --- | --- | --- | --- | --- | --- |
 | M0 | 工程骨架与基线 | 无 | CMake/CI/测试标签/规范工具/文档框架、Executor 锁定校验 | 无（内部基线） | Completed |
 | M1 | 核心域契约与进程内调度闭环 | M0 | JobSpec、状态机、全局队列、FIFO 调度、GPU lease 记账；内存 StateStore 与伪 GpuProvider 下的进程内可测闭环 | 无 | In Progress |
-| M2 | 进程守护与启动适配 | M1 | ProcessSupervisor（spawn、进程组、取消、退出回收）、LaunchProfile、`exec` 前降权、日志捕获与落盘 | 无 | Planned |
+| M2 | 进程守护与启动适配 | M1 | ProcessSupervisor（spawn、进程组、取消、退出回收）、LaunchProfile、`exec` 前降权、日志捕获与落盘 | 无 | Completed |
 | M3 | NVML 真实 GPU 集成 | M2 | `GpuProvider` NVML 适配：发现、UUID 身份、遥测、外部占用检测（`EXTERNAL_BUSY`） | 无 | Planned |
 | M4 | 持久化与恢复 | M2 | SQLite StateStore、daemon 重启恢复、PID reuse 核验、`LOST` 语义 | 无 | Planned |
 | M5 | IPC 与 CLI | M3、M4 | UDS 传输、`SO_PEERCRED` 鉴权、请求/响应协议与 owner/admin 授权、`submit`/`ps`/`queue`/`gpu`/`cancel`/`logs` 快照、IPC fuzz 起步 | 无 | Planned |
@@ -111,7 +116,8 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 - M3 与 M4 在 M2 完成后可并行推进。
 - 里程碑文件命名 `m<N>-<scope>.md`，在该里程碑启动时创建；当前实体文件：
   [M0 工程骨架与基线](m0-engineering-baseline.md)、
-  [M1 核心域契约与进程内调度闭环](m1-core-contracts.md)。
+  [M1 核心域契约与进程内调度闭环](m1-core-contracts.md)、
+  [M2 进程守护与启动适配](m2-process-supervision.md)。
 
 ## 6. 暂定默认值与未决问题
 
@@ -121,9 +127,9 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | 项目 | 暂定默认值 / 未决问题 | 负责人 | 最迟冻结 | 冻结动作 |
 | --- | --- | --- | --- | --- |
 | 调度策略 | 已冻结：严格全局 FIFO，无优先级、配额或 backfill（[DEC-005](../decisions/DEC-005-global-fifo-scheduling.md)） | Linductor-alkaid | M1 | 已于 2026-09-04 冻结；变更需新决策记录替代 DEC-005 |
-| 取消 grace period | `SIGTERM` 后等待时长未定（暂定 10s 量级） | Linductor-alkaid | M2 | 写入设计与配置默认值 |
-| 环境变量白名单初版 | 继承集合未定 | Linductor-alkaid | M2 | 决策记录 + 设计 §17 条 5 细化 |
-| daemon 重启后的日志续捕 | 未决：训练进程 stdout/stderr 管道随 daemon 退出断裂，重启后如何续捕（信号语义、追加写回、`LOST` 边界）需设计补充 | Linductor-alkaid | M2（守护语义）、M6（观察面） | 设计补充 + 决策记录 |
+| 取消 grace period | 已冻结：默认 10 秒、下限 100ms、上限 10 分钟；宽限为软期限，升级前退出则空操作（[DEC-007](../decisions/DEC-007-cancel-grace-period.md)） | Linductor-alkaid | M2 | 已于 2026-09-08 冻结；变更需新决策记录替代 DEC-007 |
+| 环境变量白名单初版 | 已冻结：身份块 + daemon 白名单 + GPU 映射块三层合并，保留键出现即拒绝（[DEC-006](../decisions/DEC-006-launch-environment-policy.md)） | Linductor-alkaid | M2 | 已于 2026-09-08 冻结；扩展白名单属配置级变更 |
+| daemon 重启后的日志续捕 | 守护语义已冻结：子进程 exec 前 `SIGPIPE=SIG_IGN`，重启窗口输出丢失、文件原位续写（[DEC-008](../decisions/DEC-008-daemon-restart-log-continuity.md)）；观察面 offset/续捕细节最迟 M6 复核 | Linductor-alkaid | M2（已冻结）、M6（复核） | 设计 §10.2/§11.2 已同步 |
 | 持久化实现 | SQLite 为唯一 `StateStore` 实现，内存实现仅测试用（设计 §12） | Linductor-alkaid | M4 | 决策记录 |
 | IPC 端点 | `/run/yori/yori.sock`、`root:yori 0660`、`yori` 系统组（设计 §5） | Linductor-alkaid | M5 | 决策记录或设计确认 |
 | 日志与跟随上限默认值 | 单文件 256 MiB、保留 1 个历史文件、每 Job 8 / 全局 64 跟随会话、全局磁盘预算（设计 §11.2/11.4） | Linductor-alkaid | M6 | 配置定稿 + 测试 |
@@ -189,13 +195,17 @@ CI 无法覆盖的项按工程规范第 4 节保持未勾选并记录原因与�
 - 设计：[Yori 项目设计文档](../design/yori-project-design.md)
 - 规范：[项目管理与工程规范](../project/project-standards.md)、[AGENTS.md](../../AGENTS.md)
 - 计划：[M0 工程骨架与基线](m0-engineering-baseline.md)、
-  [M1 核心域契约与进程内调度闭环](m1-core-contracts.md)
-  （M2 起随里程碑创建）
+  [M1 核心域契约与进程内调度闭环](m1-core-contracts.md)、
+  [M2 进程守护与启动适配](m2-process-supervision.md)
+  （M3 起随里程碑创建）
 - 决策：[DEC-001 Executor 依赖引入与锁定](../decisions/DEC-001-executor-pinning.md)、
   [DEC-002 MVP 纳入训练观察面](../decisions/DEC-002-mvp-observability.md)、
   [DEC-003 TensorBoard 由 CLI 拉起](../decisions/DEC-003-tensorboard-cli-hosting.md)、
   [DEC-004 root daemon 与 exec 前降权](../decisions/DEC-004-privileged-daemon-demotion.md)、
-  [DEC-005 MVP 全局 FIFO 调度策略](../decisions/DEC-005-global-fifo-scheduling.md)
+  [DEC-005 MVP 全局 FIFO 调度策略](../decisions/DEC-005-global-fifo-scheduling.md)、
+  [DEC-006 训练进程环境变量继承白名单](../decisions/DEC-006-launch-environment-policy.md)、
+  [DEC-007 取消宽限期与升级语义](../decisions/DEC-007-cancel-grace-period.md)、
+  [DEC-008 daemon 重启日志管道断裂语义](../decisions/DEC-008-daemon-restart-log-continuity.md)
 - 安全：[威胁模型（草案）](../security/threat-model.md)
 - 供应链：[依赖管理与供应链策略](../supply-chain/dependency-policy.md)
 - Executor 反馈：[能力缺口反馈台账](../executor_feedback/ledger.md)

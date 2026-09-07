@@ -8,6 +8,9 @@ configure_file(
 add_library(yori_core
   gpu/gpu_provider.cpp
   job/job.cpp
+  launch/launch_adapter.cpp
+  observe/log_sink.cpp
+  process/process_supervisor.cpp
   queue/job_queue.cpp
   scheduler/scheduler.cpp
   store/state_store.cpp
@@ -27,6 +30,9 @@ yori_apply_warnings(yori_core)
 # 工作前不创建 Executor，届时必须由 CLI 主生命周期建立独立 owner。
 add_library(yori_runtime STATIC
   runtime/executor_runtime.cpp
+  runtime/grace_escalation.cpp
+  runtime/log_pump.cpp
+  runtime/process_exit_monitor.cpp
   runtime/scheduler_task_runner.cpp)
 add_library(yori::runtime ALIAS yori_runtime)
 target_include_directories(yori_runtime
