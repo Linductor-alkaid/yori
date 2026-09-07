@@ -8,6 +8,7 @@ configure_file(
 add_library(yori_core
   gpu/gpu_provider.cpp
   job/job.cpp
+  launch/launch_adapter.cpp
   queue/job_queue.cpp
   scheduler/scheduler.cpp
   store/state_store.cpp

@@ -74,6 +74,13 @@ yori_apply_warnings(unit_scheduler_task_runner_test)
 add_test(NAME m1.unit.scheduler-task-runner COMMAND unit_scheduler_task_runner_test)
 set_tests_properties(m1.unit.scheduler-task-runner PROPERTIES LABELS "unit" TIMEOUT 60)
 
+# ---- unit：LaunchProfile/LaunchAdapter 契约（M2-01）-----------------------
+add_executable(unit_launch_adapter_test unit_launch_adapter_test.cpp)
+target_link_libraries(unit_launch_adapter_test PRIVATE yori::yori_core)
+yori_apply_warnings(unit_launch_adapter_test)
+add_test(NAME m2.unit.launch-adapter COMMAND unit_launch_adapter_test)
+set_tests_properties(m2.unit.launch-adapter PROPERTIES LABELS "unit" TIMEOUT 60)
+
 # ---- integration：CLI/daemon 冒烟 ----------------------------------------
 add_test(NAME example.integration.yori-version COMMAND $<TARGET_FILE:yori> --version)
 set_tests_properties(example.integration.yori-version PROPERTIES
