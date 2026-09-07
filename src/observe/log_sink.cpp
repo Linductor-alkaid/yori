@@ -1,5 +1,3 @@
-#include <yori/observe/log_sink.hpp>
-
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -10,6 +8,7 @@
 #include <cstdio>
 #include <string_view>
 #include <utility>
+#include <yori/observe/log_sink.hpp>
 
 namespace yori::observe {
 namespace {
@@ -295,8 +294,7 @@ LogWriteResult LogSink::append(LogStreamKind stream_kind, std::string_view data)
   }
 
   if (state.pending_drop > 0) {
-    const std::string marker =
-        "[yori] dropped " + std::to_string(state.pending_drop) + " bytes\n";
+    const std::string marker = "[yori] dropped " + std::to_string(state.pending_drop) + " bytes\n";
     std::string marker_error;
     if (impl_->io->write_all(state.fd, marker.data(), marker.size(), marker_error)) {
       state.file_bytes += marker.size();

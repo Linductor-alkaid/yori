@@ -1,13 +1,12 @@
-#include <yori/launch/launch_adapter.hpp>
-
-#include <pwd.h>
 #include <grp.h>
+#include <pwd.h>
 
 #include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstring>
 #include <map>
+#include <yori/launch/launch_adapter.hpp>
 
 namespace yori::launch {
 namespace {
@@ -25,8 +24,8 @@ bool is_valid_environment_name(std::string_view name) noexcept {
     return false;
   }
   for (const char c : name) {
-    const bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
-                    c == '_';
+    const bool ok =
+        (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
     if (!ok) {
       return false;
     }
@@ -106,12 +105,12 @@ IdentityValidationResult validate(const IdentityInfo& identity) noexcept {
   if (identity.username.size() > IdentityInfoLimits::kMaxUsernameBytes) {
     return {IdentityErrorCode::kUsernameTooLong};
   }
-  if (!identity.home.empty() && (contains_nul(identity.home) ||
-                                 identity.home.size() > IdentityInfoLimits::kMaxPathBytes)) {
+  if (!identity.home.empty() &&
+      (contains_nul(identity.home) || identity.home.size() > IdentityInfoLimits::kMaxPathBytes)) {
     return {IdentityErrorCode::kInvalidHome};
   }
-  if (!identity.shell.empty() && (contains_nul(identity.shell) ||
-                                  identity.shell.size() > IdentityInfoLimits::kMaxPathBytes)) {
+  if (!identity.shell.empty() &&
+      (contains_nul(identity.shell) || identity.shell.size() > IdentityInfoLimits::kMaxPathBytes)) {
     return {IdentityErrorCode::kInvalidShell};
   }
   if (identity.supplementary_groups.size() > IdentityInfoLimits::kMaxSupplementaryGroups) {
@@ -176,12 +175,14 @@ IdentityResolveResult PosixIdentityResolver::resolve(std::uint32_t uid) {
   const int found = ::getgrouplist(identity.username.c_str(), static_cast<gid_t>(identity.gid),
                                    groups.data(), &count);
   if (found < 0) {
-    return {IdentityResolveErrorCode::kBackendUnavailable, {},
+    return {IdentityResolveErrorCode::kBackendUnavailable,
+            {},
             "user belongs to more groups than the supported limit"};
   }
   identity.supplementary_groups.reserve(static_cast<std::size_t>(found));
   for (int i = 0; i < found; ++i) {
-    identity.supplementary_groups.push_back(static_cast<std::uint32_t>(groups[static_cast<std::size_t>(i)]));
+    identity.supplementary_groups.push_back(
+        static_cast<std::uint32_t>(groups[static_cast<std::size_t>(i)]));
   }
 
   if (const IdentityValidationResult check = validate(identity); !check.ok()) {
@@ -206,8 +207,7 @@ LaunchPlanValidationResult validate(const LaunchPlan& plan) noexcept {
     if (argument.size() > LaunchPlanLimits::kMaxSingleArgumentBytes) {
       return {LaunchPlanErrorCode::kArgumentTooLong, i, std::nullopt};
     }
-    if (!add_within_limit(argument.size(), argument_bytes,
-                          LaunchPlanLimits::kMaxArgumentBytes)) {
+    if (!add_within_limit(argument.size(), argument_bytes, LaunchPlanLimits::kMaxArgumentBytes)) {
       return {LaunchPlanErrorCode::kArgumentsTooLarge, i, std::nullopt};
     }
   }
@@ -307,14 +307,19 @@ bool EnvironmentPolicy::accepts(const std::string& name) const {
 
 bool is_reserved_environment_key(const std::string& name) {
   static constexpr std::array<std::string_view, 8> kReserved{
-      "CUDA_DEVICE_ORDER", "CUDA_VISIBLE_DEVICES", "HOME", "LD_LIBRARY_PATH", "LD_PRELOAD",
-      "LOGNAME",            "SHELL",                "USER",
+      "CUDA_DEVICE_ORDER",
+      "CUDA_VISIBLE_DEVICES",
+      "HOME",
+      "LD_LIBRARY_PATH",
+      "LD_PRELOAD",
+      "LOGNAME",
+      "SHELL",
+      "USER",
   };
   return std::find(kReserved.begin(), kReserved.end(), name) != kReserved.end();
 }
 
-DefaultLaunchAdapter::DefaultLaunchAdapter(EnvironmentPolicy policy)
-    : policy_(std::move(policy)) {}
+DefaultLaunchAdapter::DefaultLaunchAdapter(EnvironmentPolicy policy) : policy_(std::move(policy)) {}
 
 void DefaultLaunchAdapter::set_daemon_environment(std::vector<EnvironmentEntry> environment) {
   daemon_environment_ = std::move(environment);
@@ -345,7 +350,9 @@ LaunchPlanResult DefaultLaunchAdapter::prepare(const job::JobSpec& spec,
   for (const auto& [name, value] : spec.env) {
     static_cast<void>(value);
     if (is_reserved_environment_key(name)) {
-      return {LaunchPrepareErrorCode::kReservedEnvironmentKey, {}, name,
+      return {LaunchPrepareErrorCode::kReservedEnvironmentKey,
+              {},
+              name,
               "job environment may not override reserved key"};
     }
   }

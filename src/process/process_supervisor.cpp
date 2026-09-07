@@ -1,5 +1,3 @@
-#include <yori/process/process_supervisor.hpp>
-
 #include <fcntl.h>
 #include <grp.h>
 #include <poll.h>
@@ -19,6 +17,7 @@
 #include <cstring>
 #include <utility>
 #include <vector>
+#include <yori/process/process_supervisor.hpp>
 
 namespace yori::process {
 namespace {
@@ -36,8 +35,8 @@ enum class ChildStage : unsigned char {
 };
 
 [[noreturn]] void write_child_report(ChildStage stage, int error_number) noexcept {
-  const std::array<unsigned char, 2> report{
-      static_cast<unsigned char>(stage), static_cast<unsigned char>(error_number & 0xFF)};
+  const std::array<unsigned char, 2> report{static_cast<unsigned char>(stage),
+                                            static_cast<unsigned char>(error_number & 0xFF)};
   std::size_t written = 0;
   while (written < report.size()) {
     const ssize_t n = ::write(kExecReportFd, report.data() + written, report.size() - written);
@@ -90,9 +89,8 @@ bool join_path(const char* directory, std::size_t directory_size, const char* na
     const char* end = std::strchr(cursor, ':');
     const std::size_t length =
         end != nullptr ? static_cast<std::size_t>(end - cursor) : std::strlen(cursor);
-    if (length > 0 &&
-        join_path(cursor, length, plan.argv.front().c_str(), plan.argv.front().size(),
-                  candidate.data(), candidate.size())) {
+    if (length > 0 && join_path(cursor, length, plan.argv.front().c_str(), plan.argv.front().size(),
+                                candidate.data(), candidate.size())) {
       ::access(candidate.data(), X_OK);
       ::execve(candidate.data(), argv, envp);
       if (errno != EACCES && errno != ENOENT && errno != ENOTDIR && errno != ELOOP &&
@@ -138,8 +136,8 @@ bool join_path(const char* directory, std::size_t directory_size, const char* na
   }
 
   // 关闭 0-3 之外继承的全部描述符（fd 3 保留至 exec 以报告失败）。
-  static_cast<void>(::syscall(SYS_close_range, static_cast<unsigned int>(kExecReportFd) + 1,
-                              ~0U, 0U));
+  static_cast<void>(
+      ::syscall(SYS_close_range, static_cast<unsigned int>(kExecReportFd) + 1, ~0U, 0U));
 
   // DEC-004/DEC-006：setgroups -> setgid -> setuid，全部在 fork 后、exec 前完成；
   // 目标即当前有效身份时为幂等空操作（非 root 环境自身份 spawn）。组列表为空时
@@ -272,8 +270,8 @@ std::optional<std::uint64_t> read_process_start_ticks(std::int64_t pid) noexcept
     return std::nullopt;
   }
   char path[48];
-  const int written = std::snprintf(path, sizeof(path), "/proc/%lld/stat",
-                                    static_cast<long long>(pid));
+  const int written =
+      std::snprintf(path, sizeof(path), "/proc/%lld/stat", static_cast<long long>(pid));
   if (written <= 0 || static_cast<std::size_t>(written) >= sizeof(path)) {
     return std::nullopt;
   }
@@ -640,8 +638,7 @@ ExitPollResult ProcessSupervisor::poll_exit() noexcept {
       break;
   }
   int raw_status = 0;
-  const pid_t reaped =
-      ::waitpid(static_cast<pid_t>(impl_->identity.pid), &raw_status, WNOHANG);
+  const pid_t reaped = ::waitpid(static_cast<pid_t>(impl_->identity.pid), &raw_status, WNOHANG);
   if (reaped == 0) {
     result.outcome = ExitPollOutcome::kStillRunning;
     return result;
