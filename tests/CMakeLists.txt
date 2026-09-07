@@ -81,6 +81,29 @@ yori_apply_warnings(unit_launch_adapter_test)
 add_test(NAME m2.unit.launch-adapter COMMAND unit_launch_adapter_test)
 set_tests_properties(m2.unit.launch-adapter PROPERTIES LABELS "unit" TIMEOUT 60)
 
+# ---- unit：进程引擎与守护状态机（M2-02/M2-03）-----------------------------
+add_executable(unit_process_supervisor_test unit_process_supervisor_test.cpp)
+target_link_libraries(unit_process_supervisor_test PRIVATE yori::yori_core)
+yori_apply_warnings(unit_process_supervisor_test)
+add_test(NAME m2.unit.process-supervisor COMMAND unit_process_supervisor_test)
+set_tests_properties(m2.unit.process-supervisor PROPERTIES LABELS "unit" TIMEOUT 120)
+
+# ---- unit：退出监视的 Executor 承载（M2-04）-------------------------------
+add_executable(unit_exit_monitor_test unit_exit_monitor_test.cpp)
+target_link_libraries(unit_exit_monitor_test
+  PRIVATE yori::yori_core yori::runtime executor::executor)
+yori_apply_warnings(unit_exit_monitor_test)
+add_test(NAME m2.unit.exit-monitor COMMAND unit_exit_monitor_test)
+set_tests_properties(m2.unit.exit-monitor PROPERTIES LABELS "unit" TIMEOUT 120)
+
+# ---- security;multi-user：root 降权身份断言（DEC-004 M2 验证）-------------
+add_executable(security_process_demotion_test security_process_demotion_test.cpp)
+target_link_libraries(security_process_demotion_test PRIVATE yori::yori_core)
+yori_apply_warnings(security_process_demotion_test)
+add_test(NAME m2.security.process-demotion COMMAND security_process_demotion_test)
+set_tests_properties(m2.security.process-demotion PROPERTIES
+  LABELS "security;multi-user" SKIP_RETURN_CODE 77 TIMEOUT 120)
+
 # ---- integration：CLI/daemon 冒烟 ----------------------------------------
 add_test(NAME example.integration.yori-version COMMAND $<TARGET_FILE:yori> --version)
 set_tests_properties(example.integration.yori-version PROPERTIES
