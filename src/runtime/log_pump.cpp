@@ -16,7 +16,7 @@
 namespace yori::runtime {
 namespace {
 
-constexpr std::size_t kMaxChunkBytes = 64 * 1024;
+constexpr std::size_t kMaxChunkBytes = std::size_t{64} * 1024;
 
 struct AttachCommand final {
   LogPumpJobInput input;
@@ -29,7 +29,7 @@ struct DetachCommand final {
 };
 
 struct Command final {
-  enum class Kind { kAttach, kDetach } kind{Kind::kAttach};
+  enum class Kind : std::uint8_t { kAttach, kDetach } kind{Kind::kAttach};
   AttachCommand attach_command;
   DetachCommand detach_command;
 };
@@ -290,19 +290,19 @@ class PumpWorker final : public executor::IBlockingIoWorker {
 class LogPump::Impl final {
  public:
   Impl(executor::Executor& executor_ref, std::size_t done_capacity)
-      : executor(executor_ref),
-        commands(executor::comm::ChannelOptions{256, executor::comm::DropPolicy::RejectNewest, true,
+      : commands(executor::comm::ChannelOptions{256, executor::comm::DropPolicy::RejectNewest, true,
                                                 "log-pump-commands"}),
         done_events(executor::comm::ChannelOptions{
-            done_capacity, executor::comm::DropPolicy::RejectNewest, true, "log-pump-done"}) {}
+            done_capacity, executor::comm::DropPolicy::RejectNewest, true, "log-pump-done"}),
+        executor(executor_ref) {}
 
-  executor::Executor& executor;
   executor::comm::MpscChannel<Command> commands;
   executor::comm::MpscChannel<LogPumpDone> done_events;
-  std::atomic<bool> worker_stopping{false};
+  executor::Executor& executor;
+  executor::WorkerHandle handle;
   int wake_read{-1};
   int wake_write{-1};
-  executor::WorkerHandle handle;
+  std::atomic<bool> worker_stopping{false};
   bool started{false};
   bool stop_requested{false};
 };

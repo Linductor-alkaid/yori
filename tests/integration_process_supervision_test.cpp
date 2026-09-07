@@ -171,9 +171,10 @@ int main() {
       YORI_CHECK(event.status.signal_number == SIGKILL);
 
       const auto consumed = escalation.try_consume();
+      const auto escalation_result = consumed.escalation.value_or(process::EscalationResult{});
       YORI_CHECK(consumed.consumed());
       YORI_CHECK(consumed.escalation.has_value());
-      YORI_CHECK(consumed.escalation->killed());
+      YORI_CHECK(escalation_result.killed());
 
       LogPumpDone done;
       YORI_CHECK(pump.receive_done_for(done, 5s));

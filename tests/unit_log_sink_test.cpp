@@ -156,23 +156,26 @@ int main() {
     YORI_CHECK(sink.open(small_config(rotate_dir, 4096, 1), options, error) ==
                LogSinkErrorCode::kNone);
     // 一个 10 KiB 的块必须跨三次轮转分块写入（单块分块上限 64 KiB）。
-    const std::string blob(10 * 1024, 'x');
+    constexpr std::size_t kBlobBytes = std::size_t{10} * 1024;
+    constexpr std::size_t kFileBytes = 4096;
+    const std::string blob(kBlobBytes, 'x');
     const auto result = sink.append(LogStreamKind::kStdout, blob);
     YORI_CHECK(result.ok());
-    YORI_CHECK(result.bytes_accepted == 10 * 1024);
+    YORI_CHECK(result.bytes_accepted == kBlobBytes);
     YORI_CHECK(result.rotated);
-    YORI_CHECK(sink.logical_offset(LogStreamKind::kStdout) == 10 * 1024);
-    YORI_CHECK(read_file(rotate_dir + "/stdout.log").size() == 10 * 1024 - 2 * 4096);
+    YORI_CHECK(sink.logical_offset(LogStreamKind::kStdout) == kBlobBytes);
+    YORI_CHECK(read_file(rotate_dir + "/stdout.log").size() == kBlobBytes - 2 * kFileBytes);
     YORI_CHECK(read_file(rotate_dir + "/stdout.log.1").size() == 4096);
     YORI_CHECK(sink.statistics().rotations >= 2);
 
     // 再写满当前文件触发一次轮转：.1 被覆盖（前 2048 字节为 x，补满部分为 y）。
-    const auto again = sink.append(LogStreamKind::kStdout, std::string(4096, 'y'));
+    const auto again = sink.append(LogStreamKind::kStdout, std::string(kFileBytes, 'y'));
+    constexpr std::size_t kHalfFile = kFileBytes / 2;
     YORI_CHECK(again.ok() && again.rotated);
-    YORI_CHECK(read_file(rotate_dir + "/stdout.log").size() == 2048);
+    YORI_CHECK(read_file(rotate_dir + "/stdout.log").size() == kHalfFile);
     YORI_CHECK(read_file(rotate_dir + "/stdout.log.1") ==
-               std::string(2048, 'x') + std::string(2048, 'y'));
-    YORI_CHECK(sink.logical_offset(LogStreamKind::kStdout) == 10 * 1024 + 4096);
+               std::string(kHalfFile, 'x').append(kHalfFile, 'y'));
+    YORI_CHECK(sink.logical_offset(LogStreamKind::kStdout) == kBlobBytes + kFileBytes);
   }
 
   // ---- rotation_history=0：不保留历史 ----------------------------------------
@@ -183,9 +186,11 @@ int main() {
     std::string error;
     YORI_CHECK(sink.open(small_config(rotate_dir, 4096, 0), options, error) ==
                LogSinkErrorCode::kNone);
-    const auto result = sink.append(LogStreamKind::kStdout, std::string(10 * 1024, 'z'));
-    YORI_CHECK(result.ok() && result.bytes_accepted == 10 * 1024);
-    YORI_CHECK(read_file(rotate_dir + "/stdout.log").size() == 10 * 1024 - 2 * 4096);
+    constexpr std::size_t kBlobBytes = std::size_t{10} * 1024;
+    constexpr std::size_t kFileBytes = 4096;
+    const auto result = sink.append(LogStreamKind::kStdout, std::string(kBlobBytes, 'z'));
+    YORI_CHECK(result.ok() && result.bytes_accepted == kBlobBytes);
+    YORI_CHECK(read_file(rotate_dir + "/stdout.log").size() == kBlobBytes - 2 * kFileBytes);
     YORI_CHECK(file_size_of(rotate_dir + "/stdout.log.1") == ~std::uint64_t{0});
   }
 

@@ -274,8 +274,9 @@ int main() {
     YORI_CHECK(result);
     if (result) {
       const auto ticks = read_process_start_ticks(result.identity.pid);
+      const auto observed_ticks = ticks.value_or(0);
       YORI_CHECK(ticks.has_value());
-      YORI_CHECK(*ticks == result.identity.start_ticks);
+      YORI_CHECK(observed_ticks == result.identity.start_ticks);
       YORI_CHECK(!read_process_start_ticks(-1).has_value());
       YORI_CHECK(!read_process_start_ticks(1 << 30).has_value());
       const auto exit = yori::testing::wait_for_exit(supervisor);

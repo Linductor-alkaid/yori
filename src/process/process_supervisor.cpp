@@ -89,9 +89,10 @@ bool join_path(const char* directory, std::size_t directory_size, const char* na
     const char* end = std::strchr(cursor, ':');
     const std::size_t length =
         end != nullptr ? static_cast<std::size_t>(end - cursor) : std::strlen(cursor);
-    if (length > 0 && join_path(cursor, length, plan.argv.front().c_str(), plan.argv.front().size(),
-                                candidate.data(), candidate.size())) {
-      ::access(candidate.data(), X_OK);
+    if (length > 0 &&
+        join_path(cursor, length, plan.argv.front().c_str(), plan.argv.front().size(),
+                  candidate.data(), candidate.size()) &&
+        ::access(candidate.data(), X_OK) == 0) {
       ::execve(candidate.data(), argv, envp);
       if (errno != EACCES && errno != ENOENT && errno != ENOTDIR && errno != ELOOP &&
           errno != ENAMETOOLONG) {
@@ -493,7 +494,12 @@ SpawnResult ProcessSupervisor::spawn(const launch::LaunchPlan& plan) {
   std::vector<std::string> environment_strings;
   environment_strings.reserve(plan.env.size());
   for (const auto& [name, value] : plan.env) {
-    environment_strings.emplace_back(name + "=" + value);
+    std::string entry;
+    entry.reserve(name.size() + 1 + value.size());
+    entry.append(name);
+    entry.push_back('=');
+    entry.append(value);
+    environment_strings.emplace_back(std::move(entry));
   }
   std::vector<char*> envp;
   envp.reserve(environment_strings.size() + 1);

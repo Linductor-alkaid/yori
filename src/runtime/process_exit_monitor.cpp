@@ -44,7 +44,7 @@ struct UnregisterCommand final {
 };
 
 struct Command final {
-  enum class Kind { kRegister, kUnregister } kind{Kind::kRegister};
+  enum class Kind : std::uint8_t { kRegister, kUnregister } kind{Kind::kRegister};
   RegisterCommand register_command;
   UnregisterCommand unregister_command;
 };
@@ -206,8 +206,8 @@ class ReaperWorker final : public executor::IBlockingIoWorker {
     registry_.erase(pid);
     registered_count_.store(registry_.size(), std::memory_order_relaxed);
     while (!stopping_.load(std::memory_order_relaxed)) {
-      ExitEvent attempt = event;
-      const auto result = events_.send_for(std::move(attempt), std::chrono::seconds{5});
+      const ExitEvent attempt = event;
+      const auto result = events_.send_for(attempt, std::chrono::seconds{5});
       if (result.ok) {
         return;
       }
@@ -230,30 +230,29 @@ class ReaperWorker final : public executor::IBlockingIoWorker {
 class ProcessExitMonitor::Impl final {
  public:
   Impl(executor::Executor& executor_ref, std::size_t event_capacity, std::size_t command_capacity)
-      : executor(executor_ref),
-        commands(executor::comm::ChannelOptions{command_capacity,
+      : commands(executor::comm::ChannelOptions{command_capacity,
                                                 executor::comm::DropPolicy::RejectNewest, true,
                                                 "exit-monitor-commands"}),
-        events(executor::comm::ChannelOptions{event_capacity,
-                                              executor::comm::DropPolicy::RejectNewest, true,
-                                              "exit-monitor-events"}) {}
+        events(executor::comm::ChannelOptions{
+            event_capacity, executor::comm::DropPolicy::RejectNewest, true, "exit-monitor-events"}),
+        executor(executor_ref) {}
 
-  executor::Executor& executor;
   executor::comm::MpscChannel<Command> commands;
   executor::comm::MpscChannel<ExitEvent> events;
+  executor::Executor& executor;
   std::atomic<std::size_t> registered_count{0};
   std::atomic<std::uint64_t> delivery_retries{0};
-  std::atomic<bool> worker_stopping{false};
   // blocking worker 由 Executor 持有；该指针在 start 后、stop 前有效，仅用于
   // 从调用方线程写入自管道唤醒。
   ReaperWorker* worker{nullptr};
+  executor::WorkerHandle handle;
+  struct sigaction previous_sigchld {};
   int wake_read{-1};
   int wake_write{-1};
-  executor::WorkerHandle handle;
+  std::atomic<bool> worker_stopping{false};
   bool started{false};
   bool stop_requested{false};
   bool signal_installed{false};
-  struct sigaction previous_sigchld {};
 };
 
 ProcessExitMonitor::ProcessExitMonitor(executor::Executor& executor, std::size_t event_capacity,
