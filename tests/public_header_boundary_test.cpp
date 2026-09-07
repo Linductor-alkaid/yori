@@ -4,6 +4,7 @@
 #include <yori/ipc/ipc_transport.hpp>
 #include <yori/job/job.hpp>
 #include <yori/launch/launch_adapter.hpp>
+#include <yori/observe/log_sink.hpp>
 #include <yori/observe/observe.hpp>
 #include <yori/process/process_supervisor.hpp>
 #include <yori/queue/job_queue.hpp>

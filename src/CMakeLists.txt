@@ -9,6 +9,7 @@ add_library(yori_core
   gpu/gpu_provider.cpp
   job/job.cpp
   launch/launch_adapter.cpp
+  observe/log_sink.cpp
   process/process_supervisor.cpp
   queue/job_queue.cpp
   scheduler/scheduler.cpp
@@ -30,6 +31,7 @@ yori_apply_warnings(yori_core)
 add_library(yori_runtime STATIC
   runtime/executor_runtime.cpp
   runtime/grace_escalation.cpp
+  runtime/log_pump.cpp
   runtime/process_exit_monitor.cpp
   runtime/scheduler_task_runner.cpp)
 add_library(yori::runtime ALIAS yori_runtime)

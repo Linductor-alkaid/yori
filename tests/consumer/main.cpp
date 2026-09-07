@@ -6,6 +6,9 @@
 #include <utility>
 #include <yori/gpu/gpu_provider.hpp>
 #include <yori/job/job.hpp>
+#include <yori/launch/launch_adapter.hpp>
+#include <yori/observe/log_sink.hpp>
+#include <yori/process/process_supervisor.hpp>
 #include <yori/queue/job_queue.hpp>
 #include <yori/scheduler/scheduler.hpp>
 #include <yori/store/state_store.hpp>
@@ -46,6 +49,44 @@ int main() {
 
   if (std::string(yori::scheduler::to_string(yori::scheduler::ScheduleResultCode::kQueueEmpty)) !=
       "QUEUE_EMPTY") {
+    return 1;
+  }
+
+  // M2：LaunchAdapter 构造可 spawn 的 LaunchPlan；取消策略与日志配置边界可见。
+  yori::job::JobSpec launch_spec;
+  launch_spec.owner_uid = 1000;
+  launch_spec.owner_gid = 1000;
+  launch_spec.argv = {"python", "train.py"};
+  launch_spec.cwd = "/srv/training";
+  launch_spec.env = {{"TRAIN_STEP", "1"}};
+  launch_spec.submit_time = std::chrono::system_clock::time_point{std::chrono::seconds{1}};
+
+  yori::launch::IdentityInfo identity;
+  identity.uid = 1000;
+  identity.gid = 1000;
+  identity.username = "trainer";
+  identity.home = "/home/trainer";
+  identity.shell = "/bin/bash";
+  identity.supplementary_groups = {1000};
+
+  yori::launch::DefaultLaunchAdapter adapter;
+  const auto plan = adapter.prepare(
+      launch_spec, yori::launch::GpuAssignment{yori::gpu::GpuUuid{"GPU-consumer"}, 1, 0},
+      yori::launch::LaunchProfile{}, identity);
+  if (!plan || !yori::launch::validate(plan.plan)) {
+    return 1;
+  }
+
+  const yori::process::CancelPolicy cancel_policy;
+  if (!cancel_policy.valid() ||
+      cancel_policy.grace_period != yori::process::CancelPolicyLimits::kDefaultGracePeriod) {
+    return 1;
+  }
+
+  yori::observe::LogSinkConfig sink_config;
+  sink_config.directory = "/var/lib/yori/jobs/1";
+  if (!sink_config.valid() ||
+      sink_config.max_file_bytes != yori::observe::LogSinkLimits::kDefaultFileBytes) {
     return 1;
   }
 

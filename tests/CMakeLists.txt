@@ -104,6 +104,21 @@ add_test(NAME m2.security.process-demotion COMMAND security_process_demotion_tes
 set_tests_properties(m2.security.process-demotion PROPERTIES
   LABELS "security;multi-user" SKIP_RETURN_CODE 77 TIMEOUT 120)
 
+# ---- unit：有界日志落盘与轮转（M2-05）-------------------------------------
+add_executable(unit_log_sink_test unit_log_sink_test.cpp)
+target_link_libraries(unit_log_sink_test PRIVATE yori::yori_core)
+yori_apply_warnings(unit_log_sink_test)
+add_test(NAME m2.unit.log-sink COMMAND unit_log_sink_test)
+set_tests_properties(m2.unit.log-sink PROPERTIES LABELS "unit" TIMEOUT 60)
+
+# ---- unit：日志泵的 Executor 承载（M2-04）---------------------------------
+add_executable(unit_log_pump_test unit_log_pump_test.cpp)
+target_link_libraries(unit_log_pump_test
+  PRIVATE yori::yori_core yori::runtime executor::executor)
+yori_apply_warnings(unit_log_pump_test)
+add_test(NAME m2.unit.log-pump COMMAND unit_log_pump_test)
+set_tests_properties(m2.unit.log-pump PROPERTIES LABELS "unit" TIMEOUT 120)
+
 # ---- integration：CLI/daemon 冒烟 ----------------------------------------
 add_test(NAME example.integration.yori-version COMMAND $<TARGET_FILE:yori> --version)
 set_tests_properties(example.integration.yori-version PROPERTIES
