@@ -37,7 +37,7 @@ add_library(yori_runtime STATIC
   runtime/log_pump.cpp
   runtime/process_exit_monitor.cpp
   runtime/scheduler_task_runner.cpp
-  runtime/scheduler_task_runner.cpp)
+  runtime/store_task_runner.cpp)
 add_library(yori::runtime ALIAS yori_runtime)
 target_include_directories(yori_runtime
   PUBLIC
@@ -76,7 +76,6 @@ target_include_directories(yori_sqlite
 target_link_libraries(yori_sqlite PUBLIC yori::yori_core ${CMAKE_DL_LIBS})
 yori_apply_warnings(yori_sqlite)
 
-
 if(YORI_BUILD_TESTS AND PROJECT_IS_TOP_LEVEL)
   add_library(yori_test_support STATIC
     testing/fake_gpu_provider.cpp
@@ -93,7 +92,7 @@ set_target_properties(yori_core PROPERTIES
   VERSION ${PROJECT_VERSION}
   SOVERSION ${PROJECT_VERSION_MAJOR})
 
-install(TARGETS yori_core yori_nvml yori_sqlite yori_sqlite EXPORT yori-export
+install(TARGETS yori_core yori_nvml yori_sqlite EXPORT yori-export
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
