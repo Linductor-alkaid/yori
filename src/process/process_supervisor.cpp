@@ -255,6 +255,60 @@ bool wait_for_exec_confirmation(int exec_report_read, SpawnResult& result) noexc
   return false;
 }
 
+// 读取 /proc/<pid>/stat 原始内容（NUL 终止）。进程不存在或读取失败返回 false；
+// 僵尸进程仍可读。
+bool read_proc_stat(std::int64_t pid, std::array<char, 1024>& buffer) noexcept {
+  buffer.fill('\0');
+  if (pid <= 0) {
+    return false;
+  }
+  char path[48];
+  const int written =
+      std::snprintf(path, sizeof(path), "/proc/%lld/stat", static_cast<long long>(pid));
+  if (written <= 0 || static_cast<std::size_t>(written) >= sizeof(path)) {
+    return false;
+  }
+  const int fd = ::open(path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0) {
+    return false;
+  }
+  std::size_t used = 0;
+  while (used < buffer.size() - 1) {
+    const ssize_t n = ::read(fd, buffer.data() + used, buffer.size() - 1 - used);
+    if (n <= 0) {
+      break;
+    }
+    used += static_cast<std::size_t>(n);
+  }
+  static_cast<void>(::close(fd));
+  buffer[used] = '\0';
+  return used > 0;
+}
+
+// 定位 ')' 后第 token_index（1 起）个空白分隔 token 的起始位置。comm 字段可能
+// 包含空格与括号，从最后一个 ')' 之后开始解析。
+const char* stat_token_after_comm(const char* stat, int token_index) noexcept {
+  const char* cursor = std::strrchr(stat, ')');
+  if (cursor == nullptr) {
+    return nullptr;
+  }
+  ++cursor;
+  for (int token = 1; token <= token_index; ++token) {
+    while (*cursor == ' ' || *cursor == '\t') {
+      ++cursor;
+    }
+    if (*cursor == '\0') {
+      return nullptr;
+    }
+    if (token < token_index) {
+      while (*cursor != '\0' && *cursor != ' ' && *cursor != '\t') {
+        ++cursor;
+      }
+    }
+  }
+  return cursor;
+}
+
 }  // namespace
 
 FileDescriptor::~FileDescriptor() { reset(); }
@@ -267,55 +321,13 @@ void FileDescriptor::reset() noexcept {
 }
 
 std::optional<std::uint64_t> read_process_start_ticks(std::int64_t pid) noexcept {
-  if (pid <= 0) {
-    return std::nullopt;
-  }
-  char path[48];
-  const int written =
-      std::snprintf(path, sizeof(path), "/proc/%lld/stat", static_cast<long long>(pid));
-  if (written <= 0 || static_cast<std::size_t>(written) >= sizeof(path)) {
-    return std::nullopt;
-  }
-  const int fd = ::open(path, O_RDONLY | O_CLOEXEC);
-  if (fd < 0) {
-    return std::nullopt;
-  }
   std::array<char, 1024> buffer{};
-  std::size_t used = 0;
-  while (used < buffer.size() - 1) {
-    const ssize_t n = ::read(fd, buffer.data() + used, buffer.size() - 1 - used);
-    if (n <= 0) {
-      break;
-    }
-    used += static_cast<std::size_t>(n);
-  }
-  static_cast<void>(::close(fd));
-  buffer[used] = '\0';
-
-  // comm 字段可能包含空格与括号，从最后一个 ')' 之后开始解析；starttime 是整个
-  // stat 的第 22 字段，即 ')' 后的第 20 个空白分隔 token。
-  const char* cursor = std::strrchr(buffer.data(), ')');
-  if (cursor == nullptr) {
+  if (!read_proc_stat(pid, buffer)) {
     return std::nullopt;
   }
-  ++cursor;
-  int token = 1;
-  while (token < 20) {
-    while (*cursor == ' ' || *cursor == '\t') {
-      ++cursor;
-    }
-    if (*cursor == '\0') {
-      return std::nullopt;
-    }
-    while (*cursor != '\0' && *cursor != ' ' && *cursor != '\t') {
-      ++cursor;
-    }
-    ++token;
-  }
-  while (*cursor == ' ' || *cursor == '\t') {
-    ++cursor;
-  }
-  if (*cursor == '\0') {
+  // starttime 是整个 stat 的第 22 字段，即 ')' 后的第 20 个空白分隔 token。
+  const char* cursor = stat_token_after_comm(buffer.data(), 20);
+  if (cursor == nullptr) {
     return std::nullopt;
   }
   char* end = nullptr;
@@ -324,6 +336,56 @@ std::optional<std::uint64_t> read_process_start_ticks(std::int64_t pid) noexcept
     return std::nullopt;
   }
   return static_cast<std::uint64_t>(ticks);
+}
+
+std::optional<std::int64_t> read_process_pgid(std::int64_t pid) noexcept {
+  std::array<char, 1024> buffer{};
+  if (!read_proc_stat(pid, buffer)) {
+    return std::nullopt;
+  }
+  // pgid 是整个 stat 的第 5 字段，即 ')' 后的第 3 个空白分隔 token。
+  const char* cursor = stat_token_after_comm(buffer.data(), 3);
+  if (cursor == nullptr) {
+    return std::nullopt;
+  }
+  char* end = nullptr;
+  const long long pgid = std::strtoll(cursor, &end, 10);
+  if (end == cursor || pgid <= 0) {
+    return std::nullopt;
+  }
+  return static_cast<std::int64_t>(pgid);
+}
+
+bool verify_process_identity(const ProcessIdentity& identity) noexcept {
+  if (!identity.valid()) {
+    return false;
+  }
+  // 同一 stat 内容内完成双字段比对：启动 ticks 相同而 PGID 不同（或反之）都
+  // 视为 PID 已被其他进程复用，不得接管（RULE-06）。
+  std::array<char, 1024> buffer{};
+  if (!read_proc_stat(identity.pid, buffer)) {
+    return false;
+  }
+  const char* pgid_token = stat_token_after_comm(buffer.data(), 3);
+  if (pgid_token == nullptr) {
+    return false;
+  }
+  char* end = nullptr;
+  const long long pgid = std::strtoll(pgid_token, &end, 10);
+  if (end == pgid_token || pgid != identity.pgid) {
+    return false;
+  }
+  const char* ticks_token = stat_token_after_comm(buffer.data(), 20);
+  if (ticks_token == nullptr) {
+    return false;
+  }
+  errno = 0;
+  const unsigned long long ticks = std::strtoull(ticks_token, &end, 10);
+  if (end == ticks_token || errno == ERANGE ||
+      ticks != static_cast<unsigned long long>(identity.start_ticks)) {
+    return false;
+  }
+  return true;
 }
 
 const char* to_string(ExitReason reason) noexcept {
