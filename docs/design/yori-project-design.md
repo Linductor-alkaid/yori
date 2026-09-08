@@ -1,7 +1,7 @@
 # Yori 项目设计文档
 
 > **定位**：单节点多用户 GPU 训练任务排队、调度与进程守护系统\
-> **状态**：设计草案 v0.6（冻结 M2 进程守护、启动适配与日志落盘契约）\
+> **状态**：设计草案 v0.7（冻结 M3 NVML 适配与 GPU 采样契约）\
 > **日期**：2026-09-08
 
 ## 1. 项目摘要
@@ -333,6 +333,32 @@ M1 冻结的 `GpuProvider` SPI 位于 `include/yori/gpu/gpu_provider.hpp`。Prov
 M1 的 `FakeGpuProvider` 是单 owner、进程内测试实现：状态替换先完整校验，失败
 不覆盖上一份有效快照，并可显式注入 Provider 错误。它不安装为产品 API；M3 的
 NVML adapter 实现上述同一 SPI。
+
+M3 落地的 `NvmlGpuProvider`（`include/yori/gpu/nvml_gpu_provider.hpp`）是 Linux
+Adapter 层实现，附加语义：
+
+- 运行期 `dlopen` 绑定（默认 `libnvidia-ml.so.1`，库路径只接受管理员配置或
+  测试注入），显式 `load()`（`dlsym` + `nvmlInit_v2`）成功后 `observe()` 才可用；
+  构建不依赖 CUDA/NVML SDK，NVML 类型不出现在公共 API（`RULE-02`）。
+- 外部占用以计算进程计数判定：`nvmlDeviceGetComputeRunningProcesses_v3`
+  （旧驱动回退 `_v2`）以 count-only 查询（null 缓冲），计数 > 0 即
+  `EXTERNAL_BUSY`；不读取任何进程条目字段，不采集外部进程身份。
+- 占用查询 `NOT_SUPPORTED`/`GPU_IS_LOST`/超时类错误映射设备 `UNAVAILABLE`
+  （按策略不可调度，宁可保守）；`NO_PERMISSION` 为 Provider 级
+  `kPermissionDenied`；驱动未装载/库缺失/未初始化为 `kBackendUnavailable`。
+- 遥测失败（utilization/显存查询错误或数值越界不可信）只省略对应 optional
+  字段；设备 UUID 不可读或设备数超出快照上限时整次观测 `kObservationFailed`，
+  不产出部分设备快照（防止设备群身份静默缩编导致 lease 悬空）。
+- revision 为进程内原子单调递增；NVML 本身线程安全，`observe()` 可并发调用，
+  析构由 owner 保证无并发观测（见 GpuManager 停止顺序）。
+
+`GpuManager`（`yori_runtime` 内部组件，`EXEC-05`/`EXEC-09`）承载周期采样：
+start 先同步完成首次观测建立基线（首次观测不产生迁移事件），再以
+`submit_periodic` + `TimerHandle` 周期采样；快照经 `DoubleBuffer` 发布，
+观测状态迁移（设备出现/消失/状态翻转）向有界事件通道投递调度触发事件，
+遥测-only 波动不触发（utilization 不是 ownership）；provider 错误记入 streak
+统计并在开始/结束时显式通知；事件通道满时显式计数并在下一条事件补投标记；
+stop 取消 `TimerHandle` 并有界 join 在途采样（超时显式失败，不静默）。
 
 ------------------------------------------------------------------------
 

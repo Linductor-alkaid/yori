@@ -119,6 +119,40 @@ add_test(NAME m2.integration.process-supervision COMMAND integration_process_sup
 set_tests_properties(m2.integration.process-supervision PROPERTIES
   LABELS "integration" TIMEOUT 180)
 
+# ---- stub NVML 共享库（M3-03）：适配器单测的可控 NVML 假实现 ----------------
+# 与 NvmlGpuProvider 共享 src/gpu/nvml_api.hpp 内部声明（配对 ABI）。导出
+# stub_nvml_* 控制接口，测试经 dlopen 同一路径 + dlsym 注入状态。
+add_library(yori_stub_nvml SHARED stub_nvml/stub_nvml.cpp)
+target_include_directories(yori_stub_nvml PRIVATE ${PROJECT_SOURCE_DIR}/src)
+yori_apply_warnings(yori_stub_nvml)
+
+# ---- unit：NvmlGpuProvider 适配器（M3-01/M3-03）-----------------------------
+add_executable(unit_nvml_gpu_provider_test unit_nvml_gpu_provider_test.cpp)
+target_link_libraries(unit_nvml_gpu_provider_test PRIVATE yori::nvml)
+target_include_directories(unit_nvml_gpu_provider_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(unit_nvml_gpu_provider_test PRIVATE
+  YORI_STUB_NVML_PATH="$<TARGET_FILE:yori_stub_nvml>")
+yori_apply_warnings(unit_nvml_gpu_provider_test)
+add_test(NAME m3.unit.nvml-gpu-provider COMMAND unit_nvml_gpu_provider_test)
+set_tests_properties(m3.unit.nvml-gpu-provider PROPERTIES LABELS "unit" TIMEOUT 60)
+
+# ---- unit：GpuManager 周期采样、快照与事件（M3-02/M3-04）--------------------
+add_executable(unit_gpu_manager_test unit_gpu_manager_test.cpp)
+target_link_libraries(unit_gpu_manager_test
+  PRIVATE yori::yori_core yori::runtime executor::executor)
+yori_apply_warnings(unit_gpu_manager_test)
+add_test(NAME m3.unit.gpu-manager COMMAND unit_gpu_manager_test)
+set_tests_properties(m3.unit.gpu-manager PROPERTIES LABELS "unit" TIMEOUT 120)
+
+# ---- integration：GpuManager 事件驱动调度闭环（M3-04）----------------------
+add_executable(integration_gpu_manager_scheduler_test integration_gpu_manager_scheduler_test.cpp)
+target_link_libraries(integration_gpu_manager_scheduler_test
+  PRIVATE yori::runtime yori::test_support executor::executor)
+yori_apply_warnings(integration_gpu_manager_scheduler_test)
+add_test(NAME m3.integration.gpu-scheduling COMMAND integration_gpu_manager_scheduler_test)
+set_tests_properties(m3.integration.gpu-scheduling PROPERTIES
+  LABELS "integration" TIMEOUT 180)
+
 # ---- security;multi-user：root 降权身份断言（DEC-004 M2 验证）-------------
 add_executable(security_process_demotion_test security_process_demotion_test.cpp)
 target_link_libraries(security_process_demotion_test PRIVATE yori::yori_core)
@@ -138,11 +172,12 @@ set_tests_properties(example.integration.yorid-version PROPERTIES
   LABELS "integration" TIMEOUT 60
   PASS_REGULAR_EXPRESSION "^yorid [0-9]+\\.[0-9]+\\.[0-9]+")
 
-# ---- platform;gpu：真实 NVIDIA GPU 探测示例 --------------------------------
+# ---- platform;gpu：真实 NVIDIA GPU 探测（M3 起经 NvmlGpuProvider）----------
 add_executable(example_gpu_probe_test example_gpu_probe_test.cpp)
+target_link_libraries(example_gpu_probe_test PRIVATE yori::nvml)
 yori_apply_warnings(example_gpu_probe_test)
-add_test(NAME example.platform.gpu-nvml COMMAND example_gpu_probe_test)
-set_tests_properties(example.platform.gpu-nvml PROPERTIES
+add_test(NAME m3.platform.gpu-nvml COMMAND example_gpu_probe_test)
+set_tests_properties(m3.platform.gpu-nvml PROPERTIES
   LABELS "platform;gpu" SKIP_RETURN_CODE 77 TIMEOUT 60)
 
 # ---- security;multi-user：多用户环境前置示例 --------------------------------
