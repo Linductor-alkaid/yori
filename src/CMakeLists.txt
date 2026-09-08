@@ -60,6 +60,22 @@ target_include_directories(yori_nvml
 target_link_libraries(yori_nvml PUBLIC yori::yori_core ${CMAKE_DL_LIBS})
 yori_apply_warnings(yori_nvml)
 
+# SQLite 适配（M4-02，Adapter 层，RULE-02）：运行期 dlopen 绑定系统
+# libsqlite3.so.0，构建不依赖 libsqlite3-dev；公开头只暴露 Core SPI 类型。
+# 内部声明头 store/sqlite_api.hpp 与共享验证核心 store/mutation_core.hpp 保持
+# 与内存实现同语义。
+add_library(yori_sqlite store/sqlite_state_store.cpp)
+add_library(yori::sqlite ALIAS yori_sqlite)
+target_include_directories(yori_sqlite
+  PUBLIC
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/generated>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(yori_sqlite PUBLIC yori::yori_core ${CMAKE_DL_LIBS})
+yori_apply_warnings(yori_sqlite)
+
 
 if(YORI_BUILD_TESTS AND PROJECT_IS_TOP_LEVEL)
   add_library(yori_test_support STATIC
@@ -77,7 +93,7 @@ set_target_properties(yori_core PROPERTIES
   VERSION ${PROJECT_VERSION}
   SOVERSION ${PROJECT_VERSION_MAJOR})
 
-install(TARGETS yori_core yori_nvml EXPORT yori-export
+install(TARGETS yori_core yori_nvml yori_sqlite yori_sqlite EXPORT yori-export
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
