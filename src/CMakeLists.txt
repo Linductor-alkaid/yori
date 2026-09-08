@@ -13,6 +13,7 @@ add_library(yori_core
   process/process_supervisor.cpp
   queue/job_queue.cpp
   scheduler/scheduler.cpp
+  store/mutation_core.cpp
   store/state_store.cpp
   version.cpp)
 add_library(yori::yori_core ALIAS yori_core)
@@ -34,6 +35,7 @@ add_library(yori_runtime STATIC
   runtime/gpu_manager.cpp
   runtime/log_pump.cpp
   runtime/process_exit_monitor.cpp
+  runtime/scheduler_task_runner.cpp
   runtime/scheduler_task_runner.cpp)
 add_library(yori::runtime ALIAS yori_runtime)
 target_include_directories(yori_runtime
@@ -56,6 +58,7 @@ target_include_directories(yori_nvml
     ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(yori_nvml PUBLIC yori::yori_core ${CMAKE_DL_LIBS})
 yori_apply_warnings(yori_nvml)
+
 
 if(YORI_BUILD_TESTS AND PROJECT_IS_TOP_LEVEL)
   add_library(yori_test_support STATIC

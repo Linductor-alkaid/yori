@@ -28,6 +28,10 @@ yori::store::StoredJob advanced(const yori::store::StoredJob& current, yori::job
   auto next = current;
   next.state = state;
   ++next.revision;
+  // M4-01 执行记录结构校验：RUNNING/STOPPING 必须携带有效进程身份。
+  if (state == yori::job::JobState::kRunning || state == yori::job::JobState::kStopping) {
+    next.execution.identity = yori::process::ProcessIdentity{4321, 4321, 888888};
+  }
   return next;
 }
 
@@ -58,6 +62,10 @@ const yori::store::StoredJob& require_job(const yori::store::StateSnapshot& snap
 void check_error(const yori::store::StateStoreWriteResult& result,
                  yori::store::StateStoreErrorCode expected, std::uint64_t expected_revision) {
   YORI_CHECK(!result);
+  if (result.code != expected) {
+    std::fprintf(stderr, "check_error: got %s expected %s\n", yori::store::to_string(result.code),
+                 yori::store::to_string(expected));
+  }
   YORI_CHECK(result.code == expected);
   YORI_CHECK(result.revision == expected_revision);
   YORI_CHECK(std::string(yori::store::to_string(result.code)) != "UNKNOWN");
@@ -246,6 +254,123 @@ int main() {
   second_lease_for_job.acquire_leases.push_back(lease("GPU-0021", 20));
   check_error(one_job_two_leases.apply(second_lease_for_job),
               StateStoreErrorCode::kJobAlreadyLeased, 2);
+
+  // ---- M4-01：执行记录结构校验（validate_execution 的 store 投影）------------
+  {
+    yori::testing::InMemoryStateStore execution_store{{8, 8}};
+    StateMutation seed;
+    seed.create_jobs.push_back(queued(30, 1030));
+    YORI_CHECK(execution_store.apply(seed));
+    auto seeded = execution_store.load();
+
+    // RUNNING 缺身份 -> kInvalidExecutionRecord。
+    StateMutation running_without_identity;
+    running_without_identity.expected_revision = 1;
+    auto bare = require_job(seeded.snapshot, 30);
+    bare.state = JobState::kRunning;
+    ++bare.revision;
+    running_without_identity.update_jobs.push_back(std::move(bare));
+    check_error(execution_store.apply(running_without_identity),
+                StateStoreErrorCode::kInvalidExecutionRecord, 1);
+
+    // 部分填充的身份（pid=0 但 pgid>0）-> 非法。
+    StateMutation partial_identity;
+    partial_identity.expected_revision = 1;
+    auto partial = require_job(seeded.snapshot, 30);
+    partial.state = JobState::kRunning;
+    ++partial.revision;
+    partial.execution.identity = yori::process::ProcessIdentity{0, 4321, 888888};
+    partial_identity.update_jobs.push_back(std::move(partial));
+    check_error(execution_store.apply(partial_identity),
+                StateStoreErrorCode::kInvalidExecutionRecord, 1);
+
+    // QUEUED 创建即携带身份 -> 拒绝。
+    StateMutation queued_with_identity;
+    queued_with_identity.expected_revision = 1;
+    auto with_identity = queued(31, 1031);
+    with_identity.execution.identity = yori::process::ProcessIdentity{4321, 4321, 888888};
+    queued_with_identity.create_jobs.push_back(std::move(with_identity));
+    check_error(execution_store.apply(queued_with_identity),
+                StateStoreErrorCode::kInvalidExecutionRecord, 1);
+
+    // start_time 早于 submit_time -> 拒绝。
+    StateMutation early_start;
+    early_start.expected_revision = 1;
+    auto early = require_job(seeded.snapshot, 30);
+    early.state = JobState::kStarting;
+    ++early.revision;
+    early.execution.identity = yori::process::ProcessIdentity{4321, 4321, 888888};
+    early.execution.start_time =
+        seeded.snapshot.jobs.front().spec.submit_time - std::chrono::seconds{1};
+    early_start.update_jobs.push_back(std::move(early));
+    early_start.acquire_leases.push_back(lease("GPU-0030", 30));
+    check_error(execution_store.apply(early_start), StateStoreErrorCode::kInvalidExecutionRecord,
+                1);
+
+    // 非终态携带 exit / end_time / failure_reason -> 拒绝。
+    StateMutation exit_in_active;
+    exit_in_active.expected_revision = 1;
+    auto exited = require_job(seeded.snapshot, 30);
+    exited.state = JobState::kStarting;
+    ++exited.revision;
+    exited.execution.identity = yori::process::ProcessIdentity{4321, 4321, 888888};
+    exited.execution.exit = yori::process::ExitStatus{};
+    exited.execution.end_time = std::chrono::system_clock::now();
+    exited.execution.failure_reason = "premature";
+    exit_in_active.update_jobs.push_back(std::move(exited));
+    exit_in_active.acquire_leases.push_back(lease("GPU-0030", 30));
+    check_error(execution_store.apply(exit_in_active), StateStoreErrorCode::kInvalidExecutionRecord,
+                1);
+
+    // 相对路径 log_path -> 拒绝。
+    StateMutation relative_log_path;
+    relative_log_path.expected_revision = 1;
+    auto relative = require_job(seeded.snapshot, 30);
+    relative.state = JobState::kStarting;
+    ++relative.revision;
+    relative.execution.log_path = "var/log/yori/job-30";
+    relative_log_path.update_jobs.push_back(std::move(relative));
+    relative_log_path.acquire_leases.push_back(lease("GPU-0030", 30));
+    check_error(execution_store.apply(relative_log_path),
+                StateStoreErrorCode::kInvalidExecutionRecord, 1);
+
+    // 合法链路：STARTING(+身份+log_path+start_time) -> RUNNING -> FAILED(带退出
+    // 与失败原因) 并释放 lease，全程执行记录随状态推进落盘。
+    StateMutation start_ok;
+    start_ok.expected_revision = 1;
+    auto starting = require_job(seeded.snapshot, 30);
+    starting.state = JobState::kStarting;
+    ++starting.revision;
+    starting.execution.identity = yori::process::ProcessIdentity{4321, 4321, 888888};
+    starting.execution.start_time = std::chrono::system_clock::now();
+    starting.execution.log_path = "/var/lib/yori/logs/job-30";
+    start_ok.update_jobs.push_back(std::move(starting));
+    start_ok.acquire_leases.push_back(lease("GPU-0030", 30));
+    YORI_CHECK(execution_store.apply(start_ok));
+
+    auto started = execution_store.load();
+    StateMutation fail_ok;
+    fail_ok.expected_revision = 2;
+    auto failed = require_job(started.snapshot, 30);
+    failed.state = JobState::kFailed;
+    ++failed.revision;
+    failed.execution.exit = yori::process::ExitStatus{yori::process::ExitReason::kExited, 3, 0};
+    failed.execution.end_time = std::chrono::system_clock::now();
+    failed.execution.failure_reason = "training exited with 3";
+    fail_ok.update_jobs.push_back(std::move(failed));
+    fail_ok.release_leases.push_back(yori::gpu::GpuUuid{"GPU-0030"});
+    YORI_CHECK(execution_store.apply(fail_ok));
+
+    const auto final_state = execution_store.load();
+    const auto& final_job = require_job(final_state.snapshot, 30);
+    YORI_CHECK(final_job.state == JobState::kFailed);
+    YORI_CHECK(final_job.execution.identity.pid == 4321);
+    YORI_CHECK(final_job.execution.exit.has_value());
+    YORI_CHECK(final_job.execution.exit->exit_code == 3);
+    YORI_CHECK(final_job.execution.failure_reason == "training exited with 3");
+    YORI_CHECK(final_job.execution.log_path == "/var/lib/yori/logs/job-30");
+    YORI_CHECK(final_state.snapshot.leases.empty());
+  }
 
   return yori::testing::failure_count == 0 ? 0 : 1;
 }
