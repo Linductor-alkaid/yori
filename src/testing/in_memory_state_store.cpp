@@ -56,7 +56,7 @@ store::StateStoreWriteResult InMemoryStateStore::apply(const store::StateMutatio
 
   // 验证核心与 SQLite adapter 共享（M4-01），保证两个后端同语义；本实现仅
   // 注入故障与提交副本。
-  const auto outcome = store::mutation_core::apply_mutation(
+  auto outcome = store::mutation_core::apply_mutation(
       jobs_, leases_, revision_, {config_.max_jobs, config_.max_leases}, mutation);
   if (!outcome.ok()) {
     return {outcome.code, revision_};

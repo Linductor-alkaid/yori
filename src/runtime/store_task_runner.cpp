@@ -38,7 +38,7 @@ class StoreTaskRunner::Impl final {
     try {
       auto write_result = future.get();
       handle = {};
-      return {StoreTaskCompletionCode::kCompleted, std::move(write_result), {}};
+      return {StoreTaskCompletionCode::kCompleted, write_result, {}};
     } catch (const executor::TaskCancelled& error) {
       handle = {};
       return {StoreTaskCompletionCode::kCancelled, std::nullopt, error.what()};

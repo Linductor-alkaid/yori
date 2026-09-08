@@ -93,7 +93,7 @@ LiveProcess spawn_sleep(std::int64_t seconds) {
   const auto pgid = yori::process::read_process_pgid(child);
   YORI_CHECK(ticks.has_value());
   YORI_CHECK(pgid.has_value());
-  return {child, yori::process::ProcessIdentity{child, *pgid, *ticks}};
+  return {child, yori::process::ProcessIdentity{child, pgid.value_or(0), ticks.value_or(0)}};
 }
 
 const yori::store::StoredJob* find_job(const yori::store::StateSnapshot& snapshot,
@@ -249,7 +249,7 @@ int main() {
       YORI_CHECK(scheduled.scheduled());
       YORI_CHECK(scheduled.event.job_id == yori::job::JobId{1});
       YORI_CHECK(scheduled.event.gpu_uuid.has_value());
-      YORI_CHECK(scheduled.event.gpu_uuid->value() == "GPU-B");
+      YORI_CHECK(scheduled.event.gpu_uuid.value_or(yori::gpu::GpuUuid{}).value() == "GPU-B");
 
       // Job 1 进入 STARTING 后由"守护层"补写身份（第二轮恢复前）。
       second_run = spawn_sleep(120);
@@ -291,7 +291,7 @@ int main() {
       YORI_CHECK(scheduled.scheduled());
       YORI_CHECK(scheduled.event.job_id == yori::job::JobId{3});
       YORI_CHECK(scheduled.event.gpu_uuid.has_value());
-      YORI_CHECK(scheduled.event.gpu_uuid->value() == "GPU-A");
+      YORI_CHECK(scheduled.event.gpu_uuid.value_or(yori::gpu::GpuUuid{}).value() == "GPU-A");
     }
   }
 

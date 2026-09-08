@@ -61,7 +61,7 @@ class ThrowingStore final : public yori::store::StateStore {
 
 }  // namespace
 
-int main() {
+int run_all() {
   using namespace std::chrono_literals;
 
   // ---- 正常完成 + 串行 FIFO 语义（前一结果未消费 -> BUSY）--------------------
@@ -81,9 +81,10 @@ int main() {
 
     const auto completion = runner.wait_and_consume();
     YORI_CHECK(completion.code == StoreTaskCompletionCode::kCompleted);
+    const auto write = completion.write_result.value_or(yori::store::StateStoreWriteResult{});
     YORI_CHECK(completion.write_result.has_value());
-    YORI_CHECK(completion.write_result->ok());
-    YORI_CHECK(completion.write_result->revision == 1);
+    YORI_CHECK(write.ok());
+    YORI_CHECK(write.revision == 1);
     YORI_CHECK(!runner.has_active_task());
 
     // 下一 mutation 由生产者基于新 revision 组合（逐条 FIFO 语义）。
@@ -91,7 +92,9 @@ int main() {
     YORI_CHECK(second.accepted());
     const auto second_completion = runner.wait_and_consume();
     YORI_CHECK(second_completion.code == StoreTaskCompletionCode::kCompleted);
-    YORI_CHECK(second_completion.write_result->revision == 2);
+    YORI_CHECK(
+        second_completion.write_result.value_or(yori::store::StateStoreWriteResult{}).revision ==
+        2);
 
     runner.stop_accepting();
     const auto rejected = runner.submit(create_mutation(3, 2));
@@ -123,8 +126,8 @@ int main() {
     YORI_CHECK(runner.submit(std::move(stale)).accepted());
     const auto conflict = runner.wait_and_consume();
     YORI_CHECK(conflict.code == StoreTaskCompletionCode::kCompleted);
-    YORI_CHECK(conflict.write_result.has_value());
-    YORI_CHECK(conflict.write_result->code == StateStoreErrorCode::kRevisionConflict);
+    YORI_CHECK(conflict.write_result.value_or(yori::store::StateStoreWriteResult{}).code ==
+               StateStoreErrorCode::kRevisionConflict);
 
     YORI_CHECK(runtime.shutdown() == yori::runtime::ExecutorRuntimeShutdownResult::kCompleted);
   }
@@ -191,7 +194,7 @@ int main() {
     runner->stop_accepting();
     const auto completion = runner->wait_and_consume();
     YORI_CHECK(completion.code == StoreTaskCompletionCode::kCompleted);
-    YORI_CHECK(completion.write_result->ok());
+    YORI_CHECK(completion.write_result.value_or(yori::store::StateStoreWriteResult{}).ok());
 
     runner.reset();  // 先于 Executor 回收（EXEC-08 关闭阶段 ⑦ 语义）
     store.reset();
@@ -200,4 +203,16 @@ int main() {
   }
 
   return yori::testing::failure_count == 0 ? 0 : 1;
+}
+
+int main() {
+  try {
+    return run_all();
+  } catch (const std::exception& error) {
+    std::fprintf(stderr, "unexpected exception escaped test body: %s\n", error.what());
+    return 1;
+  } catch (...) {
+    std::fprintf(stderr, "unexpected non-standard exception escaped test body\n");
+    return 1;
+  }
 }

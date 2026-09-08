@@ -16,6 +16,7 @@
 
 #include "store/sqlite_api.hpp"
 #include "yori/store/sqlite_state_store.hpp"
+#include "yori/store/state_store.hpp"
 #include "yori_test.hpp"
 
 namespace {
@@ -257,8 +258,9 @@ int main() {
     YORI_CHECK(job.execution.start_time.has_value());
     YORI_CHECK(job.execution.end_time.has_value());
     YORI_CHECK(job.execution.exit.has_value());
-    YORI_CHECK(job.execution.exit->reason == yori::process::ExitReason::kExited);
-    YORI_CHECK(job.execution.exit->exit_code == 0);
+    const auto exit_status = job.execution.exit.value_or(yori::process::ExitStatus{});
+    YORI_CHECK(exit_status.reason == yori::process::ExitReason::kExited);
+    YORI_CHECK(exit_status.exit_code == 0);
     YORI_CHECK(job.execution.failure_reason == "done");
     YORI_CHECK(job.execution.log_path == "/var/lib/yori/logs/job-1");
   }

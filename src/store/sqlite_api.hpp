@@ -5,6 +5,8 @@
 // 不安装、不得被公共头包含；适配器经 dlopen + dlsym 绑定真实
 // libsqlite3.so.0，构建不依赖 libsqlite3-dev。
 
+#include <cstdint>
+
 extern "C" {
 
 using sqlite3 = struct sqlite3;
@@ -27,8 +29,12 @@ enum sqlite3_open_flags {
   SQLITE_OPEN_CREATE = 0x00000004,
 };
 
-// bind 析构器：TRANSIENT 表示返回前复制绑定内容。
-#define YORI_SQLITE_TRANSIENT ((sqlite3_destructor_type) - 1)
+// bind 析构器哨兵：TRANSIENT 表示返回前复制绑定内容。指针值即 SQLite 官方
+// 定义的 ((sqlite3_destructor_type)-1)，无其他构造方式，豁免 int-to-ptr 检查。
+inline sqlite3_destructor_type yori_sqlite_transient() noexcept {
+  return reinterpret_cast<sqlite3_destructor_type>(  // NOLINT(performance-no-int-to-ptr)
+      static_cast<std::uintptr_t>(-1));
+}
 
 sqlite3_int64 sqlite3_libversion_number(void);
 

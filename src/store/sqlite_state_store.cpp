@@ -117,7 +117,7 @@ bool take_u32_le(const std::uint8_t*& cursor, const std::uint8_t* end, std::uint
 
 // 字符串列表编码：count(LE32) + [len(LE32) + bytes]...。解码对 count、长度与
 // 总量做严格边界检查，任何越界都判失败（篡改/损坏数据不得静默截断）。
-constexpr std::size_t kMaxEncodedItems = 2 * 256;  // env 以 name/value 对展开
+constexpr std::size_t kMaxEncodedItems = std::size_t{2} * 256;  // env 以 name/value 对展开
 
 std::string encode_string_list(const std::vector<std::string>& items) {
   std::string blob;
@@ -167,13 +167,13 @@ std::chrono::system_clock::time_point decode_time(sqlite3_int64 nanos) {
 bool bind_text(const SqliteSymbols& symbols, sqlite3_stmt* stmt, int index,
                const std::string& value) {
   return symbols.bind_text(stmt, index, value.c_str(), static_cast<int>(value.size()),
-                           YORI_SQLITE_TRANSIENT) == SQLITE_OK;
+                           yori_sqlite_transient()) == SQLITE_OK;
 }
 
 bool bind_blob(const SqliteSymbols& symbols, sqlite3_stmt* stmt, int index,
                const std::string& value) {
   return symbols.bind_blob(stmt, index, value.data(), static_cast<int>(value.size()),
-                           YORI_SQLITE_TRANSIENT) == SQLITE_OK;
+                           yori_sqlite_transient()) == SQLITE_OK;
 }
 
 // 语句 RAII：任何路径都 finalize，不留泄漏语句。

@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <string>
 #include <utility>
+#include <yori/store/state_store.hpp>
 
 #include "testing/in_memory_state_store.hpp"
 #include "yori_test.hpp"
@@ -366,7 +367,7 @@ int main() {
     YORI_CHECK(final_job.state == JobState::kFailed);
     YORI_CHECK(final_job.execution.identity.pid == 4321);
     YORI_CHECK(final_job.execution.exit.has_value());
-    YORI_CHECK(final_job.execution.exit->exit_code == 3);
+    YORI_CHECK(final_job.execution.exit.value_or(yori::process::ExitStatus{}).exit_code == 3);
     YORI_CHECK(final_job.execution.failure_reason == "training exited with 3");
     YORI_CHECK(final_job.execution.log_path == "/var/lib/yori/logs/job-30");
     YORI_CHECK(final_state.snapshot.leases.empty());
