@@ -35,8 +35,9 @@
   再提交周期任务；每次 tick 校验、经 `DoubleBuffer` 发布快照、对比观测状态迁移
   （设备出现/消失/状态翻转）发送有界事件；错误记入 streak 统计并在 streak
   开始/结束时显式通知；事件通道满时计数并在下一条事件补投 `gap` 标记；stop 为
-  取消 `TimerHandle` + 有界等待 `active_callback_count` 归零（以 Executor 自身
-  状态为事实源）。
+  取消 `TimerHandle` + 有界等待在途采样释放采样锁（Executor 定时器状态的
+  `active_callback_count` 实测不含已派发回调，不能作为 join 依据；以组件自身的
+  采样锁为在途事实源，join 超时显式返回失败）。
 - 测试：自研 stub NVML 共享库（控制接口注入设备表、遥测与逐调用错误）驱动的
   适配器单测；`GpuManager` 六场景（见测试与退出条件）与 M3 特有场景（状态迁移
   事件、遥测-only 变化不触发事件、背压补投、join 超时、先 shutdown 后 stop）；
@@ -86,7 +87,7 @@
   `submit_periodic_with_handle` 周期采样；快照经 `DoubleBuffer` 发布；观测状态
   迁移（出现/消失/翻转）发送有界事件，遥测-only 变化不发送；provider 错误
   streak 统计与开始/结束事件；事件背压显式计数与补投；stop 取消 `TimerHandle`
-  并有界 join 在途 tick。
+  并有界 join 在途 tick（采样锁为在途事实源，超时显式失败）。
 - [ ] `M3-03` 交付 stub NVML 测试库与适配器测试：可控共享库注入设备表/遥测/逐
   调用错误，覆盖 load 失败、init 错误映射、发现与 UUID、遥测省略、外部占用、
   v3→v2 回退、UUID 不可读整次失败、revision 单调；真实 GPU 探测用例改为经
@@ -106,10 +107,11 @@
 - NVML ABI 兼容性：以内部最小声明 + 只读返回码/计数字段的方式绑定，避免依赖
   结构体布局细节；stub 与适配器共享同一声明头，配对 ABI 一致。真实驱动行为
   （如 `INSUFFICIENT_SIZE` 语义）以 `gpu` 标签用例在带 GPU 主机补验。
-- 周期任务在途回调与组件生命周期：cancel 不撤回已派发回调；stop 以
-  `active_callback_count` 有界 join，join 超时作为显式结果返回（不静默）；
-  tick 回调经 `shared_ptr<Impl>` 延长状态生命周期，provider 引用由 owner 保证
-  存活（与 M2 GraceEscalation/ExitMonitor 相同的 owner 纪律）。
+- 周期任务在途回调与组件生命周期：cancel 不撤回已派发回调，且 Executor 定时器
+  状态的 `active_callback_count` 不含已派发回调（阻塞中实测为 0）；stop 改以
+  组件采样锁做有界 join，超时作为显式结果返回（不静默）；tick 回调经
+  `shared_ptr<Impl>` 延长状态生命周期，provider 引用由 owner 保证存活（与 M2
+  GraceEscalation/ExitMonitor 相同的 owner 纪律）。
 - 本机无 clang-tidy-18 与 Clang 编译器、无 NVIDIA GPU；TSAN 需 `setarch -R`
   （既有环境限制），以 PR CI 为最终门禁，真实 GPU 用例保持补跑项。
 - 无 GPU 环境下 CI 对适配器的覆盖完全依赖 stub 的保真度；stub 行为与真实驱动
@@ -140,5 +142,51 @@
 
 ## 验证记录
 
-（随实施追加；格式：日期、范围/commit、环境、命令与结果、限制与补跑条件、
-同步说明。）
+### 2026-09-08：M3-01～M3-04 实现与本地验证（PR 前）
+
+- 范围：工作树 `feat/m3-nvml-gpu-integration`（提交 `3e0d73e` 起）。交付
+  `NvmlGpuProvider`（dlopen 绑定、显式 `load()`、发现/UUID/遥测/外部占用、
+  错误映射、失败路径不携带部分设备数据）、`GpuManager`（start 首次同步观测建
+  基线、`submit_periodic_with_handle` 周期采样、`DoubleBuffer` 快照、观测状态
+  迁移事件、错误 streak 起止事件、背压计数与补投、stop 采样锁有界 join）、
+  stub NVML 共享库（句柄编码 index+1、逐调用错误注入、v3 缺失回退开关）、
+  3 个测试目标（`m3.unit.nvml-gpu-provider`、`m3.unit.gpu-manager`、
+  `m3.integration.gpu-scheduling`）与真实 GPU 探测用例升级
+  （`m3.platform.gpu-nvml`，经 `NvmlGpuProvider`）。
+- 测试：适配器单测覆盖 load 错误映射（库缺失/驱动未装载/无权限/其余 init
+  失败/非法配置）、发现与 UUID、遥测成功与失败省略、外部占用计数判定、
+  `NOT_SUPPORTED`/`GPU_IS_LOST`→`UNAVAILABLE`、占用查询无权限→Provider 级
+  错误、UUID 不可读整次失败、设备数超限整次失败、v3→v2 回退、revision 单调、
+  未 load 显式错误、析构 `nvmlShutdown`。GpuManager 单测覆盖六场景映射（正常
+  完成=start→tick→stop 且 stop 后无新 tick；任务异常=provider 错误/observe
+  抛异常/非法快照三路；提交拒绝=Executor 已关闭后 start；执行中取消=运行中
+  stop；超时=stop join 截止显式失败且释放在途 tick 后正常发布；shutdown=先
+  shutdown 后 stop/析构不挂起）与 M3 特有场景（初始观测静默建基线、状态翻转/
+  设备消失/外部占用消失事件、遥测-only 变化不触发事件、streak 起止与统计、
+  事件容量 1 的背压计数与补投标记、重叠 tick 跳过计数、start 幂等与重试、
+  stop 幂等）。集成测试覆盖 `EXTERNAL_BUSY` 队首阻塞→观测迁移事件→
+  `DoubleBuffer` 快照驱动 `FifoScheduler`→lease 建立→观测与 lease 分列→
+  不重复分配。
+- 验证：Linux x86_64、内核 `7.0.0-31-generic`、GCC 13.3.0、Executor pin
+  `4fd8e6097879`。`debug`/`release`/`asan`/`ubsan`/`tsan` 五预设全部执行
+  configure/build/ctest（TSAN 按 CI 规定以 `setarch -R ctest --preset tsan`
+  执行），每套 28 个用例为 21 passed、7 个环境/后续里程碑占位用例 skipped
+  （GPU、multi-user 两个、IPC、recovery、fuzz、performance），无失败、无
+  race 报告。clang-format 18.1.8 全量格式检查（含新增文件）通过。
+  `cmake --install build/debug --prefix build/m3-install` 后 `tests/consumer`
+  仅使用安装产物配置/编译/运行通过（`libyori_nvml.a` 与
+  `nvml_gpu_provider.hpp` 进入安装集）；`public_header_boundary_test` 覆盖
+  新公共头，无 NVML/Executor 类型泄漏。
+- 实现期发现并处置的问题：Executor 定时器状态 `active_callback_count` 实测
+  不含已派发回调（回调阻塞中为 0），不能作为 stop 的 join 依据——改以组件
+  采样锁为在途事实源（有界轮询，超时显式失败）；该差异属应用侧使用方式而非
+  Executor 能力缺口，未登记反馈台账。周期回调可能重叠（执行时长超过周期），
+  以 `TickGuard` 串行化并跳过重叠 tick、显式计数。
+- 限制：本机无 clang-tidy-18 与 Clang 编译器、无 NVIDIA GPU，PR CI 尚未触发；
+  `M3-01`～`M3-05` 保持未勾选；`m3.platform.gpu-nvml` 在无驱动环境显式 skip
+  （补跑条件：在带 NVIDIA GPU 的 Linux 主机运行 `ctest -L gpu`）。负责人：
+  Linductor-alkaid；补跑条件：PR CI 的 GCC 13/Clang 18 Debug/Release 矩阵、
+  clang-format/clang-tidy 18 与 sanitizers 全绿后勾选。
+- 同步：设计第 7 节（v0.7，NVML 适配器与 GpuManager 语义）、威胁模型基线
+  10/20 与验证列、总计划第 1/5/6/11 节、本计划。未修改 `third_party/`，未发现
+  Executor 能力缺口。

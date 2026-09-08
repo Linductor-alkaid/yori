@@ -56,7 +56,7 @@ yori CLI（用户会话） --> tensorboard 子进程（用户身份，默认 127
 | 7 | 查询/日志/取消/观察执行 owner/admin 授权 | 跨用户越权 | M5/M6 | 越权负向测试 |
 | 8 | 日志路径、cwd、runtime 与持久化目录防符号链接攻击 | 路径逃逸/文件覆盖 | M2/M4 | 负向：符号链接用例 |
 | 9 | 特权 daemon 的 IPC parser 与 launch path 保持最小 | root 进程 RCE | M5 | fuzz + 设计评审 |
-| 10 | 外部 GPU 进程只影响资源状态，不主动终止或接管 | 误杀用户进程 | M3 | `EXTERNAL_BUSY` 测试 |
+| 10 | 外部 GPU 进程只影响资源状态，不主动终止或接管 | 误杀用户进程 | M3 | `EXTERNAL_BUSY` 测试（M3 已落地：`m3.unit.nvml-gpu-provider` 外部占用仅改变观测状态、无信号/接管路径；适配器只读 NVML） |
 | 11 | 长期拆分 privileged launcher（`yori-launch-helper`） | 缩小 TCB | `POST-09` | 非本 MVP |
 | 12 | Job 创建拒绝 root owner，并在 IPC 前以固定上限校验 argv/env/cwd/profile/logdir | root workload、内存耗尽、路径逃逸 | M1/M5 | `JobSpec` 上限与 root/路径负向测试；M5 parser 边界测试 |
 | 13 | GPU snapshot 与 StateStore mutation 有固定条目上限；Job/lease 以 revision 原子提交 | 内存耗尽、状态篡改、部分写导致错误资源归属 | M1/M4 | Provider 边界、revision 冲突、容量与事务回滚负向测试 |
@@ -66,6 +66,7 @@ yori CLI（用户会话） --> tensorboard 子进程（用户身份，默认 127
 | 17 | 子进程继承描述符经 `close_range` 收敛；exec 报告管道以 `FD_CLOEXEC` 在成功 exec 时自动关闭 | daemon 内部 fd（socket、DB、日志）泄漏进训练进程 | M2 | 引擎审查；`M2-02` 集成路径无 fd 泄漏断言 |
 | 18 | 环境保留键（身份块、`CUDA_VISIBLE_DEVICES`、`CUDA_DEVICE_ORDER`、`LD_PRELOAD`、`LD_LIBRARY_PATH`）在 JobSpec.env 中出现即拒绝启动计划 | 用户覆盖 GPU 隔离或以动态链接注入攻击 root daemon 路径 | M2 | `M2-01` 保留键负向测试 |
 | 19 | exec 前 `SIGPIPE` 置为忽略（DEC-008）；日志文件 `O_APPEND|O_NOFOLLOW` 打开，`0640` 与属主显式设置 | daemon 退出误杀训练（可用性）；符号链接替换日志文件（路径逃逸） | M2 | 管道断裂存活测试；`M2-05` 权限与打开方式断言 |
+| 20 | NVML 适配以 count-only 查询检测外部计算进程，不读取进程身份字段；NVML 库路径只接受管理员配置或测试注入，不接受用户输入；驱动返回数据按 SPI 校验（UUID 合法性、遥测边界、设备数上限），非法即整次观测失败 | 跨用户进程信息泄露；恶意/异常驱动数据污染调度事实；任意库注入 root daemon | M3 | 基线 10 `EXTERNAL_BUSY` 测试（`m3.unit.nvml-gpu-provider`）；身份零采集代码审查（`src/gpu/nvml_gpu_provider.cpp`）；非法快照不发布（`m3.unit.gpu-manager`）；真实 GPU 补跑项 |
 
 ## 5. 初步威胁清单（待细化）
 
