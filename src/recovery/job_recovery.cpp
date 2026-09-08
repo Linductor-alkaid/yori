@@ -1,7 +1,6 @@
-#include <yori/recovery/job_recovery.hpp>
-
 #include <chrono>
 #include <utility>
+#include <yori/recovery/job_recovery.hpp>
 
 namespace yori::recovery {
 namespace {
@@ -112,7 +111,8 @@ IdentityVerification verify_identity_via_proc(const process::ProcessIdentity& id
 
 JobRecovery::JobRecovery(store::StateStore& store, queue::GlobalJobQueue& queue,
                          IdentityVerifier verifier)
-    : store_(store), queue_(queue),
+    : store_(store),
+      queue_(queue),
       verifier_(verifier ? std::move(verifier) : IdentityVerifier(&verify_identity_via_proc)) {}
 
 RecoveryPlan JobRecovery::plan(const store::StateSnapshot& snapshot) const {
