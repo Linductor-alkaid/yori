@@ -1,7 +1,7 @@
 # Yori 实施总计划
 
 > 状态：Active
-> 版本：1.3
+> 版本：1.4
 > 更新日期：2026-09-08
 > 负责人：Linductor-alkaid
 > 设计依据：[Yori 项目设计文档](../design/yori-project-design.md)（v0.5）
@@ -28,9 +28,13 @@
   `GraceEscalation`）全部落地；PR [#3](https://github.com/Linductor-alkaid/yori/pull/3)
   最终 CI [全绿](https://github.com/Linductor-alkaid/yori/actions/runs/34151784269)
   （证据见 [M2 验证记录](m2-process-supervision.md)）。
-- 当前里程碑：M3（NVML 真实 GPU 集成）In Progress，分支
-  `feat/m3-nvml-gpu-integration`（见 [M3 计划](m3-nvml-gpu-integration.md)）；
-  M4 持久化恢复可在 M3 合入后启动。
+- M3（NVML 真实 GPU 集成）已完成：`NvmlGpuProvider`（`dlopen` 绑定、发现、
+  UUID 身份、遥测、外部占用检测 `EXTERNAL_BUSY`、显式错误映射）与 `GpuManager`
+  （`EXEC-05` 周期采样、`EXEC-09` GPU 快照 `DoubleBuffer`、观测状态迁移事件）
+  落地，stub NVML 与进程内集成闭环覆盖无 GPU 环境；PR [#4](https://github.com/Linductor-alkaid/yori/pull/4)
+  最终 CI [全绿](https://github.com/Linductor-alkaid/yori/actions/runs/34251754105)
+  （证据见 [M3 验证记录](m3-nvml-gpu-integration.md)）。
+- 当前里程碑：无（M3 已完成；M4 持久化恢复与 M5 IPC 可依序启动，待排期）。
 - MVP 端到端验收以设计文档第 19 节判据为准，由 M7 执行并记录证据（见第 10 节）。
 - 里程碑文档在各自启动时创建（工程规范第 2 节）；当前实体文件：M0、M1、M2、M3。
 
@@ -109,7 +113,7 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | M0 | 工程骨架与基线 | 无 | CMake/CI/测试标签/规范工具/文档框架、Executor 锁定校验 | 无（内部基线） | Completed |
 | M1 | 核心域契约与进程内调度闭环 | M0 | JobSpec、状态机、全局队列、FIFO 调度、GPU lease 记账；内存 StateStore 与伪 GpuProvider 下的进程内可测闭环 | 无 | In Progress |
 | M2 | 进程守护与启动适配 | M1 | ProcessSupervisor（spawn、进程组、取消、退出回收）、LaunchProfile、`exec` 前降权、日志捕获与落盘 | 无 | Completed |
-| M3 | NVML 真实 GPU 集成 | M2 | `GpuProvider` NVML 适配：发现、UUID 身份、遥测、外部占用检测（`EXTERNAL_BUSY`）；`GpuManager` 周期采样（`EXEC-05`/`EXEC-09` GPU 快照） | 无 | In Progress |
+| M3 | NVML 真实 GPU 集成 | M2 | `GpuProvider` NVML 适配：发现、UUID 身份、遥测、外部占用检测（`EXTERNAL_BUSY`）；`GpuManager` 周期采样（`EXEC-05`/`EXEC-09` GPU 快照） | 无 | Completed |
 | M4 | 持久化与恢复 | M2 | SQLite StateStore、daemon 重启恢复、PID reuse 核验、`LOST` 语义 | 无 | Planned |
 | M5 | IPC 与 CLI | M3、M4 | UDS 传输、`SO_PEERCRED` 鉴权、请求/响应协议与 owner/admin 授权、`submit`/`ps`/`queue`/`gpu`/`cancel`/`logs` 快照、IPC fuzz 起步 | 无 | Planned |
 | M6 | 观察面 | M5 | `logs -f` 流式帧（offset 续传、`GAP`/`EOF`/`BACKPRESSURE`）、日志轮转、`yori tensorboard` | 无 | Planned |
