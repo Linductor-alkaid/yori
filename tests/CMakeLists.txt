@@ -153,6 +153,42 @@ add_test(NAME m3.integration.gpu-scheduling COMMAND integration_gpu_manager_sche
 set_tests_properties(m3.integration.gpu-scheduling PROPERTIES
   LABELS "integration" TIMEOUT 180)
 
+# ---- unit：SQLite StateStore 适配器（M4-02）---------------------------------
+# 直接 dlopen 系统 libsqlite3.so.0 驱动真实库；测试内最小 SQL 绑定共享
+# src/store/sqlite_api.hpp（配对 ABI），用于篡改/故障注入。
+add_executable(unit_sqlite_state_store_test unit_sqlite_state_store_test.cpp)
+target_link_libraries(unit_sqlite_state_store_test PRIVATE yori::sqlite)
+target_include_directories(unit_sqlite_state_store_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+yori_apply_warnings(unit_sqlite_state_store_test)
+add_test(NAME m4.unit.sqlite-state-store COMMAND unit_sqlite_state_store_test)
+set_tests_properties(m4.unit.sqlite-state-store PROPERTIES LABELS "unit" TIMEOUT 120)
+
+# ---- unit：JobRecovery 决策与恢复流程（M4-03）-------------------------------
+add_executable(unit_job_recovery_test unit_job_recovery_test.cpp)
+target_link_libraries(unit_job_recovery_test PRIVATE yori::yori_core yori::test_support)
+yori_apply_warnings(unit_job_recovery_test)
+add_test(NAME m4.unit.job-recovery COMMAND unit_job_recovery_test)
+set_tests_properties(m4.unit.job-recovery PROPERTIES LABELS "unit" TIMEOUT 60)
+
+# ---- unit：StoreTaskRunner 的 Executor 载载（M4-04，EXEC-08）----------------
+add_executable(unit_store_task_runner_test unit_store_task_runner_test.cpp)
+target_link_libraries(unit_store_task_runner_test
+  PRIVATE yori::runtime yori::test_support executor::executor)
+yori_apply_warnings(unit_store_task_runner_test)
+add_test(NAME m4.unit.store-task-runner COMMAND unit_store_task_runner_test)
+set_tests_properties(m4.unit.store-task-runner PROPERTIES LABELS "unit" TIMEOUT 120)
+
+# ---- integration;recovery：daemon 重启恢复闭环（M4-03/M4-02）----------------
+# 替换 M0 的 example.recovery.restart 占位：SQLite 持久化 -> 重开 -> 身份核验
+# 采纳/LOST -> 队列重建 -> kRecoveryCompleted 触发调度；含 PID reuse 防护。
+add_executable(integration_recovery_test integration_recovery_test.cpp)
+target_link_libraries(integration_recovery_test
+  PRIVATE yori::yori_core yori::sqlite executor::executor)
+yori_apply_warnings(integration_recovery_test)
+add_test(NAME m4.integration.recovery-restart COMMAND integration_recovery_test)
+set_tests_properties(m4.integration.recovery-restart PROPERTIES
+  LABELS "integration;recovery" TIMEOUT 180)
+
 # ---- security;multi-user：root 降权身份断言（DEC-004 M2 验证）-------------
 add_executable(security_process_demotion_test security_process_demotion_test.cpp)
 target_link_libraries(security_process_demotion_test PRIVATE yori::yori_core)
@@ -199,8 +235,6 @@ endfunction()
 
 yori_add_pending_example(example.ipc.protocol "ipc"
   "M5 IPC 协议解析用例接入后启用；补跑条件：M5 合入后运行 ctest -L ipc")
-yori_add_pending_example(example.recovery.restart "recovery"
-  "M4 daemon 重启恢复用例接入后启用；补跑条件：M4 合入后运行 ctest -L recovery")
 yori_add_pending_example(example.fuzz.parser "fuzz"
   "M5 IPC parser fuzz corpus 接入后启用；补跑条件：M5 合入后运行 ctest -L fuzz")
 yori_add_pending_example(example.performance.scheduler "performance"
