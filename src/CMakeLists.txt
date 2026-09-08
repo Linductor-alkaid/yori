@@ -31,6 +31,7 @@ yori_apply_warnings(yori_core)
 add_library(yori_runtime STATIC
   runtime/executor_runtime.cpp
   runtime/grace_escalation.cpp
+  runtime/gpu_manager.cpp
   runtime/log_pump.cpp
   runtime/process_exit_monitor.cpp
   runtime/scheduler_task_runner.cpp)
@@ -40,6 +41,21 @@ target_include_directories(yori_runtime
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
 target_link_libraries(yori_runtime PRIVATE executor::executor yori::yori_core)
 yori_apply_warnings(yori_runtime)
+
+# NVML 适配（M3-01，Adapter 层，RULE-02）：运行期 dlopen 绑定真实驱动，构建
+# 不依赖 CUDA/NVML SDK；公开头只暴露 Core SPI 类型。内部声明头 gpu/nvml_api.hpp
+# 与 tests/stub_nvml 共享以保证配对 ABI。
+add_library(yori_nvml gpu/nvml_gpu_provider.cpp)
+add_library(yori::nvml ALIAS yori_nvml)
+target_include_directories(yori_nvml
+  PUBLIC
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/generated>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(yori_nvml PUBLIC yori::yori_core ${CMAKE_DL_LIBS})
+yori_apply_warnings(yori_nvml)
 
 if(YORI_BUILD_TESTS AND PROJECT_IS_TOP_LEVEL)
   add_library(yori_test_support STATIC
@@ -57,7 +73,7 @@ set_target_properties(yori_core PROPERTIES
   VERSION ${PROJECT_VERSION}
   SOVERSION ${PROJECT_VERSION_MAJOR})
 
-install(TARGETS yori_core EXPORT yori-export
+install(TARGETS yori_core yori_nvml EXPORT yori-export
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
