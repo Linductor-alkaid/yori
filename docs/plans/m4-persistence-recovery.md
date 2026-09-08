@@ -1,6 +1,6 @@
 # M4：持久化与恢复
 
-> 状态：In Progress
+> 状态：Completed
 > 负责人：Linductor-alkaid
 > 所属计划：[Yori 实施总计划](yori-implementation-plan.md)
 > 前置：M2（[进程守护与启动适配](m2-process-supervision.md)）；与 M3 无相互依赖
@@ -93,20 +93,20 @@ RUNNING Job（`RULE-06`）。
 
 ## 工作项
 
-- [ ] `M4-01` 扩展 `StateStore` 契约：`StoredJob` 执行记录（进程身份、起止时间、
+- [x] `M4-01` 扩展 `StateStore` 契约：`StoredJob` 执行记录（进程身份、起止时间、
   退出状态、失败原因、日志路径）与结构校验规则、稳定错误码；mutation 验证核心
   提取到 Core 共享函数，`InMemoryStateStore` 改为复用并保持既有语义与测试兼容。
-- [ ] `M4-02` 实现 `SqliteStateStore`：`dlopen` 绑定与显式 `open()`（含符号链接
+- [x] `M4-02` 实现 `SqliteStateStore`：`dlopen` 绑定与显式 `open()`（含符号链接
   拒绝、库缺失/符号缺失显式失败）、schema 初始化、`load()`（含行级篡改校验）、
   `apply()` 单事务原子写入；与内存实现同语义（revision 冲突、lease 矩阵、容量、
   条目上限），SQLite 类型不出现在公开头。
-- [ ] `M4-03` 实现恢复 Core（`yori/recovery/`）：快照驱动、`/proc` 身份核验、
+- [x] `M4-03` 实现恢复 Core（`yori/recovery/`）：快照驱动、`/proc` 身份核验、
   采纳（`STARTING`->`RUNNING`）/`LOST` + lease 释放决策、队列重建与显式恢复
   结果（含每 Job 原因）；对快照异常数据显式失败。
-- [ ] `M4-04` 实现 `StoreTaskRunner`（`EXEC-08`）：单在飞 mutation 的
+- [x] `M4-04` 实现 `StoreTaskRunner`（`EXEC-08`）：单在飞 mutation 的
   `submit_cancellable` 载载，`BUSY`/`NOT_ACCEPTING`/取消/异常/shutdown 显式结果，
   handle 与 future 全程保留消费。
-- [ ] `M4-05` 交付测试与文档：SQLite 单测（含故障注入）、恢复单测（含 PID reuse
+- [x] `M4-05` 交付测试与文档：SQLite 单测（含故障注入）、恢复单测（含 PID reuse
   模拟）、daemon 重启集成闭环（`recovery` 标签，替换占位用例）、`StoreTaskRunner`
   六场景；设计/DEC-009/威胁模型/总计划/本计划同步；五预设与 PR CI 通过。
 
@@ -127,25 +127,25 @@ RUNNING Job（`RULE-06`）。
 
 ## 测试与退出条件
 
-- [ ] SQLite adapter 单测通过（真实库）：open 幂等/库缺失/符号链接拒绝；create/
+- [x] SQLite adapter 单测通过（真实库）：open 幂等/库缺失/符号链接拒绝；create/
   update/lease 全错误码与内存实现一致；执行记录字段 roundtrip；revision 冲突与
   单调；容量与条目上限；重开数据库后快照一致（持久性）；故障注入（只读文件
   apply 拒绝且数据不变、外部写锁 busy 显式失败、损坏文件 load 失败、篡改行
   load 显式失败、空文件/新文件初始化）。
-- [ ] 恢复单测通过：QUEUED 重新入队；RUNNING/STOPPING 存活采纳且 lease 保留；
+- [x] 恢复单测通过：QUEUED 重新入队；RUNNING/STOPPING 存活采纳且 lease 保留；
   STARTING 存活提升 RUNNING；身份缺失/进程消失/启动 ticks 不符/PGID 不符 ->
   `LOST` + lease 释放（PID reuse 防错误接管）；终态不动；store/queue 失败显式。
-- [ ] daemon 重启集成闭环通过（`recovery` 标签）：SQLite 持久化 -> 关闭重开 ->
+- [x] daemon 重启集成闭环通过（`recovery` 标签）：SQLite 持久化 -> 关闭重开 ->
   存活进程采纳（lease 保留）+ QUEUED 入队 -> 进程退出后再次恢复 -> `LOST` +
   lease 释放 -> `kRecoveryCompleted` 触发 `FifoScheduler` 将 GPU 分配给排队 Job；
   `example.recovery.restart` 占位用例被真实用例替换。
-- [ ] `StoreTaskRunner` 六场景通过：正常完成、任务异常（apply 失败/异常）、提交
+- [x] `StoreTaskRunner` 六场景通过：正常完成、任务异常（apply 失败/异常）、提交
   拒绝（`BUSY`/Executor 已关闭）、执行中取消、stop join 截止（超时映射）、
   shutdown 先后顺序。
-- [ ] `debug`/`release`/`asan`/`ubsan`/`tsan` 预设全部通过；PR CI（GCC 13/
+- [x] `debug`/`release`/`asan`/`ubsan`/`tsan` 预设全部通过；PR CI（GCC 13/
   Clang 18 的 Debug/Release、clang-format 18、clang-tidy 18、sanitizers、依赖
   门禁）全绿。
-- [ ] 设计（第 6.2/12/18 节）、DEC-009、威胁模型、总计划（第 1/5/6/11 节）与
+- [x] 设计（第 6.2/12/18 节）、DEC-009、威胁模型、总计划（第 1/5/6/11 节）与
   本计划同步更新。
 
 ## 验证记录
@@ -206,3 +206,29 @@ RUNNING Job（`RULE-06`）。
   （第 1/5/6/11 节，M4 状态待 CI 后收口）、本计划。未修改 `third_party/`，
   未发现 Executor 能力缺口（`StoreTaskRunner` 完全复用 M1 已验证的
   `submit_cancellable` + `TaskCancelled` 语义）。
+
+### 2026-09-09：M4-01～M4-05 PR CI 收尾
+
+- 范围：PR [#5](https://github.com/Linductor-alkaid/yori/pull/5)，提交
+  `8f1c2a9`～`3ff626f`（进程身份核验助手、契约扩展与共享验证核心、恢复 Core、
+  SQLite adapter、StoreTaskRunner、四项测试、文档同步、格式与 tidy 门禁修复）。
+- 首轮 CI run [34268003016](https://github.com/Linductor-alkaid/yori/actions/runs/34268003016)
+  的 clang-format 失败（1 处）：CI 的 clang-format 18.1.3 与本机 18.1.8 对
+  `job_recovery.cpp` 三个尖括号 include 的主 include 检测不同。以 pip 安装
+  18.1.3 精确复现后重排（include 合并字母序 + 构造初始化列表换行），双版本
+  dry-run 全量零违规（`e00cf1e`）。
+- 次轮 run [34268265125](https://github.com/Linductor-alkaid/yori/actions/runs/34268265125)
+  暴露 20 处 clang-tidy error（无效 std::move 三处、常量乘法 widening、
+  SQLITE_TRANSIENT 哨兵 int-to-ptr、测试 optional 未守卫访问、main 异常逃逸）。
+  本机无 clang-tidy 的既有限制首次被绕过：pip 安装 clang-tidy 18.1.8 本地
+  复现 CI 门禁，逐项修复（`3ff626f`）后本地零 error、五预设 31 用例复验
+  全绿。该方法回写为环境备注（后续里程碑可直接使用）。
+- 最终 CI run
+  [34273077478](https://github.com/Linductor-alkaid/yori/actions/runs/34273077478)
+  8/8 全绿：clang-format 18、clang-tidy 18、GCC 13/Clang 18 的
+  Debug/Release configure/build/test/install/consumer、ASAN/UBSAN/TSAN，以及
+  依赖 pin 门禁全部通过。CI 环境每套 ctest 为 24 passed、7 个环境/后续里程碑
+  占位用例显式 skipped（GPU、multi-user 两个、IPC、fuzz、performance；
+  `recovery` 标签已由 `m4.integration.recovery-restart` 真实用例承接）。
+- 结论：`M4-01`～`M4-05` 的实现、文档与适用门禁证据完整，工作项与退出条件
+  勾选完成，M4 里程碑标记 `Completed`。

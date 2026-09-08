@@ -34,13 +34,14 @@
   落地，stub NVML 与进程内集成闭环覆盖无 GPU 环境；PR [#4](https://github.com/Linductor-alkaid/yori/pull/4)
   最终 CI [全绿](https://github.com/Linductor-alkaid/yori/actions/runs/34251754105)
   （证据见 [M3 验证记录](m3-nvml-gpu-integration.md)）。
-- M4（持久化与恢复）实现完毕，验证中：`StoredJob` 执行记录扩展（进程身份、
-  起止时间、退出状态、失败原因、日志路径）、`SqliteStateStore`（DEC-009：
-  dlopen 绑定、schema 1、单事务原子 apply、篡改显式失败）、`JobRecovery`
-  恢复 Core（身份核验、`LOST` 语义、队列重建、PID reuse 防护）与
-  `StoreTaskRunner`（`EXEC-08` 载载）落地；本地五预设全绿，PR CI 结论见
-  [M4 验证记录](m4-persistence-recovery.md)。
-- 当前里程碑：M4（收尾中）。
+- M4（持久化与恢复）已完成：`StoredJob` 执行记录扩展（进程身份、起止时间、
+  退出状态、失败原因、日志路径）、`SqliteStateStore`（DEC-009：dlopen 绑定、
+  schema 1、单事务原子 apply、篡改显式失败）、`JobRecovery` 恢复 Core（身份
+  核验、`LOST` 语义、队列重建、PID reuse 防护）与 `StoreTaskRunner`
+  （`EXEC-08` 载载）落地；PR [#5](https://github.com/Linductor-alkaid/yori/pull/5)
+  最终 CI [全绿](https://github.com/Linductor-alkaid/yori/actions/runs/34273077478)
+  （证据见 [M4 验证记录](m4-persistence-recovery.md)）。
+- 当前里程碑：无（M4 已完成；M5 IPC/CLI 可依序启动，待排期）。
 - MVP 端到端验收以设计文档第 19 节判据为准，由 M7 执行并记录证据（见第 10 节）。
 - 里程碑文档在各自启动时创建（工程规范第 2 节）；当前实体文件：M0、M1、M2、
   M3、M4。
@@ -121,7 +122,7 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | M1 | 核心域契约与进程内调度闭环 | M0 | JobSpec、状态机、全局队列、FIFO 调度、GPU lease 记账；内存 StateStore 与伪 GpuProvider 下的进程内可测闭环 | 无 | In Progress |
 | M2 | 进程守护与启动适配 | M1 | ProcessSupervisor（spawn、进程组、取消、退出回收）、LaunchProfile、`exec` 前降权、日志捕获与落盘 | 无 | Completed |
 | M3 | NVML 真实 GPU 集成 | M2 | `GpuProvider` NVML 适配：发现、UUID 身份、遥测、外部占用检测（`EXTERNAL_BUSY`）；`GpuManager` 周期采样（`EXEC-05`/`EXEC-09` GPU 快照） | 无 | Completed |
-| M4 | 持久化与恢复 | M2 | SQLite StateStore、daemon 重启恢复、PID reuse 核验、`LOST` 语义 | 无 | In Progress |
+| M4 | 持久化与恢复 | M2 | SQLite StateStore、daemon 重启恢复、PID reuse 核验、`LOST` 语义 | 无 | Completed |
 | M5 | IPC 与 CLI | M3、M4 | UDS 传输、`SO_PEERCRED` 鉴权、请求/响应协议与 owner/admin 授权、`submit`/`ps`/`queue`/`gpu`/`cancel`/`logs` 快照、IPC fuzz 起步 | 无 | Planned |
 | M6 | 观察面 | M5 | `logs -f` 流式帧（offset 续传、`GAP`/`EOF`/`BACKPRESSURE`）、日志轮转、`yori tensorboard` | 无 | Planned |
 | M7 | 打包与 MVP 端到端验收 | M6 | systemd unit、安装打包、设计 §19 判据逐项验收 | `v0.1.0`（MVP） | Planned |
