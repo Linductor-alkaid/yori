@@ -12,6 +12,7 @@ add_library(yori_core
   observe/log_sink.cpp
   process/process_supervisor.cpp
   queue/job_queue.cpp
+  recovery/job_recovery.cpp
   scheduler/scheduler.cpp
   store/mutation_core.cpp
   store/state_store.cpp
