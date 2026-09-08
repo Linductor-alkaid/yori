@@ -1,8 +1,8 @@
 # Yori 实施总计划
 
 > 状态：Active
-> 版本：1.4
-> 更新日期：2026-09-08
+> 版本：1.5
+> 更新日期：2026-09-09
 > 负责人：Linductor-alkaid
 > 设计依据：[Yori 项目设计文档](../design/yori-project-design.md)（v0.5）
 > 治理依据：[AGENTS.md](../../AGENTS.md)、[项目管理与工程规范](../project/project-standards.md)
@@ -34,9 +34,16 @@
   落地，stub NVML 与进程内集成闭环覆盖无 GPU 环境；PR [#4](https://github.com/Linductor-alkaid/yori/pull/4)
   最终 CI [全绿](https://github.com/Linductor-alkaid/yori/actions/runs/34251754105)
   （证据见 [M3 验证记录](m3-nvml-gpu-integration.md)）。
-- 当前里程碑：无（M3 已完成；M4 持久化恢复与 M5 IPC 可依序启动，待排期）。
+- M4（持久化与恢复）实现完毕，验证中：`StoredJob` 执行记录扩展（进程身份、
+  起止时间、退出状态、失败原因、日志路径）、`SqliteStateStore`（DEC-009：
+  dlopen 绑定、schema 1、单事务原子 apply、篡改显式失败）、`JobRecovery`
+  恢复 Core（身份核验、`LOST` 语义、队列重建、PID reuse 防护）与
+  `StoreTaskRunner`（`EXEC-08` 载载）落地；本地五预设全绿，PR CI 结论见
+  [M4 验证记录](m4-persistence-recovery.md)。
+- 当前里程碑：M4（收尾中）。
 - MVP 端到端验收以设计文档第 19 节判据为准，由 M7 执行并记录证据（见第 10 节）。
-- 里程碑文档在各自启动时创建（工程规范第 2 节）；当前实体文件：M0、M1、M2、M3。
+- 里程碑文档在各自启动时创建（工程规范第 2 节）；当前实体文件：M0、M1、M2、
+  M3、M4。
 
 ## 2. 交付边界（SCOPE）
 
@@ -96,7 +103,7 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | `EXEC-05` | NVML 遥测采样与外部占用扫描 | `submit_periodic` + `TimerHandle`（允许抖动） | GpuManager | 取消 `TimerHandle` | ③ |
 | `EXEC-06` | Job 状态推进与调度触发 | 事件驱动有限任务 `submit_auto()`，保留并消费 future；排队取消用 `submit_cancellable` + `StopToken` | JobManager / Scheduler | 触发事件：新提交、Job 退出、取消、GPU 状态变化、恢复完成、管理员操作 | ④ 停止调度生产者 |
 | `EXEC-07` | 进程退出监视与回收（waitpid） | blocking worker 或可取消有限任务 | ProcessSupervisor | wakeup；Job 取消为进程组 `SIGTERM` -> grace -> `SIGKILL`（Yori 外部进程语义，不与 Executor 任务取消混同） | ⑤ |
-| `EXEC-08` | SQLite 写入与恢复读取 | 有限任务 `submit_auto()`，逐条 FIFO 串行化提交 | StateStore adapter | 写队列有界，拒绝显式化 | ⑦ 等待终态落盘完成 |
+| `EXEC-08` | SQLite 写入与恢复读取 | 写路径经 `StoreTaskRunner`（M4 已落地：单在飞 `submit_cancellable`，逐条 FIFO 由生产者组合 revision，前一结果未消费即 `BUSY`）；恢复读取为 daemon 启动序列的有界同步单元（`EXEC-09` 启动 `PhaseGate` 随总装接入） | StoreTaskRunner / daemon 主生命周期 | 排队期取消 + `TaskCancelled` 显式结果；admission 拒绝显式化 | ⑦ 等待终态落盘完成 |
 | `EXEC-09` | 状态快照、更新与启动协调 | GPU/调度状态快照 `DoubleBuffer`；Job 状态更新 `MpscChannel`/`LatestMailbox`（按语义）；启动阶段 `PhaseGate`（恢复 -> GPU 观察 -> 调度开启） | 对应组件 | 快照无取消语义，随组件回收 | ⑥ |
 
 `EXEC-10`（daemon 关闭顺序，依据 AGENTS.md 第 7 条与设计 §11.7）：
@@ -114,7 +121,7 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | M1 | 核心域契约与进程内调度闭环 | M0 | JobSpec、状态机、全局队列、FIFO 调度、GPU lease 记账；内存 StateStore 与伪 GpuProvider 下的进程内可测闭环 | 无 | In Progress |
 | M2 | 进程守护与启动适配 | M1 | ProcessSupervisor（spawn、进程组、取消、退出回收）、LaunchProfile、`exec` 前降权、日志捕获与落盘 | 无 | Completed |
 | M3 | NVML 真实 GPU 集成 | M2 | `GpuProvider` NVML 适配：发现、UUID 身份、遥测、外部占用检测（`EXTERNAL_BUSY`）；`GpuManager` 周期采样（`EXEC-05`/`EXEC-09` GPU 快照） | 无 | Completed |
-| M4 | 持久化与恢复 | M2 | SQLite StateStore、daemon 重启恢复、PID reuse 核验、`LOST` 语义 | 无 | Planned |
+| M4 | 持久化与恢复 | M2 | SQLite StateStore、daemon 重启恢复、PID reuse 核验、`LOST` 语义 | 无 | In Progress |
 | M5 | IPC 与 CLI | M3、M4 | UDS 传输、`SO_PEERCRED` 鉴权、请求/响应协议与 owner/admin 授权、`submit`/`ps`/`queue`/`gpu`/`cancel`/`logs` 快照、IPC fuzz 起步 | 无 | Planned |
 | M6 | 观察面 | M5 | `logs -f` 流式帧（offset 续传、`GAP`/`EOF`/`BACKPRESSURE`）、日志轮转、`yori tensorboard` | 无 | Planned |
 | M7 | 打包与 MVP 端到端验收 | M6 | systemd unit、安装打包、设计 §19 判据逐项验收 | `v0.1.0`（MVP） | Planned |
@@ -124,7 +131,8 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
   [M0 工程骨架与基线](m0-engineering-baseline.md)、
   [M1 核心域契约与进程内调度闭环](m1-core-contracts.md)、
   [M2 进程守护与启动适配](m2-process-supervision.md)、
-  [M3 NVML 真实 GPU 集成](m3-nvml-gpu-integration.md)。
+  [M3 NVML 真实 GPU 集成](m3-nvml-gpu-integration.md)、
+  [M4 持久化与恢复](m4-persistence-recovery.md)。
 
 ## 6. 暂定默认值与未决问题
 
@@ -137,7 +145,7 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | 取消 grace period | 已冻结：默认 10 秒、下限 100ms、上限 10 分钟；宽限为软期限，升级前退出则空操作（[DEC-007](../decisions/DEC-007-cancel-grace-period.md)） | Linductor-alkaid | M2 | 已于 2026-09-08 冻结；变更需新决策记录替代 DEC-007 |
 | 环境变量白名单初版 | 已冻结：身份块 + daemon 白名单 + GPU 映射块三层合并，保留键出现即拒绝（[DEC-006](../decisions/DEC-006-launch-environment-policy.md)） | Linductor-alkaid | M2 | 已于 2026-09-08 冻结；扩展白名单属配置级变更 |
 | daemon 重启后的日志续捕 | 守护语义已冻结：子进程 exec 前 `SIGPIPE=SIG_IGN`，重启窗口输出丢失、文件原位续写（[DEC-008](../decisions/DEC-008-daemon-restart-log-continuity.md)）；观察面 offset/续捕细节最迟 M6 复核 | Linductor-alkaid | M2（已冻结）、M6（复核） | 设计 §10.2/§11.2 已同步 |
-| 持久化实现 | SQLite 为唯一 `StateStore` 实现，内存实现仅测试用（设计 §12） | Linductor-alkaid | M4 | 决策记录 |
+| 持久化实现 | 已冻结：SQLite 为唯一 `StateStore` 实现，内存实现仅测试用；dlopen 绑定与 schema 1 见 [DEC-009](../decisions/DEC-009-sqlite-state-store.md) | Linductor-alkaid | M4 | 已于 2026-09-09 冻结；格式变更需新决策记录 |
 | IPC 端点 | `/run/yori/yori.sock`、`root:yori 0660`、`yori` 系统组（设计 §5） | Linductor-alkaid | M5 | 决策记录或设计确认 |
 | 日志与跟随上限默认值 | 单文件 256 MiB、保留 1 个历史文件、每 Job 8 / 全局 64 跟随会话、全局磁盘预算（设计 §11.2/11.4） | Linductor-alkaid | M6 | 配置定稿 + 测试 |
 | 仓库自身许可证 | 未决 | Linductor-alkaid | M7（发布前） | 选定并添加 LICENSE，同步[供应链策略](../supply-chain/dependency-policy.md) |
@@ -204,8 +212,9 @@ CI 无法覆盖的项按工程规范第 4 节保持未勾选并记录原因与�
 - 计划：[M0 工程骨架与基线](m0-engineering-baseline.md)、
   [M1 核心域契约与进程内调度闭环](m1-core-contracts.md)、
   [M2 进程守护与启动适配](m2-process-supervision.md)、
-  [M3 NVML 真实 GPU 集成](m3-nvml-gpu-integration.md)
-  （M4 起随里程碑创建）
+  [M3 NVML 真实 GPU 集成](m3-nvml-gpu-integration.md)、
+  [M4 持久化与恢复](m4-persistence-recovery.md)
+  （M5 起随里程碑创建）
 - 决策：[DEC-001 Executor 依赖引入与锁定](../decisions/DEC-001-executor-pinning.md)、
   [DEC-002 MVP 纳入训练观察面](../decisions/DEC-002-mvp-observability.md)、
   [DEC-003 TensorBoard 由 CLI 拉起](../decisions/DEC-003-tensorboard-cli-hosting.md)、
@@ -213,7 +222,8 @@ CI 无法覆盖的项按工程规范第 4 节保持未勾选并记录原因与�
   [DEC-005 MVP 全局 FIFO 调度策略](../decisions/DEC-005-global-fifo-scheduling.md)、
   [DEC-006 训练进程环境变量继承白名单](../decisions/DEC-006-launch-environment-policy.md)、
   [DEC-007 取消宽限期与升级语义](../decisions/DEC-007-cancel-grace-period.md)、
-  [DEC-008 daemon 重启日志管道断裂语义](../decisions/DEC-008-daemon-restart-log-continuity.md)
+  [DEC-008 daemon 重启日志管道断裂语义](../decisions/DEC-008-daemon-restart-log-continuity.md)、
+  [DEC-009 SQLite StateStore 采用与 dlopen 绑定](../decisions/DEC-009-sqlite-state-store.md)
 - 安全：[威胁模型（草案）](../security/threat-model.md)
 - 供应链：[依赖管理与供应链策略](../supply-chain/dependency-policy.md)
 - Executor 反馈：[能力缺口反馈台账](../executor_feedback/ledger.md)

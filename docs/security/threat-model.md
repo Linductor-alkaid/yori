@@ -2,7 +2,7 @@
 
 > 状态：Draft（骨架版；完整 STRIDE 分析随 M5/M6 工作项完成，完成后升级为
 > Active）
-> 日期：2026-09-08
+> 日期：2026-09-09
 > 负责人：Linductor-alkaid
 > 依据：[设计文档](../design/yori-project-design.md)第 5、11.5、17 节、
 > [AGENTS.md](../../AGENTS.md) 安全条款、[DEC-004](../decisions/DEC-004-privileged-daemon-demotion.md)
@@ -54,12 +54,12 @@ yori CLI（用户会话） --> tensorboard 子进程（用户身份，默认 127
 | 5 | 环境变量白名单继承 | 凭据泄漏到用户 Job | M2 | 白名单外变量不出现 |
 | 6 | `/run/yori/yori.sock` 权限收敛 | 未授权连接 | M5/M7 | 权限断言 |
 | 7 | 查询/日志/取消/观察执行 owner/admin 授权 | 跨用户越权 | M5/M6 | 越权负向测试 |
-| 8 | 日志路径、cwd、runtime 与持久化目录防符号链接攻击 | 路径逃逸/文件覆盖 | M2/M4 | 负向：符号链接用例 |
+| 8 | 日志路径、cwd、runtime 与持久化目录防符号链接攻击 | 路径逃逸/文件覆盖 | M2/M7（持久化文件 M4 已落地） | 日志 `O_NOFOLLOW` 断言（M2）；数据库文件为符号链接时拒绝打开、打开后收敛 `0600`（M4 已落地：`m4.unit.sqlite-state-store`）；父目录链属主校验留 M7 |
 | 9 | 特权 daemon 的 IPC parser 与 launch path 保持最小 | root 进程 RCE | M5 | fuzz + 设计评审 |
 | 10 | 外部 GPU 进程只影响资源状态，不主动终止或接管 | 误杀用户进程 | M3 | `EXTERNAL_BUSY` 测试（M3 已落地：`m3.unit.nvml-gpu-provider` 外部占用仅改变观测状态、无信号/接管路径；适配器只读 NVML） |
 | 11 | 长期拆分 privileged launcher（`yori-launch-helper`） | 缩小 TCB | `POST-09` | 非本 MVP |
 | 12 | Job 创建拒绝 root owner，并在 IPC 前以固定上限校验 argv/env/cwd/profile/logdir | root workload、内存耗尽、路径逃逸 | M1/M5 | `JobSpec` 上限与 root/路径负向测试；M5 parser 边界测试 |
-| 13 | GPU snapshot 与 StateStore mutation 有固定条目上限；Job/lease 以 revision 原子提交 | 内存耗尽、状态篡改、部分写导致错误资源归属 | M1/M4 | Provider 边界、revision 冲突、容量与事务回滚负向测试 |
+| 13 | GPU snapshot 与 StateStore mutation 有固定条目上限；Job/lease 以 revision 原子提交 | 内存耗尽、状态篡改、部分写导致错误资源归属 | M1/M4（M4 已落地） | Provider 边界、revision 冲突、容量负向测试（M1）；SQLite 单事务回滚、目录只读/外部写锁/篡改行/篡改 lease 矩阵负向测试（M4 已落地：`m4.unit.sqlite-state-store`） |
 | 14 | 全局队列只保存稳定排序键，默认 1024、硬上限 4096；所有拒绝返回结构化结果与事件 | 批量提交耗尽内存、静默丢弃或用户私有队列绕过全局顺序 | M1/M5 | 无效配置、容量、重复 Job、多用户稳定排序和恢复回滚负向测试 |
 | 15 | 调度只选未 lease 的 `FREE` GPU，并以单个 StateStore mutation 提交 `STARTING + lease`；失败恢复队首 | 重复分配 GPU、绕过 FIFO、写失败后丢失 Job | M1/M4 | 队首阻塞、确定性 GPU 选择、lease 冲突、写失败回滚和队列/存储分歧测试 |
 | 16 | launch path 的 argv/envp/组列表全部在 fork 前构造；子进程仅执行 `setpgid`/信号处置/`dup2`/`close_range`/`setgroups`/`setgid`/`setuid`/`chdir`/`execve` 等 syscall 封装 | fork-exec 窗口内的非 async-signal-safe 调用（NSS/malloc 锁）导致挂起或死锁 | M2 | 设计评审 + 守护进程引擎测试（M2 已落地，见 `M2-02`） |
@@ -67,6 +67,7 @@ yori CLI（用户会话） --> tensorboard 子进程（用户身份，默认 127
 | 18 | 环境保留键（身份块、`CUDA_VISIBLE_DEVICES`、`CUDA_DEVICE_ORDER`、`LD_PRELOAD`、`LD_LIBRARY_PATH`）在 JobSpec.env 中出现即拒绝启动计划 | 用户覆盖 GPU 隔离或以动态链接注入攻击 root daemon 路径 | M2 | `M2-01` 保留键负向测试 |
 | 19 | exec 前 `SIGPIPE` 置为忽略（DEC-008）；日志文件 `O_APPEND|O_NOFOLLOW` 打开，`0640` 与属主显式设置 | daemon 退出误杀训练（可用性）；符号链接替换日志文件（路径逃逸） | M2 | 管道断裂存活测试；`M2-05` 权限与打开方式断言 |
 | 20 | NVML 适配以 count-only 查询检测外部计算进程，不读取进程身份字段；NVML 库路径只接受管理员配置或测试注入，不接受用户输入；驱动返回数据按 SPI 校验（UUID 合法性、遥测边界、设备数上限），非法即整次观测失败 | 跨用户进程信息泄露；恶意/异常驱动数据污染调度事实；任意库注入 root daemon | M3 | 基线 10 `EXTERNAL_BUSY` 测试（`m3.unit.nvml-gpu-provider`）；身份零采集代码审查（`src/gpu/nvml_gpu_provider.cpp`）；非法快照不发布（`m3.unit.gpu-manager`）；真实 GPU 补跑项 |
+| 21 | 恢复绝不无条件重启数据库中的 RUNNING/STARTING Job：核验 PID/PGID/启动 ticks 三元组，进程消失、身份不符（PID reuse）或身份缺失一律 `LOST` 并释放 lease；`LOST` 残留进程由 `EXTERNAL_BUSY` 兜底而非接管/终止；SQLite 行数据篡改（非法状态、revision 矛盾、编码越界、lease 矩阵破坏）使 `load()` 显式失败；SQLite 库路径只接受管理员配置或测试注入 | PID reuse 错误接管（特权路径作用到无关进程）；崩溃窗口孤儿进程导致 GPU 双重分配；状态文件篡改注入非法调度事实 | M4 | 恢复决策矩阵与重入幂等（`m4.unit.job-recovery`）；PID reuse 防护与重启闭环（`m4.integration.recovery-restart`）；篡改/故障注入（`m4.unit.sqlite-state-store`） |
 
 ## 5. 初步威胁清单（待细化）
 
@@ -88,7 +89,10 @@ yori CLI（用户会话） --> tensorboard 子进程（用户身份，默认 127
 
 - [x] M2 实施前：launch path 与降权序列的威胁细化 —— 已随 M2 落地为基线条目
   16-19（fork 前构造、fd 收敛、保留键、SIGPIPE/日志打开方式）；cwd 父目录链
-  属主校验仍留给 M4/M7。
+  属主校验仍留给 M7。
+- [x] M4 实施前：持久化与恢复的威胁细化 —— 已随 M4 落地为基线条目 21
+  （恢复不重启、PID reuse 核验、篡改显式失败），并更新基线 8/13 的 M4 部分
+  （数据库符号链接拒绝、事务回滚负向测试）。
 - [ ] M5 实施前：IPC 协议、鉴权与 parser 的威胁细化（含 fuzz 范围声明）。
 - [ ] M6 实施前：观察面（流式跟随、背压、脱敏、tensorboard 网络边界）细化。
 - [ ] M7 发布前：全模型复查、残留风险清单定稿，本文件升级为 Active。
