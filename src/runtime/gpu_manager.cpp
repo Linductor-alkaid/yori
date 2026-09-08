@@ -57,7 +57,7 @@ class TickGuard final {
   bool held_;
 };
 
-enum class SampleCode {
+enum class SampleCode : std::uint8_t {
   kOk,
   kFailed,
   kSkipped,
@@ -272,7 +272,7 @@ class GpuManager::Impl final : public std::enable_shared_from_this<Impl> {
       return SampleCode::kOk;
     }
 
-    const StateMap next_baseline = build_state_map(loaded.value);
+    StateMap next_baseline = build_state_map(loaded.value);
     if (!baseline_established) {
       // 首次成功采样静默建立基线（start 的初始观测）：不产生迁移事件，
       // 消费方以快照直读获得初始状态。

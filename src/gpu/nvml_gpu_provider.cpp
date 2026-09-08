@@ -70,7 +70,7 @@ GpuProviderErrorCode map_observe_error(nvmlReturn_t status) {
 }
 
 // 外部占用探测结果。
-enum class OccupancyCode {
+enum class OccupancyCode : std::uint8_t {
   kFree,
   kExternalBusy,
   kUnavailable,
@@ -177,15 +177,12 @@ class NvmlGpuProvider::Impl final {
     if (status != NVML_SUCCESS) {
       const std::string detail = describe(resolved, status);
       static_cast<void>(::dlclose(library));
-      switch (map_init_error(status)) {
-        case GpuProviderErrorCode::kBackendUnavailable:
-          return {NvmlProviderLoadCode::kBackendUnavailable, detail};
-        case GpuProviderErrorCode::kPermissionDenied:
-          return {NvmlProviderLoadCode::kPermissionDenied, detail};
-        case GpuProviderErrorCode::kNone:
-          break;
-        case GpuProviderErrorCode::kObservationFailed:
-          break;
+      const auto mapped = map_init_error(status);
+      if (mapped == GpuProviderErrorCode::kBackendUnavailable) {
+        return {NvmlProviderLoadCode::kBackendUnavailable, detail};
+      }
+      if (mapped == GpuProviderErrorCode::kPermissionDenied) {
+        return {NvmlProviderLoadCode::kPermissionDenied, detail};
       }
       return {NvmlProviderLoadCode::kInitFailed, detail};
     }

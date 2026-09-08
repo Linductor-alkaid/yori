@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <functional>
 
 #include "gpu/nvml_api.hpp"
 
@@ -41,14 +42,15 @@ struct StubState {
 
 StubState g_state;
 
-// 句柄编码为 index+1（0 保留为 null，避免索引 0 的句柄与 nullptr 混淆）。
+// 句柄直接使用设备数组元素地址（真实指针，无整数编码）。
 StubDevice* device_by_handle(nvmlDevice_t device) {
-  const auto encoded = reinterpret_cast<std::uintptr_t>(device);
-  if (device == nullptr || encoded == 0 || encoded > kStubMaxDevices ||
-      !g_state.devices[encoded - 1].present) {
+  auto* target = reinterpret_cast<StubDevice*>(device);
+  const std::less<StubDevice*> within;
+  if (target == nullptr || within(target, &g_state.devices[0]) ||
+      !within(target, &g_state.devices[kStubMaxDevices]) || !target->present) {
     return nullptr;
   }
-  return &g_state.devices[encoded - 1];
+  return target;
 }
 
 }  // namespace
@@ -133,8 +135,8 @@ nvmlReturn_t nvmlShutdown(void) {
   return NVML_SUCCESS;
 }
 
-nvmlReturn_t nvmlDeviceGetCount_v2(unsigned int* device_count) {
-  if (device_count == nullptr) {
+nvmlReturn_t nvmlDeviceGetCount_v2(unsigned int* deviceCount) {
+  if (deviceCount == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
   }
   if (!g_state.initialized) {
@@ -143,7 +145,7 @@ nvmlReturn_t nvmlDeviceGetCount_v2(unsigned int* device_count) {
   if (g_state.count_error != NVML_SUCCESS) {
     return static_cast<nvmlReturn_t>(g_state.count_error);
   }
-  *device_count = g_state.device_count;
+  *deviceCount = g_state.device_count;
   return NVML_SUCCESS;
 }
 
@@ -157,7 +159,7 @@ nvmlReturn_t nvmlDeviceGetHandleByIndex_v2(unsigned int index, nvmlDevice_t* dev
   if (index >= kStubMaxDevices || !g_state.devices[index].present) {
     return NVML_ERROR_NOT_FOUND;
   }
-  *device = reinterpret_cast<nvmlDevice_t>(static_cast<std::uintptr_t>(index + 1));
+  *device = reinterpret_cast<nvmlDevice_t>(&g_state.devices[index]);
   return NVML_SUCCESS;
 }
 
@@ -215,19 +217,19 @@ nvmlReturn_t nvmlDeviceGetMemoryInfo(nvmlDevice_t device, nvmlMemory_t* memory) 
   return NVML_SUCCESS;
 }
 
-nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v3(nvmlDevice_t device, unsigned int* info_count,
+nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v3(nvmlDevice_t device, unsigned int* infoCount,
                                                      nvmlProcessInfo_t* infos) {
   if (g_state.v3_missing != 0) {
     return NVML_ERROR_FUNCTION_NOT_FOUND;
   }
   // v3 与 v2 共用同一注入状态（计数语义一致）。
-  return nvmlDeviceGetComputeRunningProcesses_v2(device, info_count, infos);
+  return nvmlDeviceGetComputeRunningProcesses_v2(device, infoCount, infos);
 }
 
-nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device, unsigned int* info_count,
+nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device, unsigned int* infoCount,
                                                      nvmlProcessInfo_t* infos) {
   ++g_state.uuid_v2_calls;
-  if (info_count == nullptr || infos != nullptr) {
+  if (infoCount == nullptr || infos != nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
   }
   const StubDevice* target = device_by_handle(device);
@@ -239,10 +241,10 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device, unsign
   }
   if (target->compute_processes > 0) {
     // 适配器只以 count=0 + null 缓冲探测：有进程即 INSUFFICIENT_SIZE。
-    *info_count = static_cast<unsigned int>(target->compute_processes);
+    *infoCount = static_cast<unsigned int>(target->compute_processes);
     return NVML_ERROR_INSUFFICIENT_SIZE;
   }
-  *info_count = 0;
+  *infoCount = 0;
   return NVML_SUCCESS;
 }
 
