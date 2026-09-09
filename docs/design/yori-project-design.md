@@ -1,8 +1,8 @@
 # Yori 项目设计文档
 
 > **定位**：单节点多用户 GPU 训练任务排队、调度与进程守护系统\
-> **状态**：设计草案 v0.7（冻结 M3 NVML 适配与 GPU 采样契约）\
-> **日期**：2026-09-08
+> **状态**：设计草案 v0.8（冻结 M4 持久化执行记录、SQLite 适配与恢复语义）\
+> **日期**：2026-09-09
 
 ## 1. 项目摘要
 
@@ -267,6 +267,27 @@ daemon 重启时，对数据库中 `RUNNING` / `STARTING` 的 Job 进入恢复�
 5.  无法确认时标记为 `LOST`。
 
 **绝不能因为 daemon 重启就直接重新启动数据库中的 RUNNING Job。**
+
+M4 冻结的恢复 Core 位于 `include/yori/recovery/job_recovery.hpp`
+（`JobRecovery`，同步、单 owner、无内部线程；Executor 承载与启动编排随
+daemon 总装落地）。决策输入为 `StateStore` 一致快照，核验依据是 M2 冻结的
+进程身份三元组（`/proc/<pid>/stat` 的 PGID 与启动 ticks，`RULE-06`；GPU 侧
+一致性由启动序列的重新观测与 lease 事实分列保证，见第 7 节）：
+
+| 快照状态 | 身份核验结果 | 恢复决策 |
+| --- | --- | --- |
+| `QUEUED` | 不适用 | 经 `GlobalJobQueue::restore()` 重新入队 |
+| `STARTING`（已记录身份） | 通过 | 提升 `RUNNING`（exec 已在崩溃前确认），lease 保留 |
+| `STARTING`（无身份，崩溃窗口） | 不适用 | `LOST` 并释放 lease；残留进程由外部占用检测标记 `EXTERNAL_BUSY` 兜底 |
+| `RUNNING` | 通过 | 采纳：保持 `RUNNING`，lease 保留（DEC-008 第 2 条） |
+| `STOPPING` | 通过 | 保持 `STOPPING` 并显式标记"需要重发取消"（宽限截止已丢失，重发 SIGTERM + 重建宽限由守护层执行） |
+| `STARTING/RUNNING/STOPPING` | 进程消失 / PGID 或启动 ticks 不符（PID reuse） | `LOST` 并释放 lease，`failure_reason` 记录稳定原因 |
+| 终态 | 不适用 | 不动（历史事实） |
+
+`LOST` 转换与其 lease 释放位于同一 mutation（lease 矩阵约束）；活动 Job 数量
+超过单 mutation 条目上限时按 `kMaxEntries` 分块、以递增 revision 链接，部分
+分块失败后已落盘的终态保持幂等，可安全重入恢复。恢复完成后以
+`kRecoveryCompleted` 触发调度（第 9 节）。
 
 ------------------------------------------------------------------------
 
@@ -849,12 +870,33 @@ lease acquire/release，并携带 `expected_revision`：
   不得有 lease；GPU 与 Job 两侧均为一对一。
 - 任一条目无效、容量耗尽或 backend 失败时返回稳定错误码，整个 mutation 不得
   留下部分写入。异步写入、FIFO 串行化与有界 admission 由 `EXEC-08` 的外部
-  Executor 路径负责，不在 adapter 内另建线程或写队列。
+  Executor 路径（`StoreTaskRunner`）负责，不在 adapter 内另建线程或写队列。
+
+M4 扩展了 `StoredJob` 的执行记录（`JobExecutionRecord`）：进程身份三元组
+（`ProcessIdentity`：pid/pgid/start_ticks）、`start_time`/`end_time`、退出状态
+（`ExitStatus`）、`failure_reason`（1..4096 bytes，仅终态）与 `log_path`
+（绝对路径，1..4096 bytes，`QUEUED` 禁止）。结构校验由
+`validate_execution()` 固化：身份要么全零（未记录）要么三元组有效；
+`QUEUED` 禁止携带身份，`RUNNING/STOPPING` 必须携带（到达路径必经 exec 确认），
+`STARTING` 与终态可选（spawn 前窗口/审计事实）；`exit`/`end_time` 仅终态可
+携带；`start_time` 仅身份存在时不早于 `submit_time`。违规 mutation 以
+`kInvalidExecutionRecord` 拒绝。两个后端的接受/拒绝决策共享
+`src/store/mutation_core.cpp` 验证核心，保证同语义。
 
 `InMemoryStateStore` 是容量显式、单 owner 的 M1 测试实现，通过副本校验后一次
-提交保证原子性；M4 SQLite adapter 必须保持相同语义，并扩展进程身份与恢复字段，
-不得改变 Core 的 revision/原子性契约。两个 SPI 的公开头只使用 C++20 标准库与
-Yori Core 类型，不暴露 NVML、SQLite 或 Executor 类型。
+提交保证原子性；`SqliteStateStore`（M4，`include/yori/store/sqlite_state_store.hpp`，
+选型见 [DEC-009](../decisions/DEC-009-sqlite-state-store.md)）是唯一生产实现：
+运行期 `dlopen` 绑定系统 `libsqlite3.so.0`（构建不依赖 libsqlite3-dev，库路径
+只接受管理员配置或测试注入），显式 `open()` 完成符号解析、幂等 schema 初始化
+（`schema_version=1`：`yori_meta`/`yori_jobs`/`yori_leases`，argv/env 以
+LE32 length-prefixed blob 编码、时间以 Unix epoch 纳秒编码），数据库文件为
+符号链接时拒绝打开，打开后尽力收敛权限 `0600`。`apply()` 以
+`BEGIN IMMEDIATE` 单事务完成"读 revision -> 内存验证 -> 写入 -> revision
+递增"，任何失败显式回滚不留部分写入；busy/locked/损坏文件/SQL 失败映射
+`kBackendUnavailable`，行数据篡改（非法状态、revision 与状态矛盾、编码越界、
+lease 矩阵破坏）使 `load()` 以稳定错误码显式失败而非静默跳过。两个 SPI 的
+公开头只使用 C++20 标准库与 Yori Core 类型，不暴露 NVML、SQLite 或 Executor
+类型。
 
 ------------------------------------------------------------------------
 
@@ -1183,6 +1225,7 @@ yori/
 │   ├── scheduler/
 │   ├── gpu/
 │   ├── process/
+│   ├── recovery/
 │   ├── ipc/
 │   ├── store/
 │   ├── launch/

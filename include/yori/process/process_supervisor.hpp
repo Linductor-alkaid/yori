@@ -59,6 +59,14 @@ struct ProcessIdentity final {
 // nullopt；僵尸进程仍可读。
 [[nodiscard]] std::optional<std::uint64_t> read_process_start_ticks(std::int64_t pid) noexcept;
 
+// 读取 /proc/<pid>/stat 的 PGID（第 5 字段）。进程不存在或解析失败返回 nullopt。
+[[nodiscard]] std::optional<std::int64_t> read_process_pgid(std::int64_t pid) noexcept;
+
+// 核验进程身份三元组是否仍指向原进程（RULE-06，恢复与 PID reuse 核验依据）：
+// 同一 /proc/<pid>/stat 内容内比对 PGID 与启动 ticks，进程不存在或任一字段
+// 不符（含部分无效的 identity）都返回 false，不得据此接管。
+[[nodiscard]] bool verify_process_identity(const ProcessIdentity& identity) noexcept;
+
 enum class ExitReason {
   kExited,
   kSignaled,
