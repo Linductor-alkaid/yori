@@ -150,6 +150,8 @@ std::vector<std::uint8_t> mutate(const std::vector<std::uint8_t>& input, Mutator
           std::swap(output[from], output[to]);
         }
         break;
+      default:
+        break;
     }
   }
   return output;

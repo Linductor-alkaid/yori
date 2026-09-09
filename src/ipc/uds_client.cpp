@@ -140,7 +140,7 @@ IpcClientResult UdsIpcClient::call(const std::string& endpoint, const IpcRequest
     return client_error(IpcClientError::kProtocol);
   }
 
-  const IpcResponseDecodeResult decoded =
+  IpcResponseDecodeResult decoded =
       decode_response_payload(response_payload.data(), response_payload.size());
   if (!decoded.ok()) {
     return client_error(IpcClientError::kProtocol);

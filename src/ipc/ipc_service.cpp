@@ -109,7 +109,7 @@ std::unique_ptr<LogSnapshotReader> file_log_snapshot_reader() {
 IpcService::IpcService(IpcServiceConfig config, queue::GlobalJobQueue& queue,
                        store::StateStore& store, GpuStatusSource& gpu_source,
                        LogSnapshotReader& log_reader)
-    : config_(config),
+    : config_(std::move(config)),
       queue_(queue),
       store_(store),
       gpu_source_(gpu_source),
@@ -458,9 +458,9 @@ IpcResponse IpcService::handle_logs(const PeerCredentials& peer, const IpcLogsRe
 
   const std::uint32_t max_bytes = std::min(request.max_bytes, config_.max_log_tail_bytes);
   const std::string& directory = *record->execution.log_path;
-  const LogTailResult stdout_tail = log_reader_.read_tail(
+  LogTailResult stdout_tail = log_reader_.read_tail(
       directory + "/" + observe::log_file_name(observe::LogStreamKind::kStdout), max_bytes);
-  const LogTailResult stderr_tail = log_reader_.read_tail(
+  LogTailResult stderr_tail = log_reader_.read_tail(
       directory + "/" + observe::log_file_name(observe::LogStreamKind::kStderr), max_bytes);
   if (!stdout_tail.ok || !stderr_tail.ok) {
     return error_response(IpcRequestKind::kLogs, IpcError::kNotAvailable,

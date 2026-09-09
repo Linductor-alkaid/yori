@@ -126,9 +126,9 @@ void test_response_roundtrips() {
   YORI_CHECK(decoded.jobs.size() == 2);
   YORI_CHECK(!decoded.jobs[0].masked && decoded.jobs[0].argv.size() == 2 &&
              decoded.jobs[0].exit == std::nullopt);
-  YORI_CHECK(decoded.jobs[1].masked && decoded.jobs[1].argv.empty() &&
-             decoded.jobs[1].exit.has_value() && !decoded.jobs[1].exit->exited_normally &&
-             decoded.jobs[1].exit->code == 9);
+  YORI_CHECK(decoded.jobs[1].masked && decoded.jobs[1].argv.empty());
+  const auto& second_exit = decoded.jobs[1].exit;
+  YORI_CHECK(second_exit.has_value() && !second_exit->exited_normally && second_exit->code == 9);
 
   response = IpcResponse{};
   response.kind = IpcRequestKind::kQueue;
@@ -357,7 +357,7 @@ void test_encoder_rejects_oversize() {
 
   // 总负载超限：argv 总字节 > 1 MiB（计数合法 2 条、单条合法 64 KiB）。
   IpcSubmitRequest big;
-  big.argv.assign(16, std::string(64 * 1024, 'c'));  // 1 MiB，加开销必然超限
+  big.argv.assign(16, std::string(std::size_t{64} * 1024, 'c'));  // 1 MiB，加开销必然超限
   big.cwd = "/tmp";
   request.submit = std::move(big);
   YORI_CHECK(!append_request_frame(request, frame));
@@ -368,7 +368,7 @@ void test_encoder_rejects_oversize() {
 
 void test_boundary_values() {
   // 63/64/65 KiB 字符串边界。
-  for (const std::size_t size : {std::size_t{63 * 1024}, std::size_t{64 * 1024}}) {
+  for (const std::size_t size : {std::size_t{63} * 1024, std::size_t{64} * 1024}) {
     IpcRequest request;
     request.kind = IpcRequestKind::kSubmit;
     request.submit.argv = {std::string(size, 'x')};

@@ -55,7 +55,7 @@ class FakeLogReader final : public LogSnapshotReader {
     result.ok = true;
     result.truncated = content.size() > max_bytes;
     const std::size_t begin = result.truncated ? content.size() - max_bytes : 0;
-    const std::size_t end = result.truncated ? content.size() : content.size();
+    const std::size_t end = content.size();
     result.tail.assign(content.begin() + static_cast<std::ptrdiff_t>(begin),
                        content.begin() + static_cast<std::ptrdiff_t>(end));
     static_cast<void>(path);
@@ -133,7 +133,7 @@ IpcResponse call_logs(IpcService& service, std::uint32_t uid, std::uint64_t job_
 
 // 直接在 store 中构造一个非 QUEUED Job（服务测试夹具；revision 从 0 递增）。
 void seed_job(yori::testing::InMemoryStateStore& store, JobId id, std::uint32_t owner_uid,
-              JobState state, std::string log_path = {}) {
+              JobState state, const std::string& log_path = {}) {
   yori::job::JobSpec spec;
   spec.owner_uid = owner_uid;
   spec.owner_gid = owner_uid;
