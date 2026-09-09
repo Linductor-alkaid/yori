@@ -1,10 +1,15 @@
 #include <yori/version.h>
 
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <string>
 #include <utility>
+#include <vector>
 #include <yori/gpu/gpu_provider.hpp>
+#include <yori/ipc/ipc_protocol.hpp>
+#include <yori/ipc/ipc_transport.hpp>
+#include <yori/ipc/uds_client.hpp>
 #include <yori/job/job.hpp>
 #include <yori/launch/launch_adapter.hpp>
 #include <yori/observe/log_sink.hpp>
@@ -36,7 +41,7 @@ int main() {
     return 1;
   }
 
-  yori::store::StateMutation empty_mutation;
+  const yori::store::StateMutation empty_mutation;
   if (empty_mutation.entry_count() != 0) {
     return 1;
   }
@@ -80,6 +85,27 @@ int main() {
   const yori::process::CancelPolicy cancel_policy;
   if (!cancel_policy.valid() ||
       cancel_policy.grace_period != yori::process::CancelPolicyLimits::kDefaultGracePeriod) {
+    return 1;
+  }
+
+  // M5：IPC 协议 roundtrip 与客户端适配链接边界（无 Executor 依赖）。
+  yori::ipc::IpcRequest ipc_request;
+  ipc_request.kind = yori::ipc::IpcRequestKind::kSubmit;
+  ipc_request.submit.argv = {"python", "train.py"};
+  ipc_request.submit.cwd = "/srv/training";
+  std::vector<std::uint8_t> ipc_frame;
+  if (!yori::ipc::append_request_frame(ipc_request, ipc_frame) || ipc_frame.size() < 6) {
+    return 1;
+  }
+  const auto decoded_request =
+      yori::ipc::decode_request_payload(ipc_frame.data() + 4, ipc_frame.size() - 4);
+  if (!decoded_request.ok() || decoded_request.value.submit.argv != ipc_request.submit.argv) {
+    return 1;
+  }
+  yori::ipc::UdsIpcClient ipc_client;
+  const auto unreachable =
+      ipc_client.call("/nonexistent/yori.sock", ipc_request, std::chrono::milliseconds{50});
+  if (unreachable.error != yori::ipc::IpcClientError::kConnectFailed) {
     return 1;
   }
 

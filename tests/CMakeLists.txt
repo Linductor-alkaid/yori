@@ -197,6 +197,48 @@ add_test(NAME m2.security.process-demotion COMMAND security_process_demotion_tes
 set_tests_properties(m2.security.process-demotion PROPERTIES
   LABELS "security;multi-user" SKIP_RETURN_CODE 77 TIMEOUT 120)
 
+# ---- unit;ipc：协议 v1 编解码与畸形矩阵（M5-01）-----------------------------
+add_executable(unit_ipc_protocol_test unit_ipc_protocol_test.cpp)
+target_link_libraries(unit_ipc_protocol_test PRIVATE yori::yori_core)
+yori_apply_warnings(unit_ipc_protocol_test)
+add_test(NAME m5.unit.ipc-protocol COMMAND unit_ipc_protocol_test)
+set_tests_properties(m5.unit.ipc-protocol PROPERTIES LABELS "unit;ipc" TIMEOUT 60)
+
+# ---- unit;ipc：daemon 侧请求服务、授权矩阵与脱敏（M5-03）--------------------
+add_executable(unit_ipc_service_test unit_ipc_service_test.cpp)
+target_link_libraries(unit_ipc_service_test PRIVATE yori::yori_core yori::test_support)
+yori_apply_warnings(unit_ipc_service_test)
+add_test(NAME m5.unit.ipc-service COMMAND unit_ipc_service_test)
+set_tests_properties(m5.unit.ipc-service PROPERTIES LABELS "unit;ipc" TIMEOUT 60)
+
+# ---- unit;ipc：UDS 服务器生命周期、端点治理与负向路径（M5-02）---------------
+add_executable(unit_ipc_server_test unit_ipc_server_test.cpp)
+target_link_libraries(unit_ipc_server_test
+  PRIVATE yori::yori_core yori::ipc yori::runtime executor::executor)
+yori_apply_warnings(unit_ipc_server_test)
+add_test(NAME m5.unit.ipc-server COMMAND unit_ipc_server_test)
+set_tests_properties(m5.unit.ipc-server PROPERTIES LABELS "unit;ipc" TIMEOUT 120)
+
+# ---- fuzz：IPC parser 确定性变异集（M5-05，起步）----------------------------
+add_executable(fuzz_ipc_parser_test fuzz_ipc_parser_test.cpp)
+target_link_libraries(fuzz_ipc_parser_test PRIVATE yori::yori_core)
+yori_apply_warnings(fuzz_ipc_parser_test)
+add_test(NAME m5.fuzz.ipc-parser COMMAND fuzz_ipc_parser_test)
+set_tests_properties(m5.fuzz.ipc-parser PROPERTIES LABELS "fuzz" TIMEOUT 120)
+
+# ---- integration;ipc：CLI -> UDS -> Daemon 全链路（M5-04/M5-05）------------
+# 进程内组装真实 Daemon（FakeGpuProvider + InMemoryStateStore），以真实 yori
+# CLI 二进制为客户端；替换 M0 的 example.ipc.protocol / example.fuzz.parser
+# 占位（后者由 m5.fuzz.ipc-parser 承接）。
+add_executable(integration_ipc_cli_test integration_ipc_cli_test.cpp)
+target_link_libraries(integration_ipc_cli_test
+  PRIVATE yori::yori_core yori::runtime yori::test_support executor::executor)
+target_compile_definitions(integration_ipc_cli_test PRIVATE YORI_CLI_BIN="$<TARGET_FILE:yori>")
+yori_apply_warnings(integration_ipc_cli_test)
+add_test(NAME m5.integration.ipc-e2e COMMAND integration_ipc_cli_test)
+set_tests_properties(m5.integration.ipc-e2e PROPERTIES
+  LABELS "integration;ipc" TIMEOUT 180)
+
 # ---- integration：CLI/daemon 冒烟 ----------------------------------------
 add_test(NAME example.integration.yori-version COMMAND $<TARGET_FILE:yori> --version)
 set_tests_properties(example.integration.yori-version PROPERTIES
@@ -233,9 +275,5 @@ function(yori_add_pending_example test_name labels reason)
     LABELS "${labels}" SKIP_RETURN_CODE 77 TIMEOUT 60)
 endfunction()
 
-yori_add_pending_example(example.ipc.protocol "ipc"
-  "M5 IPC 协议解析用例接入后启用；补跑条件：M5 合入后运行 ctest -L ipc")
-yori_add_pending_example(example.fuzz.parser "fuzz"
-  "M5 IPC parser fuzz corpus 接入后启用；补跑条件：M5 合入后运行 ctest -L fuzz")
 yori_add_pending_example(example.performance.scheduler "performance"
   "调度性能基准用例（M6+）接入后启用；补跑条件：基准方法与目标定稿后运行 ctest -L performance")
