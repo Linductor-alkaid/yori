@@ -7,6 +7,9 @@ configure_file(
 
 add_library(yori_core
   gpu/gpu_provider.cpp
+  ipc/ipc_protocol.cpp
+  ipc/ipc_service.cpp
+  ipc/ipc_transport.cpp
   job/job.cpp
   launch/launch_adapter.cpp
   observe/log_sink.cpp
@@ -31,9 +34,11 @@ yori_apply_warnings(yori_core)
 # Core 公开契约不暴露第三方类型。当前仅 yorid 持有它；无状态 CLI 在出现异步
 # 工作前不创建 Executor，届时必须由 CLI 主生命周期建立独立 owner。
 add_library(yori_runtime STATIC
+  runtime/daemon.cpp
   runtime/executor_runtime.cpp
   runtime/grace_escalation.cpp
   runtime/gpu_manager.cpp
+  runtime/ipc_server.cpp
   runtime/log_pump.cpp
   runtime/process_exit_monitor.cpp
   runtime/scheduler_task_runner.cpp
@@ -42,8 +47,25 @@ add_library(yori::runtime ALIAS yori_runtime)
 target_include_directories(yori_runtime
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
-target_link_libraries(yori_runtime PRIVATE executor::executor yori::yori_core)
+target_link_libraries(yori_runtime PRIVATE executor::executor yori::yori_core yori::ipc)
 yori_apply_warnings(yori_runtime)
+
+# UDS IPC 客户端适配（M5-02，Adapter 层，RULE-02）：无 Executor、同步有界；
+# 服务端（Executor blocking worker 承载）在 yori_runtime。内部头 ipc/uds_io.hpp
+# 与 yori_runtime 共享（帧 I/O）。
+add_library(yori_ipc
+  ipc/uds_client.cpp
+  ipc/uds_io.cpp)
+add_library(yori::ipc ALIAS yori_ipc)
+target_include_directories(yori_ipc
+  PUBLIC
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/generated>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(yori_ipc PUBLIC yori::yori_core)
+yori_apply_warnings(yori_ipc)
 
 # NVML 适配（M3-01，Adapter 层，RULE-02）：运行期 dlopen 绑定真实驱动，构建
 # 不依赖 CUDA/NVML SDK；公开头只暴露 Core SPI 类型。内部声明头 gpu/nvml_api.hpp
@@ -92,7 +114,7 @@ set_target_properties(yori_core PROPERTIES
   VERSION ${PROJECT_VERSION}
   SOVERSION ${PROJECT_VERSION_MAJOR})
 
-install(TARGETS yori_core yori_nvml yori_sqlite EXPORT yori-export
+install(TARGETS yori_core yori_nvml yori_sqlite yori_ipc EXPORT yori-export
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
