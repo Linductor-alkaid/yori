@@ -31,11 +31,13 @@
 
 | 依赖 | 引入方式 | 版本 | commit | source | 许可证 |
 | --- | --- | --- | --- | --- | --- |
-| executor | submodule `third_party/executor` | `v0.4.0-82-g4fd8e60` | `4fd8e6097879a56c7c3ad33b10f803cfe2e2e4d9` | `https://github.com/Linductor-alkaid/executor.git` | MIT（许可文件 `third_party/executor/LICENSE`） |
+| executor | submodule `third_party/executor` | `0.4.0+e2dc8ca` | `e2dc8ca2243345e2e6cf35b395793a58796457b9` | `https://github.com/Linductor-alkaid/executor.git` | MIT（许可文件 `third_party/executor/LICENSE`） |
 
 引入说明：初始引入直接固定 origin/master（2026-09-02），未等待上游发布 tag，
 理由与风险见 [DEC-001](../decisions/DEC-001-executor-pinning.md) 与
-[设计文档](../design/yori-project-design.md)第 14 节。
+[设计文档](../design/yori-project-design.md)第 14 节。2026-09-09 升级至
+`e2dc8ca`（停机/提交竞态修复与热路径性能重建），审计记录见
+[upgrade-executor-20260909.md](upgrade-executor-20260909.md)。
 
 ## 4. 升级流程
 

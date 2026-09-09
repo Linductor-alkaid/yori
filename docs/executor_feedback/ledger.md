@@ -8,7 +8,8 @@
 
 ## 1. 登记规则（摘要）
 
-- 登记前先核对当前 pinned 版本（`v0.4.0-82-g4fd8e60`）的公开头文件、
+- 登记前先核对当前 pinned 版本（`0.4.0+e2dc8ca`，2026-09-09 起，见
+  [dependencies.lock.json](../../dependencies.lock.json)）的公开头文件、
   `third_party/executor/docs/API.md`、集成 SKILL 及相关测试，排除 API 选型错误、
   配置错误、平台限制与应用层职责。
 - 仅记录真实能力缺口，必须包含：缺失的行为、造成缺口的 API/语义限制、为什么
