@@ -1,7 +1,7 @@
 # Yori 项目设计文档
 
 > **定位**：单节点多用户 GPU 训练任务排队、调度与进程守护系统\
-> **状态**：设计草案 v0.8（冻结 M4 持久化执行记录、SQLite 适配与恢复语义）\
+> **状态**：设计草案 v0.9（冻结 M5 IPC 协议 v1、UDS 传输与授权脱敏语义）\
 > **日期**：2026-09-09
 
 ## 1. 项目摘要
@@ -171,7 +171,9 @@ initgroups + setgid + setuid
 exec 用户训练命令
 ```
 
-建议建立 `yori` 系统组，仅组内用户可以连接 socket。
+建议建立 `yori` 系统组，仅组内用户可以连接 socket（连接准入由文件权限
+承担，主组与补充组均可；管理员判定与端点治理细节冻结于
+[DEC-010](../decisions/DEC-010-uds-ipc-endpoint.md)）。
 
 客户端不得提供可信的"目标 UID"。daemon 必须使用 Linux `SO_PEERCRED`
 等内核机制确定连接用户身份。
@@ -960,6 +962,57 @@ MVP 的 IPC 消息分为两类：
 
 流式会话数量与每会话缓冲容量在 daemon 配置中有明确上限，拒绝与溢出返回
 显式错误帧，不静默重试。
+
+### 13.3 协议 v1（M5 冻结）
+
+M5 落地请求/响应族协议 v1，公开契约位于 `include/yori/ipc/`：
+
+-   **帧格式**（两个方向一致）：`[u32 LE payload_bytes][payload]`，
+    payload = `[u8 version=1][u8 kind][kind body]`。负载上限 1 MiB、单字符串
+    64 KiB、请求内计数 256、列表 1024、日志尾部每流 256 KiB（协议级常量
+    `IpcProtocolLimits`）。
+-   **请求 kind**：`SUBMIT`/`PS`/`QUEUE`/`GPU`/`CANCEL`/`LOGS`（快照）。
+    请求结构不携带任何身份字段——Job owner 只来自 `SO_PEERCRED`（第 5 节、
+    DEC-010），客户端无从声明目标 UID。
+-   **响应**：统一错误码（NONE/PROTOCOL/UNSUPPORTED/DENIED/INVALID_SPEC/
+    QUEUE_REJECTED/STORE_FAILED/NOT_FOUND/INVALID_STATE/NOT_AVAILABLE/LIMIT/
+    INTERNAL）+ detail + 按 kind 的结果体；错误响应携带可用上下文（如
+    CANCEL 拒绝时的当前状态）。
+-   **解析纪律**：解码器只产生稳定错误码（截断/超限/坏版本/坏 kind/坏
+    字符串/计数超限/尾部字节/值域非法）或完整解析；字符串禁止 NUL；全部
+    输入必须精确消费；语义校验（JobSpec 精确限制）由 daemon 侧
+    `job::validate` 承担，协议层只管结构安全。fuzz 集从 M5 起纳入回归
+    （第 17 节第 9 条）。
+
+### 13.4 传输承载与端点治理（M5）
+
+-   `IpcTransport` 抽象（`ipc_transport.hpp`）：daemon 侧
+    `IpcRequestHandler`（在 UDS blocking worker 内被串行调用）+
+    `IpcServerTransport`/`IpcClientTransport`。
+-   UDS 服务端（EXEC-02）：单个 Executor blocking worker 以 poll 等待
+    listen fd 与唤醒管道，串行 accept -> `SO_PEERCRED` -> 读一帧 ->
+    handler -> 写回一帧 -> 关闭。每连接请求总预算（默认 5s）到期即断开
+    （慢客户端有界化）；帧界违规回 PROTOCOL 错误帧后断开；handler 异常
+    映射 INTERNAL 响应（不吞、不崩）。
+-   UDS 客户端：同步有界（connect/发送/等待共享一个截止时间预算），
+    不创建 Executor；`yori` CLI 直接使用。
+-   端点治理（DEC-010）：默认 `/run/yori/yori.sock`、`root:yori 0660`；
+    bind 以收紧的 umask 创建 socket，随后显式 chmod/chown（Linux 的
+    fchmod 对 socket fd 不生效）；陈旧端点仅在确为 socket 文件时替换。
+    停止 = 唤醒 + join + unlink（EXEC-10 阶段 ①），幂等且不可重启。
+
+### 13.5 授权、脱敏与 CLI 契约（M5）
+
+-   授权在 daemon 侧基于 `SO_PEERCRED` 判定：Job owner（uid 相等）或
+    admin（主 GID 匹配配置组，或 UID 属于启动时解析的 admin 组成员集，
+    DEC-010）。`ps`/`queue`/`gpu` 对所有连接者开放（非自有 Job 脱敏），
+    `cancel`/`logs` 仅 owner/admin。
+-   脱敏（第 11.5 节）：非 owner 非 admin 的 Job 仅暴露
+    JobId/状态/revision/owner_uid/退出状态；argv/cwd/tensorboard_logdir
+    不出现在响应中（masked 标记置位）。
+-   `yori` CLI 退出码：0 成功；1 请求失败（daemon 显式错误）；
+    2 用法错误；3 传输失败（连接/超时/协议）。`logs -f` 与
+    `yori tensorboard` 为 M6 范围，当前显式拒绝。
 
 ------------------------------------------------------------------------
 

@@ -1,7 +1,7 @@
 # Yori 实施总计划
 
 > 状态：Active
-> 版本：1.5
+> 版本：1.6
 > 更新日期：2026-09-09
 > 负责人：Linductor-alkaid
 > 设计依据：[Yori 项目设计文档](../design/yori-project-design.md)（v0.5）
@@ -41,10 +41,14 @@
   （`EXEC-08` 载载）落地；PR [#5](https://github.com/Linductor-alkaid/yori/pull/5)
   最终 CI [全绿](https://github.com/Linductor-alkaid/yori/actions/runs/34273077478)
   （证据见 [M4 验证记录](m4-persistence-recovery.md)）。
-- 当前里程碑：无（M4 已完成；M5 IPC/CLI 可依序启动，待排期）。
+- 当前里程碑：M5（IPC 与 CLI）。协议 v1 Core 契约、UDS 传输（`SO_PEERCRED`、
+  EXEC-02 blocking worker、[DEC-010](../decisions/DEC-010-uds-ipc-endpoint.md)
+  端点治理）、daemon 侧请求服务（owner/admin 授权与脱敏）、M5 子集 daemon
+  总装与 `yori` 六命令、IPC fuzz 起步已实现（详见
+  [M5 计划](m5-ipc-cli.md)，工作项待 PR CI 收口后勾选）。
 - MVP 端到端验收以设计文档第 19 节判据为准，由 M7 执行并记录证据（见第 10 节）。
 - 里程碑文档在各自启动时创建（工程规范第 2 节）；当前实体文件：M0、M1、M2、
-  M3、M4。
+  M3、M4、M5。
 
 ## 2. 交付边界（SCOPE）
 
@@ -123,7 +127,7 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | M2 | 进程守护与启动适配 | M1 | ProcessSupervisor（spawn、进程组、取消、退出回收）、LaunchProfile、`exec` 前降权、日志捕获与落盘 | 无 | Completed |
 | M3 | NVML 真实 GPU 集成 | M2 | `GpuProvider` NVML 适配：发现、UUID 身份、遥测、外部占用检测（`EXTERNAL_BUSY`）；`GpuManager` 周期采样（`EXEC-05`/`EXEC-09` GPU 快照） | 无 | Completed |
 | M4 | 持久化与恢复 | M2 | SQLite StateStore、daemon 重启恢复、PID reuse 核验、`LOST` 语义 | 无 | Completed |
-| M5 | IPC 与 CLI | M3、M4 | UDS 传输、`SO_PEERCRED` 鉴权、请求/响应协议与 owner/admin 授权、`submit`/`ps`/`queue`/`gpu`/`cancel`/`logs` 快照、IPC fuzz 起步 | 无 | Planned |
+| M5 | IPC 与 CLI | M3、M4 | UDS 传输、`SO_PEERCRED` 鉴权、请求/响应协议与 owner/admin 授权、`submit`/`ps`/`queue`/`gpu`/`cancel`/`logs` 快照、IPC fuzz 起步 | 无 | In Progress |
 | M6 | 观察面 | M5 | `logs -f` 流式帧（offset 续传、`GAP`/`EOF`/`BACKPRESSURE`）、日志轮转、`yori tensorboard` | 无 | Planned |
 | M7 | 打包与 MVP 端到端验收 | M6 | systemd unit、安装打包、设计 §19 判据逐项验收 | `v0.1.0`（MVP） | Planned |
 
@@ -133,12 +137,13 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
   [M1 核心域契约与进程内调度闭环](m1-core-contracts.md)、
   [M2 进程守护与启动适配](m2-process-supervision.md)、
   [M3 NVML 真实 GPU 集成](m3-nvml-gpu-integration.md)、
-  [M4 持久化与恢复](m4-persistence-recovery.md)。
+  [M4 持久化与恢复](m4-persistence-recovery.md)、
+  [M5 IPC 与 CLI](m5-ipc-cli.md)。
 
 ## 6. 暂定默认值与未决问题
 
 以下选择为推进而暂定，或为已识别的设计缺口；冻结前变更不受罚，冻结时按工程规范
-第 6.2 节落为决策记录。已冻结的决策见 `docs/decisions/`（DEC-001 ~ DEC-005）。
+第 6.2 节落为决策记录。已冻结的决策见 `docs/decisions/`（DEC-001 ~ DEC-010）。
 
 | 项目 | 暂定默认值 / 未决问题 | 负责人 | 最迟冻结 | 冻结动作 |
 | --- | --- | --- | --- | --- |
@@ -147,7 +152,7 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | 环境变量白名单初版 | 已冻结：身份块 + daemon 白名单 + GPU 映射块三层合并，保留键出现即拒绝（[DEC-006](../decisions/DEC-006-launch-environment-policy.md)） | Linductor-alkaid | M2 | 已于 2026-09-08 冻结；扩展白名单属配置级变更 |
 | daemon 重启后的日志续捕 | 守护语义已冻结：子进程 exec 前 `SIGPIPE=SIG_IGN`，重启窗口输出丢失、文件原位续写（[DEC-008](../decisions/DEC-008-daemon-restart-log-continuity.md)）；观察面 offset/续捕细节最迟 M6 复核 | Linductor-alkaid | M2（已冻结）、M6（复核） | 设计 §10.2/§11.2 已同步 |
 | 持久化实现 | 已冻结：SQLite 为唯一 `StateStore` 实现，内存实现仅测试用；dlopen 绑定与 schema 1 见 [DEC-009](../decisions/DEC-009-sqlite-state-store.md) | Linductor-alkaid | M4 | 已于 2026-09-09 冻结；格式变更需新决策记录 |
-| IPC 端点 | `/run/yori/yori.sock`、`root:yori 0660`、`yori` 系统组（设计 §5） | Linductor-alkaid | M5 | 决策记录或设计确认 |
+| IPC 端点 | 已冻结：`/run/yori/yori.sock`、`root:yori 0660`、`yori` 系统组连接准入、admin 组双路径判定（[DEC-010](../decisions/DEC-010-uds-ipc-endpoint.md)） | Linductor-alkaid | M5 | 已于 2026-09-09 冻结；变更需新决策记录替代 DEC-010 |
 | 日志与跟随上限默认值 | 单文件 256 MiB、保留 1 个历史文件、每 Job 8 / 全局 64 跟随会话、全局磁盘预算（设计 §11.2/11.4） | Linductor-alkaid | M6 | 配置定稿 + 测试 |
 | 仓库自身许可证 | 未决 | Linductor-alkaid | M7（发布前） | 选定并添加 LICENSE，同步[供应链策略](../supply-chain/dependency-policy.md) |
 
@@ -214,8 +219,8 @@ CI 无法覆盖的项按工程规范第 4 节保持未勾选并记录原因与�
   [M1 核心域契约与进程内调度闭环](m1-core-contracts.md)、
   [M2 进程守护与启动适配](m2-process-supervision.md)、
   [M3 NVML 真实 GPU 集成](m3-nvml-gpu-integration.md)、
-  [M4 持久化与恢复](m4-persistence-recovery.md)
-  （M5 起随里程碑创建）
+  [M4 持久化与恢复](m4-persistence-recovery.md)、
+  [M5 IPC 与 CLI](m5-ipc-cli.md)
 - 决策：[DEC-001 Executor 依赖引入与锁定](../decisions/DEC-001-executor-pinning.md)、
   [DEC-002 MVP 纳入训练观察面](../decisions/DEC-002-mvp-observability.md)、
   [DEC-003 TensorBoard 由 CLI 拉起](../decisions/DEC-003-tensorboard-cli-hosting.md)、
@@ -224,7 +229,8 @@ CI 无法覆盖的项按工程规范第 4 节保持未勾选并记录原因与�
   [DEC-006 训练进程环境变量继承白名单](../decisions/DEC-006-launch-environment-policy.md)、
   [DEC-007 取消宽限期与升级语义](../decisions/DEC-007-cancel-grace-period.md)、
   [DEC-008 daemon 重启日志管道断裂语义](../decisions/DEC-008-daemon-restart-log-continuity.md)、
-  [DEC-009 SQLite StateStore 采用与 dlopen 绑定](../decisions/DEC-009-sqlite-state-store.md)
+  [DEC-009 SQLite StateStore 采用与 dlopen 绑定](../decisions/DEC-009-sqlite-state-store.md)、
+  [DEC-010 UDS IPC 端点、权限与管理员判定](../decisions/DEC-010-uds-ipc-endpoint.md)
 - 安全：[威胁模型（草案）](../security/threat-model.md)
 - 供应链：[依赖管理与供应链策略](../supply-chain/dependency-policy.md)
 - Executor 反馈：[能力缺口反馈台账](../executor_feedback/ledger.md)
