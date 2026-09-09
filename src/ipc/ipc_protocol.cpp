@@ -250,6 +250,22 @@ bool encode_request_body(const IpcRequest& request, Writer& writer) {
       writer.u64(request.logs.job_id);
       writer.u32(request.logs.max_bytes);
       return true;
+    case IpcRequestKind::kLogsFollow: {
+      const IpcLogsFollowRequest& follow = request.logs_follow;
+      writer.u64(follow.job_id);
+      writer.u8(follow.since_stdout ? 1 : 0);
+      if (follow.since_stdout) {
+        writer.u64(*follow.since_stdout);
+      }
+      writer.u8(follow.since_stderr ? 1 : 0);
+      if (follow.since_stderr) {
+        writer.u64(*follow.since_stderr);
+      }
+      return true;
+    }
+    case IpcRequestKind::kTensorboard:
+      writer.u64(request.tensorboard.job_id);
+      return true;
   }
   return false;
 }
@@ -356,6 +372,14 @@ bool encode_response_body(const IpcResponse& response, Writer& writer) {
       }
       writer.u8(response.logs.stderr_truncated ? 1 : 0);
       return !writer.bytes(response.logs.stderr_tail);
+    case IpcRequestKind::kLogsFollow:
+      writer.u8(response.logs_follow.job_state);
+      writer.u64(response.logs_follow.stdout_offset);
+      writer.u64(response.logs_follow.stderr_offset);
+      return true;
+    case IpcRequestKind::kTensorboard:
+      return !(writer.string(response.tensorboard.logdir) ||
+               writer.string(response.tensorboard.cwd));
   }
   return false;
 }
@@ -373,7 +397,7 @@ IpcDecodeError decode_request_body(Reader& reader, IpcRequest& out) {
     return IpcDecodeError::kBadVersion;
   }
   if (kind < static_cast<std::uint8_t>(IpcRequestKind::kSubmit) ||
-      kind > static_cast<std::uint8_t>(IpcRequestKind::kLogs)) {
+      kind > static_cast<std::uint8_t>(IpcRequestKind::kTensorboard)) {
     return IpcDecodeError::kBadKind;
   }
   out = IpcRequest{};
@@ -440,6 +464,42 @@ IpcDecodeError decode_request_body(Reader& reader, IpcRequest& out) {
         return IpcDecodeError::kTruncated;
       }
       break;
+    case IpcRequestKind::kLogsFollow: {
+      IpcLogsFollowRequest& follow = out.logs_follow;
+      bool have_stdout = false;
+      bool have_stderr = false;
+      if (!reader.u64(follow.job_id)) {
+        return IpcDecodeError::kTruncated;
+      }
+      IpcDecodeError error = reader.flag(have_stdout);
+      if (error != IpcDecodeError::kNone) {
+        return error;
+      }
+      if (have_stdout) {
+        std::uint64_t since = 0;
+        if (!reader.u64(since)) {
+          return IpcDecodeError::kTruncated;
+        }
+        follow.since_stdout = since;
+      }
+      error = reader.flag(have_stderr);
+      if (error != IpcDecodeError::kNone) {
+        return error;
+      }
+      if (have_stderr) {
+        std::uint64_t since = 0;
+        if (!reader.u64(since)) {
+          return IpcDecodeError::kTruncated;
+        }
+        follow.since_stderr = since;
+      }
+      break;
+    }
+    case IpcRequestKind::kTensorboard:
+      if (!reader.u64(out.tensorboard.job_id)) {
+        return IpcDecodeError::kTruncated;
+      }
+      break;
   }
   if (!reader.exhausted()) {
     return IpcDecodeError::kTrailingBytes;
@@ -458,7 +518,7 @@ IpcDecodeError decode_response_body(Reader& reader, IpcResponse& out) {
     return IpcDecodeError::kBadVersion;
   }
   if (kind < static_cast<std::uint8_t>(IpcRequestKind::kSubmit) ||
-      kind > static_cast<std::uint8_t>(IpcRequestKind::kLogs)) {
+      kind > static_cast<std::uint8_t>(IpcRequestKind::kTensorboard)) {
     return IpcDecodeError::kBadKind;
   }
   if (!reader.u8(error_code)) {
@@ -670,6 +730,26 @@ IpcDecodeError decode_response_body(Reader& reader, IpcResponse& out) {
       }
       break;
     }
+    case IpcRequestKind::kLogsFollow:
+      if (!reader.u8(out.logs_follow.job_state) || !reader.u64(out.logs_follow.stdout_offset) ||
+          !reader.u64(out.logs_follow.stderr_offset)) {
+        return IpcDecodeError::kTruncated;
+      }
+      if (out.logs_follow.job_state > kUnderlyingJobStateMax) {
+        return IpcDecodeError::kInvalidValue;
+      }
+      break;
+    case IpcRequestKind::kTensorboard: {
+      error = reader.string(out.tensorboard.logdir);
+      if (error != IpcDecodeError::kNone) {
+        return error;
+      }
+      error = reader.string(out.tensorboard.cwd);
+      if (error != IpcDecodeError::kNone) {
+        return error;
+      }
+      break;
+    }
   }
   if (!reader.exhausted()) {
     return IpcDecodeError::kTrailingBytes;
@@ -692,6 +772,144 @@ bool encode_payload(IpcRequestKind kind, const Message& message,
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// 流式帧族（M6）。数据帧上限独立于 LOGS 快照，控制帧定长。
+// ---------------------------------------------------------------------------
+
+constexpr std::uint8_t kUnderlyingStreamMax = 1;  // observe::LogStreamKind::kStderr
+
+bool encode_stream_frame_body(const IpcStreamFrame& frame, Writer& writer) {
+  switch (frame.kind) {
+    case IpcStreamFrameKind::kLogData:
+      if (frame.stream > kUnderlyingStreamMax ||
+          frame.data.size() > IpcProtocolLimits::kMaxStreamDataBytes ||
+          frame.end_offset < frame.begin_offset) {
+        return false;
+      }
+      writer.u8(frame.stream);
+      writer.u64(frame.begin_offset);
+      writer.u64(frame.end_offset);
+      return !writer.bytes(frame.data);
+    case IpcStreamFrameKind::kLogGap:
+      if (frame.stream > kUnderlyingStreamMax || frame.end_offset < frame.begin_offset) {
+        return false;
+      }
+      writer.u8(frame.stream);
+      writer.u64(frame.begin_offset);
+      writer.u64(frame.end_offset);
+      return true;
+    case IpcStreamFrameKind::kLogBackpressure:
+      if (frame.stream > kUnderlyingStreamMax) {
+        return false;
+      }
+      writer.u8(frame.stream);
+      writer.u64(frame.begin_offset);
+      return true;
+    case IpcStreamFrameKind::kLogEof:
+      if (frame.job_state > kUnderlyingJobStateMax) {
+        return false;
+      }
+      writer.u8(frame.job_state);
+      if (!frame.exit) {
+        writer.u8(0);
+        return true;
+      }
+      writer.u8(1);
+      writer.u8(frame.exit->exited_normally ? 1 : 0);
+      writer.i32(frame.exit->code);
+      return true;
+  }
+  return false;
+}
+
+IpcDecodeError decode_stream_frame_body(Reader& reader, IpcStreamFrame& out) {
+  std::uint8_t version = 0;
+  std::uint8_t kind = 0;
+  if (!reader.u8(version) || !reader.u8(kind)) {
+    return IpcDecodeError::kTruncated;
+  }
+  if (version != IpcProtocolLimits::kProtocolVersion) {
+    return IpcDecodeError::kBadVersion;
+  }
+  if (kind < static_cast<std::uint8_t>(IpcStreamFrameKind::kLogData) ||
+      kind > static_cast<std::uint8_t>(IpcStreamFrameKind::kLogEof)) {
+    return IpcDecodeError::kBadKind;
+  }
+  out = IpcStreamFrame{};
+  out.kind = static_cast<IpcStreamFrameKind>(kind);
+
+  switch (out.kind) {
+    case IpcStreamFrameKind::kLogData:
+      if (!reader.u8(out.stream) || !reader.u64(out.begin_offset) || !reader.u64(out.end_offset)) {
+        return IpcDecodeError::kTruncated;
+      }
+      if (out.stream > kUnderlyingStreamMax || out.end_offset < out.begin_offset) {
+        return IpcDecodeError::kInvalidValue;
+      }
+      {
+        // bytes() 以 kMaxBytesFieldBytes 兜底防越界分配；流式数据上限在此
+        // 独立收紧为 kMaxStreamDataBytes。
+        const IpcDecodeError error = reader.bytes(out.data);
+        if (error != IpcDecodeError::kNone) {
+          return error;
+        }
+        if (out.data.size() > IpcProtocolLimits::kMaxStreamDataBytes) {
+          return IpcDecodeError::kOversize;
+        }
+      }
+      break;
+    case IpcStreamFrameKind::kLogGap:
+      if (!reader.u8(out.stream) || !reader.u64(out.begin_offset) || !reader.u64(out.end_offset)) {
+        return IpcDecodeError::kTruncated;
+      }
+      if (out.stream > kUnderlyingStreamMax || out.end_offset < out.begin_offset) {
+        return IpcDecodeError::kInvalidValue;
+      }
+      break;
+    case IpcStreamFrameKind::kLogBackpressure:
+      if (!reader.u8(out.stream) || !reader.u64(out.begin_offset)) {
+        return IpcDecodeError::kTruncated;
+      }
+      if (out.stream > kUnderlyingStreamMax) {
+        return IpcDecodeError::kInvalidValue;
+      }
+      break;
+    case IpcStreamFrameKind::kLogEof: {
+      if (!reader.u8(out.job_state)) {
+        return IpcDecodeError::kTruncated;
+      }
+      if (out.job_state > kUnderlyingJobStateMax) {
+        return IpcDecodeError::kInvalidValue;
+      }
+      bool has_exit = false;
+      IpcDecodeError error = reader.flag(has_exit);
+      if (error != IpcDecodeError::kNone) {
+        return error;
+      }
+      if (has_exit) {
+        std::uint8_t normal = 0;
+        if (!reader.u8(normal)) {
+          return IpcDecodeError::kTruncated;
+        }
+        if (normal > 1) {
+          return IpcDecodeError::kInvalidValue;
+        }
+        IpcExitStatus exit_status;
+        exit_status.exited_normally = normal == 1;
+        if (!reader.i32(exit_status.code)) {
+          return IpcDecodeError::kTruncated;
+        }
+        out.exit = exit_status;
+      }
+      break;
+    }
+  }
+  if (!reader.exhausted()) {
+    return IpcDecodeError::kTrailingBytes;
+  }
+  return IpcDecodeError::kNone;
+}
+
 }  // namespace
 
 const char* to_string(IpcRequestKind kind) noexcept {
@@ -708,6 +926,24 @@ const char* to_string(IpcRequestKind kind) noexcept {
       return "cancel";
     case IpcRequestKind::kLogs:
       return "logs";
+    case IpcRequestKind::kLogsFollow:
+      return "logs-follow";
+    case IpcRequestKind::kTensorboard:
+      return "tensorboard";
+  }
+  return "unknown";
+}
+
+const char* to_string(IpcStreamFrameKind kind) noexcept {
+  switch (kind) {
+    case IpcStreamFrameKind::kLogData:
+      return "log-data";
+    case IpcStreamFrameKind::kLogGap:
+      return "log-gap";
+    case IpcStreamFrameKind::kLogBackpressure:
+      return "log-backpressure";
+    case IpcStreamFrameKind::kLogEof:
+      return "log-eof";
   }
   return "unknown";
 }
@@ -815,6 +1051,41 @@ IpcResponseDecodeResult decode_response_payload(const std::uint8_t* data, std::s
   }
   Reader reader(data, size);
   result.error = decode_response_body(reader, result.value);
+  return result;
+}
+
+bool encode_stream_frame_payload(const IpcStreamFrame& frame, std::vector<std::uint8_t>& out) {
+  std::vector<std::uint8_t> payload;
+  Writer writer(payload);
+  writer.u8(static_cast<std::uint8_t>(IpcProtocolLimits::kProtocolVersion));
+  writer.u8(static_cast<std::uint8_t>(frame.kind));
+  if (!encode_stream_frame_body(frame, writer) ||
+      payload.size() > IpcProtocolLimits::kMaxPayloadBytes) {
+    return false;
+  }
+  out.insert(out.end(), payload.begin(), payload.end());
+  return true;
+}
+
+bool append_stream_frame(const IpcStreamFrame& frame, std::vector<std::uint8_t>& out) {
+  std::vector<std::uint8_t> payload;
+  if (!encode_stream_frame_payload(frame, payload)) {
+    return false;
+  }
+  Writer framed(out);
+  framed.u32(static_cast<std::uint32_t>(payload.size()));
+  out.insert(out.end(), payload.begin(), payload.end());
+  return true;
+}
+
+IpcStreamFrameDecodeResult decode_stream_frame_payload(const std::uint8_t* data, std::size_t size) {
+  IpcStreamFrameDecodeResult result;
+  if (size > IpcProtocolLimits::kMaxPayloadBytes) {
+    result.error = IpcDecodeError::kOversize;
+    return result;
+  }
+  Reader reader(data, size);
+  result.error = decode_stream_frame_body(reader, result.value);
   return result;
 }
 
