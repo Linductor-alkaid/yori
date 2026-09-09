@@ -1,8 +1,8 @@
 # Yori 项目设计文档
 
 > **定位**：单节点多用户 GPU 训练任务排队、调度与进程守护系统\
-> **状态**：设计草案 v0.9（冻结 M5 IPC 协议 v1、UDS 传输与授权脱敏语义）\
-> **日期**：2026-09-09
+> **状态**：设计草案 v0.10（M6 观察面：logs -f 流式帧与回看窗口、tensorboard 落地）\
+> **日期**：2026-09-10
 
 ## 1. 项目摘要
 
@@ -720,34 +720,47 @@ yori tensorboard <job-id>          # 指标观察：以提交用户身份拉起 
 ``` bash
 yori logs <job-id>                 # 输出当前日志尾部（stdout+stderr 合并视图）
 yori logs -f <job-id>              # 跟随输出，直到 Job 终态且流排空后退出
-yori logs --stdout <job-id>        # 仅 stdout
-yori logs --since-offset N <job-id>  # 从逻辑 offset N 开始（断线重连）
+yori logs --bytes N <job-id>       # 快照每流字节数
+yori logs -f --since-stdout N \
+           --since-stderr M <job-id>   # 断线重连（两路流 offset 独立续传）
 ```
 
 MVP 即提供 `-f`。实现路径：
 
 -   daemon 侧 `LogStreamer` 将管道读到的每个数据块同时落盘并发布到该 Job 的
-    日志广播通道；IPC 层为每个 `logs -f` 会话建立订阅，把块封装为流式帧经
-    Unix Domain Socket 推送给 CLI。
+    日志广播通道（M6 落地为 `executor::comm::Topic<LogChunk>`，每 Job 一个，
+    EXEC-04）；IPC 层为每个 `logs -f` 会话建立订阅，把块封装为流式帧经
+    Unix Domain Socket 推送给 CLI（会话承载见 13.4，EXEC-03）。
 -   CLI 断开或 Ctrl-C 只结束观察会话，对训练进程零影响。
 -   断线重连：每帧携带逻辑 offset，客户端记录已收字节，重连时以
-    `--since-offset` 续传；轮转导致的历史不可回放部分以明确的 gap 帧告知。
--   Job 进入终态后，`-f` 在排空剩余日志后正常退出，退出码与 Job 终态对齐。
+    `--since-stdout/--since-stderr` 续传（两路流 offset 独立；`--since-offset`
+    同时设置两路）。重连回放由 daemon 的内存回看窗口（每流默认 8 MiB，
+    配置 64 KiB ~ 64 MiB）承载；早于窗口起点的请求以 `GAP` 帧跳到窗口起点
+    续传，不伪造数据、不回退 offset（DEC-008 的重启窗口语义同此）。跨
+    daemon 重启的历史浏览由 `logs` 快照与 owner 直接读文件覆盖。
+-   Job 进入终态后，`-f` 在排空剩余日志后收到 `EOF` 帧正常退出，退出码与
+    Job 终态对齐（FINISHED -> 0，其余终态 -> 1 并打印状态）。
 
 ### 11.4 慢客户端与背压策略
 
-每个 `logs -f` 订阅者有独立的固定容量发送队列（有界）。溢出时策略固定为：
+每个 `logs -f` 订阅者有独立的固定容量发送队列（有界，`Topic` 每订阅者队列，
+默认 64 chunk）与会话写出缓冲（默认 2 MiB）。溢出时策略固定为：
 
 ``` text
-订阅队列满
+订阅队列满（RejectNewest 拒绝新块）
+   ↓
+会话侧按 offset 间断检出（下一块的 begin > 已投递末 offset）
    ↓
 断开该订阅，返回明确的 BACKPRESSURE 错误帧（含当前 offset）
    ↓
-客户端提示并支持一键以 --since-offset 重连
+客户端提示并支持一键以 --since-stdout/--since-stderr 重连
 ```
 
-不做静默丢弃、不做无界缓存、不阻塞 LogStreamer 主路径。活跃跟随会话数有
-上限（默认每 Job 8、全局 64），超出的订阅请求被拒绝并返回明确错误。
+不做静默丢弃、不做无界缓存、不阻塞 LogStreamer 主路径。溢出的精确检出依赖
+后续块或 `EOF` 事件的到达（安静流的检出延迟有界，订阅队列容量仍在，客户端
+重连语义不变）。活跃跟随会话数有上限（默认每 Job 8、全局 64，超出的订阅请求
+被拒绝并返回明确错误）；单帧 socket 写带截止时间（默认 2s），超时会话被有界
+回收。
 
 ### 11.5 权限与信息隔离
 
@@ -776,7 +789,9 @@ yori tensorboard <job-id> --host 0.0.0.0      # 显式对局域网开放（默�
 
 -   **logdir 解析**：优先 `--logdir` 参数，其次 JobSpec 的 `tensorboard_logdir`
     （提交时 `yori submit --tensorboard-logdir runs/ ...` 记录），再次回退 Job
-    `cwd`。daemon 仅通过 IPC 查询接口向 owner/admin 返回解析结果。
+    `cwd`。daemon 仅通过 IPC 查询接口（M6 kind `TENSORBOARD`）向 owner/admin
+    返回解析原料（spec 字段与 cwd，相对路径由 CLI 结合 Job cwd 解析为绝对
+    路径）；非 owner 非 admin 直接拒绝（敏感字段不提供脱敏视图）。
 -   **进程身份**：`yori tensorboard` 由用户在自己的会话中运行，CLI 直接以当前
     用户身份 spawn `tensorboard --logdir <dir> --port <p> --host 127.0.0.1`，
     前台运行，Ctrl-C 即停止。无需 daemon 特权参与。
@@ -954,14 +969,17 @@ yori submit --gpus 2 ...
 MVP 的 IPC 消息分为两类：
 
 -   **请求/响应**：submit、ps、queue、gpu、cancel、job 查询（含 tensorboard
-    logdir 解析）。一次性、有界。
--   **流式帧**：`logs -f` 的日志块推送。每帧携带 JobId、流标识（stdout/stderr）、
-    逻辑 offset 与数据；控制帧包括 BACKPRESSURE、GAP（轮转丢弃标记）、EOF
-    （终态排空）。帧格式采用长度前缀，全部输入经边界校验与 fuzz 覆盖（见第
-    17 节）。
+    logdir 解析，M6 kind `TENSORBOARD`）。一次性、有界。
+-   **流式帧**：`logs -f` 的日志块推送（M6 kind `LOGS_FOLLOW`）。每帧携带
+    流标识（stdout/stderr）、逻辑 offset 区间与数据；控制帧包括
+    BACKPRESSURE、GAP（回看窗口外跳变）、EOF（终态排空）。帧格式采用长度
+    前缀，全部输入经边界校验与 fuzz 覆盖（见第 17 节）。
 
 流式会话数量与每会话缓冲容量在 daemon 配置中有明确上限，拒绝与溢出返回
-显式错误帧，不静默重试。
+显式错误帧，不静默重试。M6 落地细节：`LOGS_FOLLOW` 请求携带两路流各自的
+可选 since offset；接受后先回普通响应帧（ack：两路实际起始 offset 与当前
+Job 状态），随后连续推送流式帧（GAP 帧随 ack 先行）；无流式会话能力的
+端点对 `LOGS_FOLLOW` 显式回 `UNSUPPORTED`。
 
 ### 13.3 协议 v1（M5 冻结）
 
@@ -971,7 +989,10 @@ M5 落地请求/响应族协议 v1，公开契约位于 `include/yori/ipc/`：
     payload = `[u8 version=1][u8 kind][kind body]`。负载上限 1 MiB、单字符串
     64 KiB、请求内计数 256、列表 1024、日志尾部每流 256 KiB（协议级常量
     `IpcProtocolLimits`）。
--   **请求 kind**：`SUBMIT`/`PS`/`QUEUE`/`GPU`/`CANCEL`/`LOGS`（快照）。
+-   **请求 kind**：`SUBMIT`/`PS`/`QUEUE`/`GPU`/`CANCEL`/`LOGS`（快照），
+    以及 M6 扩展的 `LOGS_FOLLOW`（=7，流式跟随）与 `TENSORBOARD`（=8，
+    logdir 解析查询）——协议版本保持 1，以新 kind 扩展（M5 计划"协议
+    演进"风险项的落地形态）。
     请求结构不携带任何身份字段——Job owner 只来自 `SO_PEERCRED`（第 5 节、
     DEC-010），客户端无从声明目标 UID。
 -   **响应**：统一错误码（NONE/PROTOCOL/UNSUPPORTED/DENIED/INVALID_SPEC/
@@ -1010,9 +1031,11 @@ M5 落地请求/响应族协议 v1，公开契约位于 `include/yori/ipc/`：
 -   脱敏（第 11.5 节）：非 owner 非 admin 的 Job 仅暴露
     JobId/状态/revision/owner_uid/退出状态；argv/cwd/tensorboard_logdir
     不出现在响应中（masked 标记置位）。
--   `yori` CLI 退出码：0 成功；1 请求失败（daemon 显式错误）；
-    2 用法错误；3 传输失败（连接/超时/协议）。`logs -f` 与
-    `yori tensorboard` 为 M6 范围，当前显式拒绝。
+-   `yori` CLI 退出码：0 成功；1 请求失败（daemon 显式错误）；2 用法错误；
+    3 传输失败（连接/超时/协议）；4 `logs -f` 以 BACKPRESSURE 结束（可按
+    提示以 `--since-*` 续传重连）。`EOF` 后退出码与 Job 终态对齐
+    （FINISHED -> 0，其余终态 -> 1）；`tensorboard` 透传子进程退出码。
+    M6 起 `logs -f` 与 `yori tensorboard` 均已交付。
 
 ------------------------------------------------------------------------
 
