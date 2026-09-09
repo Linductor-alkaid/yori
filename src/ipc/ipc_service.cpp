@@ -1,5 +1,3 @@
-#include <yori/ipc/ipc_service.hpp>
-
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -9,7 +7,7 @@
 #include <chrono>
 #include <cstring>
 #include <utility>
-
+#include <yori/ipc/ipc_service.hpp>
 #include <yori/observe/log_sink.hpp>
 
 namespace yori::ipc {
@@ -160,7 +158,7 @@ IpcResponse IpcService::handle(const PeerCredentials& peer, const IpcRequest& re
 IpcResponse IpcService::handle_submit(const PeerCredentials& peer,
                                       const IpcSubmitRequest& request) {
   // 身份只来自 SO_PEERCRED：请求结构不存在可消费的客户端身份字段
-  //（DEC-010、威胁模型基线 2）。
+  // （DEC-010、威胁模型基线 2）。
   job::JobSpec spec;
   spec.owner_uid = peer.uid;
   spec.owner_gid = peer.gid;
@@ -239,8 +237,7 @@ IpcResponse IpcService::handle_submit(const PeerCredentials& peer,
 IpcResponse IpcService::handle_ps(const PeerCredentials& peer) {
   const store::StateStoreLoadResult load = store_.load();
   if (!load.ok()) {
-    return error_response(IpcRequestKind::kPs, IpcError::kStoreFailed,
-                          store::to_string(load.code));
+    return error_response(IpcRequestKind::kPs, IpcError::kStoreFailed, store::to_string(load.code));
   }
 
   const bool admin = is_admin(peer);
@@ -274,10 +271,10 @@ IpcResponse IpcService::handle_ps(const PeerCredentials& peer) {
       summary.tensorboard_logdir = record.spec.tensorboard_logdir;
     }
     if (record.execution.exit) {
-      summary.exit = IpcExitStatus{record.execution.exit->exited(),
-                                   record.execution.exit->exited()
-                                       ? record.execution.exit->exit_code
-                                       : record.execution.exit->signal_number};
+      summary.exit =
+          IpcExitStatus{record.execution.exit->exited(),
+                        record.execution.exit->exited() ? record.execution.exit->exit_code
+                                                        : record.execution.exit->signal_number};
     }
     response.jobs.push_back(std::move(summary));
   }
@@ -348,8 +345,8 @@ IpcResponse IpcService::handle_gpu() {
     device.uuid = observation.uuid.value();
     device.index = observation.index;
     device.observed_state = gpu_observed_wire(observation.state);
-    device.logical_state = gpu_logical_wire(
-        gpu::derive_logical_state(observation.state, leased_by.has_value()));
+    device.logical_state =
+        gpu_logical_wire(gpu::derive_logical_state(observation.state, leased_by.has_value()));
     device.utilization_percent = observation.telemetry.utilization_percent;
     device.memory_used_bytes = observation.telemetry.memory_used_bytes;
     device.memory_total_bytes = observation.telemetry.memory_total_bytes;
@@ -391,17 +388,17 @@ IpcResponse IpcService::handle_cancel(const PeerCredentials& peer, std::uint64_t
     return response;
   }
   if (job::is_terminal(current)) {
-    IpcResponse response = error_response(IpcRequestKind::kCancel, IpcError::kInvalidState,
-                                          job::to_string(current));
+    IpcResponse response =
+        error_response(IpcRequestKind::kCancel, IpcError::kInvalidState, job::to_string(current));
     context_state(response, current);
     return response;
   }
   if (current != job::JobState::kQueued) {
     // STARTING/RUNNING/STOPPING 的取消需要进程组信号路径（SIGTERM -> grace ->
     // SIGKILL），随守护总装收口接入（M7 前）；当前显式拒绝而非假装支持。
-    IpcResponse response = error_response(
-        IpcRequestKind::kCancel, IpcError::kUnsupported,
-        "cancel of running jobs requires process supervision (not in this build)");
+    IpcResponse response =
+        error_response(IpcRequestKind::kCancel, IpcError::kUnsupported,
+                       "cancel of running jobs requires process supervision (not in this build)");
     context_state(response, current);
     return response;
   }
@@ -427,10 +424,9 @@ IpcResponse IpcService::handle_cancel(const PeerCredentials& peer, std::uint64_t
   const queue::QueueOperationResult removal = queue_.remove(job::JobId{job_id});
   if (!removal.ok() && removal.code != queue::QueueErrorCode::kJobNotFound) {
     // 状态已终态化，队列移除异常仅并入 detail（持久化事实优先）。
-    IpcResponse response =
-        error_response(IpcRequestKind::kCancel, IpcError::kInternal,
-                       std::string("cancelled but queue removal failed: ") +
-                           queue::to_string(removal.code));
+    IpcResponse response = error_response(
+        IpcRequestKind::kCancel, IpcError::kInternal,
+        std::string("cancelled but queue removal failed: ") + queue::to_string(removal.code));
     context_state(response, job::JobState::kCancelled);
     return response;
   }
@@ -462,12 +458,10 @@ IpcResponse IpcService::handle_logs(const PeerCredentials& peer, const IpcLogsRe
 
   const std::uint32_t max_bytes = std::min(request.max_bytes, config_.max_log_tail_bytes);
   const std::string& directory = *record->execution.log_path;
-  const LogTailResult stdout_tail =
-      log_reader_.read_tail(directory + "/" + observe::log_file_name(observe::LogStreamKind::kStdout),
-                            max_bytes);
-  const LogTailResult stderr_tail =
-      log_reader_.read_tail(directory + "/" + observe::log_file_name(observe::LogStreamKind::kStderr),
-                            max_bytes);
+  const LogTailResult stdout_tail = log_reader_.read_tail(
+      directory + "/" + observe::log_file_name(observe::LogStreamKind::kStdout), max_bytes);
+  const LogTailResult stderr_tail = log_reader_.read_tail(
+      directory + "/" + observe::log_file_name(observe::LogStreamKind::kStderr), max_bytes);
   if (!stdout_tail.ok || !stderr_tail.ok) {
     return error_response(IpcRequestKind::kLogs, IpcError::kNotAvailable,
                           "log read failed: " + directory);

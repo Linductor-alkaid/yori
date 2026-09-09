@@ -1,9 +1,8 @@
-#include <yori/ipc/ipc_service.hpp>
-
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <yori/ipc/ipc_service.hpp>
 
 #include "testing/in_memory_state_store.hpp"
 #include "yori_test.hpp"
@@ -268,8 +267,7 @@ void test_ps_limit() {
   Fixture fixture;
   IpcServiceConfig config = service_config();
   config.max_listed_jobs = 2;
-  IpcService service(config, *fixture.queue, fixture.store, fixture.gpu_status,
-                     fixture.log_reader);
+  IpcService service(config, *fixture.queue, fixture.store, fixture.gpu_status, fixture.log_reader);
   for (int i = 0; i < 3; ++i) {
     YORI_CHECK(submit(service, kAliceUid, kAliceGid).error == IpcError::kNone);
   }
@@ -305,7 +303,7 @@ void test_gpu_view() {
   YORI_CHECK(unavailable.error == IpcError::kNotAvailable);
 
   // 两台设备：一台 FREE，一台被外部占用；lease 事实优先于 FREE 观测
-  //（RULE-05：ALLOCATED）。
+  // （RULE-05：ALLOCATED）。
   yori::gpu::GpuObservationSnapshot snapshot;
   snapshot.revision = 5;
   snapshot.observed_at = std::chrono::system_clock::now();
@@ -373,8 +371,7 @@ void test_cancel_matrix() {
   IpcRequest admin_cancel;
   admin_cancel.kind = IpcRequestKind::kCancel;
   admin_cancel.cancel.job_id = 1;
-  const IpcResponse admin_result =
-      service.handle(peer(kBobUid, kAdminGid), admin_cancel);
+  const IpcResponse admin_result = service.handle(peer(kBobUid, kAdminGid), admin_cancel);
   YORI_CHECK(admin_result.error == IpcError::kNone);
   YORI_CHECK(static_cast<JobState>(admin_result.state) == JobState::kCancelled);
   YORI_CHECK(fixture.queue->empty());
@@ -396,7 +393,7 @@ void test_cancel_matrix() {
   YORI_CHECK(call_cancel(service, kAliceUid, 9).error == IpcError::kNone);
 
   // RUNNING（恢复采纳的 Job）：M5 无进程守护，显式 kUnsupported。lease 不变量
-  //（STARTING 恰好一个 lease）在同一 mutation 内满足。
+  // （STARTING 恰好一个 lease）在同一 mutation 内满足。
   seed_job(fixture.store, JobId{10}, kAliceUid, JobState::kQueued);
   yori::store::StoredJob starting = fixture.store.load().snapshot.jobs.back();
   starting.state = JobState::kStarting;

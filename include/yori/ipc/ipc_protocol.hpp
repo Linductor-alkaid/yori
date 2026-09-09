@@ -118,7 +118,7 @@ struct IpcExitStatus final {
 };
 
 // ps 响应的单 Job 视图。masked=true 时 argv/cwd/tensorboard_logdir 为空
-//（设计第 11.5 节脱敏：非 owner 非 admin 仅见 JobId/状态/revision/owner/
+// （设计第 11.5 节脱敏：非 owner 非 admin 仅见 JobId/状态/revision/owner/
 // 退出状态）。state 为 job::JobState 的数值（to_underlying 由服务端保证）。
 struct IpcJobSummary final {
   std::uint64_t job_id{0};
@@ -166,13 +166,13 @@ struct IpcResponse final {
   IpcRequestKind kind{IpcRequestKind::kSubmit};
   IpcError error{IpcError::kNone};
   std::string detail;
-  std::uint64_t job_id{0};              // SUBMIT 成功时的 JobId
-  std::vector<IpcJobSummary> jobs;      // PS
-  std::vector<IpcQueueEntry> queue;     // QUEUE
-  std::uint64_t gpu_revision{0};        // GPU
-  std::vector<IpcGpuDevice> devices;    // GPU
-  std::uint8_t state{0};                // CANCEL：终态或拒绝时的当前状态
-  IpcLogsPayload logs;                  // LOGS
+  std::uint64_t job_id{0};            // SUBMIT 成功时的 JobId
+  std::vector<IpcJobSummary> jobs;    // PS
+  std::vector<IpcQueueEntry> queue;   // QUEUE
+  std::uint64_t gpu_revision{0};      // GPU
+  std::vector<IpcGpuDevice> devices;  // GPU
+  std::uint8_t state{0};              // CANCEL：终态或拒绝时的当前状态
+  IpcLogsPayload logs;                // LOGS
 };
 
 enum class IpcDecodeError : std::uint8_t {
@@ -212,15 +212,17 @@ struct IpcResponseDecodeResult final {
 };
 
 // 编码 payload 本体（[version][kind][body]，不含长度前缀）。任何字段越界
-//（长度、计数、NUL、总负载超限）返回 false 且 out 保持调用前状态。传输层
+// （长度、计数、NUL、总负载超限）返回 false 且 out 保持调用前状态。传输层
 // 以此配合自身的长度前缀读写，避免双重封装。
-[[nodiscard]] bool encode_request_payload(const IpcRequest& request, std::vector<std::uint8_t>& out);
+[[nodiscard]] bool encode_request_payload(const IpcRequest& request,
+                                          std::vector<std::uint8_t>& out);
 [[nodiscard]] bool encode_response_payload(const IpcResponse& response,
                                            std::vector<std::uint8_t>& out);
 
 // 追加一个完整帧（含 u32 长度前缀）到 out；失败同样保持 out 不变。
 [[nodiscard]] bool append_request_frame(const IpcRequest& request, std::vector<std::uint8_t>& out);
-[[nodiscard]] bool append_response_frame(const IpcResponse& response, std::vector<std::uint8_t>& out);
+[[nodiscard]] bool append_response_frame(const IpcResponse& response,
+                                         std::vector<std::uint8_t>& out);
 
 // 解码一帧的 payload（不含长度前缀）。任何长度/内容的输入都只产生稳定错误码
 // 或完整解析结果，不访问越界内存。

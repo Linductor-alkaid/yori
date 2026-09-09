@@ -1,9 +1,8 @@
-#include <yori/ipc/ipc_protocol.hpp>
-
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
+#include <yori/ipc/ipc_protocol.hpp>
 
 #include "yori_test.hpp"
 
@@ -21,10 +20,9 @@ bool roundtrip_request(const IpcRequest& request, IpcRequest& decoded) {
   if (frame.size() < 4) {
     return false;
   }
-  const std::uint32_t length = static_cast<std::uint32_t>(frame[0]) |
-                               (static_cast<std::uint32_t>(frame[1]) << 8) |
-                               (static_cast<std::uint32_t>(frame[2]) << 16) |
-                               (static_cast<std::uint32_t>(frame[3]) << 24);
+  const std::uint32_t length =
+      static_cast<std::uint32_t>(frame[0]) | (static_cast<std::uint32_t>(frame[1]) << 8) |
+      (static_cast<std::uint32_t>(frame[2]) << 16) | (static_cast<std::uint32_t>(frame[3]) << 24);
   if (length != frame.size() - 4 || !ipc_payload_length_valid(length)) {
     return false;
   }
@@ -41,10 +39,9 @@ bool roundtrip_response(const IpcResponse& response, IpcResponse& decoded) {
   if (!append_response_frame(response, frame)) {
     return false;
   }
-  const std::uint32_t length = static_cast<std::uint32_t>(frame[0]) |
-                               (static_cast<std::uint32_t>(frame[1]) << 8) |
-                               (static_cast<std::uint32_t>(frame[2]) << 16) |
-                               (static_cast<std::uint32_t>(frame[3]) << 24);
+  const std::uint32_t length =
+      static_cast<std::uint32_t>(frame[0]) | (static_cast<std::uint32_t>(frame[1]) << 8) |
+      (static_cast<std::uint32_t>(frame[2]) << 16) | (static_cast<std::uint32_t>(frame[3]) << 24);
   const IpcResponseDecodeResult result = decode_response_payload(frame.data() + 4, length);
   if (!result.ok()) {
     return false;
@@ -121,10 +118,10 @@ void test_response_roundtrips() {
   YORI_CHECK(decoded.job_id == 99 && decoded.error == IpcError::kNone);
 
   response.kind = IpcRequestKind::kPs;
-  response.jobs.push_back(IpcJobSummary{1, 0, 1000, 3, false, {"python", "train.py"},
-                                        "/srv", std::string("runs/x"), std::nullopt});
-  response.jobs.push_back(IpcJobSummary{2, 5, 1001, 2, true, {}, "", std::nullopt,
-                                        IpcExitStatus{false, 9}});
+  response.jobs.push_back(IpcJobSummary{
+      1, 0, 1000, 3, false, {"python", "train.py"}, "/srv", std::string("runs/x"), std::nullopt});
+  response.jobs.push_back(
+      IpcJobSummary{2, 5, 1001, 2, true, {}, "", std::nullopt, IpcExitStatus{false, 9}});
   YORI_CHECK(roundtrip_response(response, decoded));
   YORI_CHECK(decoded.jobs.size() == 2);
   YORI_CHECK(!decoded.jobs[0].masked && decoded.jobs[0].argv.size() == 2 &&
@@ -217,8 +214,7 @@ void test_malformed_requests() {
     result = decode_request_payload(frame.data() + 4, cut - 4);
     // 每个截断点要么截断错误，要么恰好在合法边界完整解析（不可能：最后
     // 字节属于最后字段时除外——统一断言不允许 crash 且错误受控）。
-    YORI_CHECK(result.error == IpcDecodeError::kTruncated ||
-               result.error == IpcDecodeError::kNone);
+    YORI_CHECK(result.error == IpcDecodeError::kTruncated || result.error == IpcDecodeError::kNone);
   }
 
   // 字符串含 NUL：构造 submit，argv_count=1，argv[0]="a\0b"。
@@ -253,8 +249,7 @@ void test_malformed_requests() {
 
 void test_malformed_responses() {
   // 坏错误码值域。
-  std::vector<std::uint8_t> payload = {1, static_cast<std::uint8_t>(IpcRequestKind::kSubmit),
-                                       200};
+  std::vector<std::uint8_t> payload = {1, static_cast<std::uint8_t>(IpcRequestKind::kSubmit), 200};
   const auto push_u32 = [&payload](std::uint32_t v) {
     payload.push_back(static_cast<std::uint8_t>(v & 0xff));
     payload.push_back(static_cast<std::uint8_t>((v >> 8) & 0xff));
@@ -270,9 +265,9 @@ void test_malformed_responses() {
   payload = {1, static_cast<std::uint8_t>(IpcRequestKind::kPs),
              static_cast<std::uint8_t>(IpcError::kNone)};
   push_u32(0);
-  push_u32(1);          // 1 个摘要
+  push_u32(1);                                              // 1 个摘要
   payload.insert(payload.end(), {0, 0, 0, 0, 0, 0, 0, 1});  // job_id=1
-  payload.push_back(8);  // state 越界
+  payload.push_back(8);                                     // state 越界
   payload.insert(payload.end(), {0, 0, 0, 0});              // owner_uid
   payload.insert(payload.end(), {0, 0, 0, 0, 0, 0, 0, 0});  // revision
   payload.push_back(0);                                     // masked=0
@@ -286,26 +281,26 @@ void test_malformed_responses() {
   push_u32(0);
   push_u32(1);
   payload.insert(payload.end(), {0, 0, 0, 0, 0, 0, 0, 1});  // job_id
-  payload.push_back(0);                                       // state
-  payload.insert(payload.end(), {0, 0, 0, 100});              // owner_uid
-  payload.insert(payload.end(), {0, 0, 0, 0, 0, 0, 0, 2});    // revision
-  payload.push_back(2);                                       // masked 非法
+  payload.push_back(0);                                     // state
+  payload.insert(payload.end(), {0, 0, 0, 100});            // owner_uid
+  payload.insert(payload.end(), {0, 0, 0, 0, 0, 0, 0, 2});  // revision
+  payload.push_back(2);                                     // masked 非法
   result = decode_response_payload(payload.data(), payload.size());
   YORI_CHECK(result.error == IpcDecodeError::kInvalidValue);
 
   // gpu utilization 越界（>100）。
   payload = {1, static_cast<std::uint8_t>(IpcRequestKind::kGpu),
              static_cast<std::uint8_t>(IpcError::kNone)};
-  push_u32(0);  // detail
+  push_u32(0);                                              // detail
   payload.insert(payload.end(), {0, 0, 0, 0, 0, 0, 0, 0});  // revision
-  push_u32(1);                                                // 1 台设备
-  push_u32(3);                                                // uuid 长度
+  push_u32(1);                                              // 1 台设备
+  push_u32(3);                                              // uuid 长度
   payload.insert(payload.end(), {'a', 'b', 'c'});
   payload.insert(payload.end(), {0, 0, 0, 0});  // index
-  payload.push_back(0);                          // observed
-  payload.push_back(0);                          // logical
-  payload.push_back(1);                          // has_util
-  push_u32(101);                                 // utilization 越界
+  payload.push_back(0);                         // observed
+  payload.push_back(0);                         // logical
+  payload.push_back(1);                         // has_util
+  push_u32(101);                                // utilization 越界
   result = decode_response_payload(payload.data(), payload.size());
   YORI_CHECK(result.error == IpcDecodeError::kInvalidValue);
 
@@ -320,10 +315,10 @@ void test_malformed_responses() {
   payload.insert(payload.end(), {0, 0, 0, 0});
   payload.push_back(0);
   payload.push_back(0);
-  payload.push_back(0);  // no util
-  payload.push_back(1);  // has memory
+  payload.push_back(0);                                      // no util
+  payload.push_back(1);                                      // has memory
   payload.insert(payload.end(), {0, 0, 0, 0, 0, 0, 0, 10});  // used=10
-  payload.insert(payload.end(), {0, 0, 0, 0, 0, 0, 0, 4});    // total=4
+  payload.insert(payload.end(), {0, 0, 0, 0, 0, 0, 0, 4});   // total=4
   result = decode_response_payload(payload.data(), payload.size());
   YORI_CHECK(result.error == IpcDecodeError::kInvalidValue);
 

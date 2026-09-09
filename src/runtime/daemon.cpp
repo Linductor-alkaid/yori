@@ -44,14 +44,9 @@ const char* to_string(DaemonStopCode code) noexcept {
 
 Daemon::Daemon(executor::Executor& executor, gpu::GpuProvider& gpu_provider,
                store::StateStore& store, DaemonConfig config)
-    : executor_(executor),
-      gpu_provider_(gpu_provider),
-      store_(store),
-      config_(std::move(config)) {}
+    : executor_(executor), gpu_provider_(gpu_provider), store_(store), config_(std::move(config)) {}
 
-Daemon::~Daemon() {
-  static_cast<void>(stop());
-}
+Daemon::~Daemon() { static_cast<void>(stop()); }
 
 const std::optional<recovery::RecoveryResult>& Daemon::last_recovery() const noexcept {
   return last_recovery_;
@@ -117,8 +112,7 @@ DaemonStartResult Daemon::start() {
     gpu_manager_.reset();
     queue_.reset();
     return start_failure(DaemonStartCode::kIpcFailed,
-                         std::string("ipc server start failed: ") +
-                             ipc::to_string(ipc_start.code) +
+                         std::string("ipc server start failed: ") + ipc::to_string(ipc_start.code) +
                              (ipc_start.message.empty() ? "" : ": " + ipc_start.message));
   }
 

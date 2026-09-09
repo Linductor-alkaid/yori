@@ -1,5 +1,5 @@
-#include <sys/stat.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -12,7 +12,6 @@
 #include <string>
 #include <thread>
 #include <vector>
-
 #include <yori/ipc/uds_client.hpp>
 
 #include "runtime/executor_runtime.hpp"
@@ -74,7 +73,7 @@ class RawConnection final {
     if (fd_ < 0) {
       return;
     }
-    sockaddr_un address {};
+    sockaddr_un address{};
     address.sun_family = AF_UNIX;
     std::memcpy(address.sun_path, path.c_str(), path.size() + 1);
     connected_ = ::connect(fd_, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0;
@@ -198,7 +197,7 @@ void test_stale_endpoint_rules() {
   const std::string socket_path = directory + "/yori.sock";
   const int stale = ::socket(AF_UNIX, SOCK_STREAM, 0);
   YORI_CHECK(stale >= 0);
-  sockaddr_un address {};
+  sockaddr_un address{};
   address.sun_family = AF_UNIX;
   std::memcpy(address.sun_path, socket_path.c_str(), socket_path.size() + 1);
   YORI_CHECK(::bind(stale, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0);
@@ -263,8 +262,7 @@ void test_protocol_roundtrip_and_peer() {
   YORI_CHECK(handler.last_peer.pid == static_cast<std::uint32_t>(::getpid()));
 
   // 不存在的端点：连接失败。
-  const auto unreachable =
-      client.call(directory + "/missing.sock", request, 500ms);
+  const auto unreachable = client.call(directory + "/missing.sock", request, 500ms);
   YORI_CHECK(unreachable.error == yori::ipc::IpcClientError::kConnectFailed);
 
   server.stop();

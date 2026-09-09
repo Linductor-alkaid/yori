@@ -1,8 +1,7 @@
-#include <yori/ipc/ipc_protocol.hpp>
-
 #include <cstring>
 #include <limits>
 #include <utility>
+#include <yori/ipc/ipc_protocol.hpp>
 
 namespace yori::ipc {
 namespace {

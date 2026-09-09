@@ -33,7 +33,7 @@ struct UdsIpcServerConfig final {
 // IPC 连接接受与请求读取的 Executor 承载（总计划 EXEC-02）：单个 blocking
 // worker 以 poll 等待 listen fd 与唤醒管道，串行 accept -> SO_PEERCRED ->
 // 读一帧 -> 调用 handler -> 写回一帧 -> 关闭。请求/响应均为一次性有界帧
-//（流式会话 M6 承载）。停止 = 停止任务生产者语义（EXEC-10 ①）：唤醒、join、
+// （流式会话 M6 承载）。停止 = 停止任务生产者语义（EXEC-10 ①）：唤醒、join、
 // 关闭 listen fd 并清理端点；已在处理中的请求以断开收尾。
 //
 // owner 纪律：start/stop 由非 worker 的单一 owner 调用；handler 在 worker

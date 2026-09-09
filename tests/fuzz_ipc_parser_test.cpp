@@ -1,11 +1,10 @@
-#include <yori/ipc/ipc_protocol.hpp>
-
-#include <cstdio>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <random>
 #include <string>
 #include <vector>
+#include <yori/ipc/ipc_protocol.hpp>
 
 #include "yori_test.hpp"
 
@@ -65,8 +64,8 @@ std::vector<std::vector<std::uint8_t>> seed_corpus() {
   IpcResponse ps;
   ps.kind = IpcRequestKind::kPs;
   ps.error = IpcError::kNone;
-  ps.jobs.push_back(IpcJobSummary{1, 2, 1000, 3, false, {"python"}, "/srv", std::string("r"),
-                                  IpcExitStatus{true, 0}});
+  ps.jobs.push_back(IpcJobSummary{
+      1, 2, 1000, 3, false, {"python"}, "/srv", std::string("r"), IpcExitStatus{true, 0}});
   ps.jobs.push_back(IpcJobSummary{2, 0, 1001, 0, true, {}, "", std::nullopt, std::nullopt});
   frame.clear();
   YORI_CHECK(append_response_frame(ps, frame));
@@ -161,8 +160,7 @@ void drive_decode(const std::vector<std::uint8_t>& payload) {
   if (payload.size() > IpcProtocolLimits::kMaxPayloadBytes + 1) {
     return;  // 长度域放大后无真实缓冲，跳过（decode 以 size 判定已单独覆盖）
   }
-  const IpcRequestDecodeResult request =
-      decode_request_payload(payload.data(), payload.size());
+  const IpcRequestDecodeResult request = decode_request_payload(payload.data(), payload.size());
   if (request.ok()) {
     // 完整解析必须可再编码 roundtrip。
     std::vector<std::uint8_t> frame;
@@ -171,8 +169,7 @@ void drive_decode(const std::vector<std::uint8_t>& payload) {
     YORI_CHECK(request.error != IpcDecodeError::kNone);
   }
 
-  const IpcResponseDecodeResult response =
-      decode_response_payload(payload.data(), payload.size());
+  const IpcResponseDecodeResult response = decode_response_payload(payload.data(), payload.size());
   if (response.ok()) {
     std::vector<std::uint8_t> frame;
     YORI_CHECK(append_response_frame(response.value, frame));
@@ -191,14 +188,14 @@ int main() {
   std::uint64_t valid_responses = 0;
   for (std::uint32_t seed = 1; seed <= kIterations; ++seed) {
     Mutator mutator(seed);
-    const std::vector<std::uint8_t>& base = corpus[mutator.next(static_cast<std::uint32_t>(corpus.size()))];
+    const std::vector<std::uint8_t>& base =
+        corpus[mutator.next(static_cast<std::uint32_t>(corpus.size()))];
     const std::vector<std::uint8_t> mutated = mutate(base, mutator);
 
     // 变异体作用于 payload（跳过 4 字节长度前缀模拟真实解码入口）。
     if (mutated.size() > 4) {
       std::vector<std::uint8_t> payload(mutated.begin() + 4, mutated.end());
-      const IpcRequestDecodeResult request =
-          decode_request_payload(payload.data(), payload.size());
+      const IpcRequestDecodeResult request = decode_request_payload(payload.data(), payload.size());
       valid_requests += request.ok() ? 1 : 0;
       const IpcResponseDecodeResult response =
           decode_response_payload(payload.data(), payload.size());
@@ -210,9 +207,10 @@ int main() {
     drive_decode(mutated);
   }
 
-  std::printf("ipc parser fuzz: %d iterations, %llu valid request parses, %llu valid response parses\n",
-              kIterations, static_cast<unsigned long long>(valid_requests),
-              static_cast<unsigned long long>(valid_responses));
+  std::printf(
+      "ipc parser fuzz: %d iterations, %llu valid request parses, %llu valid response parses\n",
+      kIterations, static_cast<unsigned long long>(valid_requests),
+      static_cast<unsigned long long>(valid_responses));
 
   if (yori::testing::failure_count != 0) {
     std::fprintf(stderr, "ipc parser fuzz: %d failure(s)\n", yori::testing::failure_count);

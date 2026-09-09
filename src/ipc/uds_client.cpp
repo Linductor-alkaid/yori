@@ -1,5 +1,3 @@
-#include <yori/ipc/uds_client.hpp>
-
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -10,6 +8,7 @@
 #include <limits>
 #include <utility>
 #include <vector>
+#include <yori/ipc/uds_client.hpp>
 
 #include "uds_io.hpp"
 
@@ -108,7 +107,7 @@ IpcClientResult UdsIpcClient::call(const std::string& endpoint, const IpcRequest
     return client_error(IpcClientError::kConnectFailed);
   }
 
-  sockaddr_un address {};
+  sockaddr_un address{};
   address.sun_family = AF_UNIX;
   std::memcpy(address.sun_path, endpoint.c_str(), endpoint.size() + 1);
   if (!connect_with_deadline(guard.get(), address, deadline)) {

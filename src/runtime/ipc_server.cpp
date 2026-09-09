@@ -12,12 +12,11 @@
 #include <atomic>
 #include <cerrno>
 #include <cstring>
+#include <executor/blocking_io.hpp>
+#include <executor/executor.hpp>
 #include <string>
 #include <utility>
 #include <vector>
-
-#include <executor/blocking_io.hpp>
-#include <executor/executor.hpp>
 
 #include "ipc/uds_io.hpp"
 
@@ -110,8 +109,7 @@ class ServerWorker final : public executor::IBlockingIoWorker {
 
     const int client_fd = ::accept4(listen_fd_, nullptr, nullptr, SOCK_CLOEXEC);
     if (client_fd < 0) {
-      if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR &&
-          errno != ECONNABORTED) {
+      if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR && errno != ECONNABORTED) {
         struct pollfd backoff {};
         backoff.fd = -1;
         ::poll(&backoff, 1, 100);
@@ -123,7 +121,7 @@ class ServerWorker final : public executor::IBlockingIoWorker {
 
   void serve(int client_fd) {
     // 身份获取失败：不接受无法鉴权的连接。
-    ucred peer_credential {};
+    ucred peer_credential{};
     socklen_t credential_length = sizeof(peer_credential);
     if (::getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &peer_credential, &credential_length) !=
         0) {
@@ -171,7 +169,8 @@ class ServerWorker final : public executor::IBlockingIoWorker {
     if (!ipc::encode_response_payload(response, response_payload)) {
       // 响应越界属于 daemon 内部错误；退化为最小 INTERNAL 帧。
       response_payload.clear();
-      IpcResponse fallback = error_response(decoded.value.kind, IpcError::kInternal, "internal error");
+      IpcResponse fallback =
+          error_response(decoded.value.kind, IpcError::kInternal, "internal error");
       if (!ipc::encode_response_payload(fallback, response_payload)) {
         static_cast<void>(::close(client_fd));
         return;
@@ -200,8 +199,8 @@ class ServerWorker final : public executor::IBlockingIoWorker {
 bool UdsIpcServerConfig::valid(std::string& error) const noexcept {
   if (socket_path.empty() || socket_path.front() != '/' ||
       socket_path.size() > kMaxSocketPathBytes) {
-    error = "socket path must be absolute and at most " +
-            std::to_string(kMaxSocketPathBytes) + " bytes";
+    error = "socket path must be absolute and at most " + std::to_string(kMaxSocketPathBytes) +
+            " bytes";
     return false;
   }
   if (socket_mode > 0777) {
@@ -274,14 +273,15 @@ ipc::IpcTransportStartResult UdsIpcServer::start() {
     return start_failure(ipc::IpcTransportStartCode::kExecutorRejected, "socket creation failed");
   }
 
-  sockaddr_un address {};
+  sockaddr_un address{};
   address.sun_family = AF_UNIX;
   std::memcpy(address.sun_path, impl_->config.socket_path.c_str(),
               impl_->config.socket_path.size() + 1);
   // bind 创建的 socket inode 以 umask 收紧到目标模式之内（Linux 的 fchmod 对
   // socket fd 不生效，不能依赖事后收敛；umask 在单线程启动序内保存/恢复）。
   const mode_t previous_umask = ::umask(0777 & ~impl_->config.socket_mode);
-  const int bind_result = ::bind(listen_fd, reinterpret_cast<const sockaddr*>(&address), sizeof(address));
+  const int bind_result =
+      ::bind(listen_fd, reinterpret_cast<const sockaddr*>(&address), sizeof(address));
   static_cast<void>(::umask(previous_umask));
   if (bind_result != 0) {
     static_cast<void>(::close(listen_fd));
@@ -314,12 +314,13 @@ ipc::IpcTransportStartResult UdsIpcServer::start() {
   if (::pipe2(wake_pipe.data(), O_CLOEXEC | O_NONBLOCK) != 0) {
     static_cast<void>(::close(listen_fd));
     static_cast<void>(::unlink(impl_->config.socket_path.c_str()));
-    return start_failure(ipc::IpcTransportStartCode::kExecutorRejected, "wake pipe creation failed");
+    return start_failure(ipc::IpcTransportStartCode::kExecutorRejected,
+                         "wake pipe creation failed");
   }
 
-  auto worker = std::make_unique<ServerWorker>(listen_fd, wake_pipe[0], impl_->handler,
-                                               impl_->config.request_deadline,
-                                               impl_->worker_stopping);
+  auto worker =
+      std::make_unique<ServerWorker>(listen_fd, wake_pipe[0], impl_->handler,
+                                     impl_->config.request_deadline, impl_->worker_stopping);
   worker->set_wake_write(wake_pipe[1]);
 
   // blocking worker 名字单次注册不可复用（DuplicateName 语义），实例唯一化。

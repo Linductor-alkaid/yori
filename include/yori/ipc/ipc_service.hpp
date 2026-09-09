@@ -24,7 +24,7 @@ namespace yori::ipc {
 
 struct IpcServiceConfig final {
   // DEC-010：admin = 主 GID 匹配任一 admin_gid，或 UID 属于 admin_uids
-  //（daemon 启动时从系统组数据库解析的成员集）。
+  // （daemon 启动时从系统组数据库解析的成员集）。
   std::vector<std::uint32_t> admin_gids;
   std::vector<std::uint32_t> admin_uids;
   // ps/queue 列表的服务端上限（超出截断并置 kLimit）。
@@ -57,7 +57,8 @@ class LogSnapshotReader {
  public:
   virtual ~LogSnapshotReader() = default;
 
-  [[nodiscard]] virtual LogTailResult read_tail(const std::string& path, std::uint32_t max_bytes) = 0;
+  [[nodiscard]] virtual LogTailResult read_tail(const std::string& path,
+                                                std::uint32_t max_bytes) = 0;
 };
 
 // 文件实现：从文件末尾有界读取（O_NOFOLLOW，基线 8/23）。大于 max_bytes 时
@@ -75,8 +76,7 @@ class IpcService final : public IpcRequestHandler {
   IpcService& operator=(IpcService&&) = delete;
   ~IpcService() override = default;
 
-  [[nodiscard]] IpcResponse handle(const PeerCredentials& peer,
-                                   const IpcRequest& request) override;
+  [[nodiscard]] IpcResponse handle(const PeerCredentials& peer, const IpcRequest& request) override;
 
  private:
   [[nodiscard]] IpcResponse handle_submit(const PeerCredentials& peer,
@@ -85,8 +85,7 @@ class IpcService final : public IpcRequestHandler {
   [[nodiscard]] IpcResponse handle_queue(const PeerCredentials& peer);
   [[nodiscard]] IpcResponse handle_gpu();
   [[nodiscard]] IpcResponse handle_cancel(const PeerCredentials& peer, std::uint64_t job_id);
-  [[nodiscard]] IpcResponse handle_logs(const PeerCredentials& peer,
-                                        const IpcLogsRequest& request);
+  [[nodiscard]] IpcResponse handle_logs(const PeerCredentials& peer, const IpcLogsRequest& request);
 
   [[nodiscard]] bool is_admin(const PeerCredentials& peer) const noexcept;
   [[nodiscard]] static IpcResponse error_response(IpcRequestKind kind, IpcError error,
