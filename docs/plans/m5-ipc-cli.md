@@ -1,6 +1,6 @@
 # M5：IPC 与 CLI
 
-> 状态：In Progress
+> 状态：Completed
 > 负责人：Linductor-alkaid
 > 所属计划：[Yori 实施总计划](yori-implementation-plan.md)
 > 前置：M3（[NVML 真实 GPU 集成](m3-nvml-gpu-integration.md)）、M4（[持久化与恢复](m4-persistence-recovery.md)）
@@ -123,18 +123,18 @@ cancel/logs 快照，owner/admin 授权与信息脱敏）、M5 子集的 daemon 
 
 ## 工作项
 
-- [ ] `M5-01` 冻结并实现 IPC 协议 v1 Core 契约：帧编解码、六种请求/响应
+- [x] `M5-01` 冻结并实现 IPC 协议 v1 Core 契约：帧编解码、六种请求/响应
   kind、显式边界与错误枚举、协议级上限常量；编解码不触碰平台类型。
-- [ ] `M5-02` 实现 UDS 传输适配与端点治理：`IpcTransport` Core 抽象、
+- [x] `M5-02` 实现 UDS 传输适配与端点治理：`IpcTransport` Core 抽象、
   `UdsIpcClient`（`yori_ipc`）、`UdsIpcServer`（EXEC-02 blocking worker、
   `SO_PEERCRED`、DEC-010 权限收敛、陈旧端点替换纪律、停止幂等）；冻结
   DEC-010。
-- [ ] `M5-03` 实现 daemon 侧请求服务：submit/ps/queue/gpu/cancel/logs 快照
+- [x] `M5-03` 实现 daemon 侧请求服务：submit/ps/queue/gpu/cancel/logs 快照
   的授权矩阵与脱敏、JobId 分配、容量拒绝回滚、终态幂等、日志有界尾部。
-- [ ] `M5-04` 交付 M5 子集 daemon 总装与 CLI：`Daemon`（恢复 -> GPU 观察 ->
+- [x] `M5-04` 交付 M5 子集 daemon 总装与 CLI：`Daemon`（恢复 -> GPU 观察 ->
   IPC，EXEC-10 子集停止序）接入 `yorid` 主生命周期；`yori` 六命令与退出码
   契约。
-- [ ] `M5-05` 交付测试与文档：协议/服务/服务器/fuzz/E2E 五组测试（替换两个
+- [x] `M5-05` 交付测试与文档：协议/服务/服务器/fuzz/E2E 五组测试（替换两个
   占位用例）；设计、DEC-010、威胁模型、总计划与本计划同步；五预设与 PR CI
   通过。
 
@@ -154,26 +154,26 @@ cancel/logs 快照，owner/admin 授权与信息脱敏）、M5 子集的 daemon 
 
 ## 测试与退出条件
 
-- [ ] 协议单测通过（`m5.unit.ipc-protocol`）：六种请求/响应 roundtrip；
+- [x] 协议单测通过（`m5.unit.ipc-protocol`）：六种请求/响应 roundtrip；
   畸形矩阵（截断、超载、坏版本、坏 kind、坏长度、NUL、计数超限、尾部
   多余字节）逐项稳定错误码；边界值（空 env、单元素、上限字符串）合法。
-- [ ] 服务单测通过（`m5.unit.ipc-service`）：owner/admin/第三方授权矩阵与
+- [x] 服务单测通过（`m5.unit.ipc-service`）：owner/admin/第三方授权矩阵与
   脱敏字段断言；submit 校验映射（root owner 拒绝、非法 argv/env/cwd/
   logdir）；容量拒绝且回滚可审计；cancel 幂等与终态矩阵；logs 未启动/
   尾部/截断；gpu 快照缺失与 lease 合并；JobId 单调不复用。
-- [ ] 服务器测试通过（`m5.unit.ipc-server`）：生命周期（重复启动、幂等
+- [x] 服务器测试通过（`m5.unit.ipc-server`）：生命周期（重复启动、幂等
   停止、unlink）；非 socket 陈旧文件拒绝；超载帧回 PROTOCOL 错误帧；静默
   连接超时断开（可配置短截止时间）；权限收敛断言（非 root 下降级语义）。
-- [ ] fuzz 集通过（`m5.fuzz.ipc-parser`）：种子化变异集（翻转/截断/超载/
+- [x] fuzz 集通过（`m5.fuzz.ipc-parser`）：种子化变异集（翻转/截断/超载/
   随机）解码永不 crash、错误码稳定，sanitizer 下运行。
-- [ ] 集成 E2E 通过（`m5.integration.ipc-e2e`）：进程内 `Daemon`（内存
+- [x] 集成 E2E 通过（`m5.integration.ipc-e2e`）：进程内 `Daemon`（内存
   store + 伪 provider）+ 真实 `yori` CLI 子进程：submit -> queue/ps 可见
   -> cancel -> 再查确认；gpu 视图；logs 对未启动 Job 显式报错；断连/
   无 daemon 时 CLI 退出码 3。
-- [ ] `debug`/`release`/`asan`/`ubsan`/`tsan` 预设全部通过；PR CI
+- [x] `debug`/`release`/`asan`/`ubsan`/`tsan` 预设全部通过；PR CI
   （GCC 13/Clang 18 的 Debug/Release、clang-format 18、clang-tidy 18、
   sanitizers、依赖门禁）全绿。
-- [ ] 设计（第 5/13 节）、DEC-010、威胁模型（基线 2/6/9/12 证据、新增
+- [x] 设计（第 5/13 节）、DEC-010、威胁模型（基线 2/6/9/12 证据、新增
   22/23、M5 细化项收口）、总计划（第 1/5/6/11 节）与本计划同步更新。
 
 ## 验证记录
@@ -230,3 +230,33 @@ cancel/logs 快照，owner/admin 授权与信息脱敏）、M5 子集的 daemon 
   收口）、总计划（第 1/5/6/11 节，v1.6）、本计划。未修改 `third_party/`，
   未发现 Executor 能力缺口（IPC 服务器完全复用已验证的 blocking worker
   `start_worker` + 唤醒管道模式，与 M2 LogPump/ExitMonitor 同构）。
+
+### 2026-09-09：M5-01～M5-05 PR CI 收尾
+
+- 范围：PR [#7](https://github.com/Linductor-alkaid/yori/pull/7)，提交
+  `3f592f8`～`31dd234`（协议契约、UDS 传输与服务、daemon 总装与 CLI、
+  文档、两轮门禁修复）。
+- 首轮 CI run [34367784531](https://github.com/Linductor-alkaid/yori/actions/runs/34367784531)
+  的 clang-format 失败：本地格式化此前只覆盖已跟踪文件，M5 新文件在加入
+  索引前从未进入 dry-run 检查集。教训回写：格式化/静态检查必须以提交后的
+  全量文件清单为准（`git ls-files` 在 add 之前不含新文件）。修复提交
+  `95c0287`。
+- 次轮 run [34368052896](https://github.com/Linductor-alkaid/yori/actions/runs/34368052896)
+  的 clang-tidy 失败（12 处 error 级）：CI 的 apt clang-tidy 18.1.3 相对
+  本机 pip 18.1.8 对 `performance-move-const-arg`、
+  `performance-unnecessary-value-param`、`bugprone-switch-missing-default-case`、
+  `bugprone-unchecked-optional-access`、
+  `bugprone-implicit-widening-of-multiplication-result`、
+  `bugprone-branch-clone` 更严格。逐项修复（`31dd234`）后本地 pip 18.1.8
+  复验 0 error、debug/release 复测全绿。
+- 最终 CI run
+  [34374222682](https://github.com/Linductor-alkaid/yori/actions/runs/34374222682)
+  8/8 全绿：clang-format 18、clang-tidy 18、GCC 13/Clang 18 的
+  Debug/Release configure/build/test/install/consumer、ASAN/UBSAN/TSAN 与
+  依赖 pin 门禁全部通过。CI 环境每套 ctest 为 30 passed、4 个环境/后续
+  里程碑占位用例显式 skipped（GPU、multi-user 两个、performance；IPC 与
+  fuzz 占位已由 M5 真实用例承接）。
+- 结论：`M5-01`～`M5-05` 的实现、文档与适用门禁证据完整，工作项与退出
+  条件勾选完成，M5 里程碑标记 `Completed`。root 环境补跑项（socket
+  `root:yori` 收敛、多用户连接准入、admin 组 NSS 解析）保持未勾选语义，
+  由 M7 打包验收执行（DEC-010）。

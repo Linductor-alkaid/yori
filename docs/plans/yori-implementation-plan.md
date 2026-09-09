@@ -1,7 +1,7 @@
 # Yori 实施总计划
 
 > 状态：Active
-> 版本：1.6
+> 版本：1.7
 > 更新日期：2026-09-09
 > 负责人：Linductor-alkaid
 > 设计依据：[Yori 项目设计文档](../design/yori-project-design.md)（v0.5）
@@ -41,11 +41,14 @@
   （`EXEC-08` 载载）落地；PR [#5](https://github.com/Linductor-alkaid/yori/pull/5)
   最终 CI [全绿](https://github.com/Linductor-alkaid/yori/actions/runs/34273077478)
   （证据见 [M4 验证记录](m4-persistence-recovery.md)）。
-- 当前里程碑：M5（IPC 与 CLI）。协议 v1 Core 契约、UDS 传输（`SO_PEERCRED`、
-  EXEC-02 blocking worker、[DEC-010](../decisions/DEC-010-uds-ipc-endpoint.md)
-  端点治理）、daemon 侧请求服务（owner/admin 授权与脱敏）、M5 子集 daemon
-  总装与 `yori` 六命令、IPC fuzz 起步已实现（详见
-  [M5 计划](m5-ipc-cli.md)，工作项待 PR CI 收口后勾选）。
+- M5（IPC 与 CLI）已完成：IPC 协议 v1 Core 契约（帧边界与稳定错误码）、
+  UDS 传输（`SO_PEERCRED`、EXEC-02 blocking worker、
+  [DEC-010](../decisions/DEC-010-uds-ipc-endpoint.md) 端点治理）、daemon 侧
+  请求服务（owner/admin 授权与脱敏、终态幂等）、M5 子集 daemon 总装与
+  `yori` 六命令、IPC fuzz 起步落地；PR [#7](https://github.com/Linductor-alkaid/yori/pull/7)
+  最终 CI [全绿](https://github.com/Linductor-alkaid/yori/actions/runs/34374222682)
+  （证据见 [M5 验证记录](m5-ipc-cli.md)）。
+- 当前里程碑：无（M5 已完成；M6 观察面可依序启动，待排期）。
 - MVP 端到端验收以设计文档第 19 节判据为准，由 M7 执行并记录证据（见第 10 节）。
 - 里程碑文档在各自启动时创建（工程规范第 2 节）；当前实体文件：M0、M1、M2、
   M3、M4、M5。
@@ -127,7 +130,7 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | M2 | 进程守护与启动适配 | M1 | ProcessSupervisor（spawn、进程组、取消、退出回收）、LaunchProfile、`exec` 前降权、日志捕获与落盘 | 无 | Completed |
 | M3 | NVML 真实 GPU 集成 | M2 | `GpuProvider` NVML 适配：发现、UUID 身份、遥测、外部占用检测（`EXTERNAL_BUSY`）；`GpuManager` 周期采样（`EXEC-05`/`EXEC-09` GPU 快照） | 无 | Completed |
 | M4 | 持久化与恢复 | M2 | SQLite StateStore、daemon 重启恢复、PID reuse 核验、`LOST` 语义 | 无 | Completed |
-| M5 | IPC 与 CLI | M3、M4 | UDS 传输、`SO_PEERCRED` 鉴权、请求/响应协议与 owner/admin 授权、`submit`/`ps`/`queue`/`gpu`/`cancel`/`logs` 快照、IPC fuzz 起步 | 无 | In Progress |
+| M5 | IPC 与 CLI | M3、M4 | UDS 传输、`SO_PEERCRED` 鉴权、请求/响应协议与 owner/admin 授权、`submit`/`ps`/`queue`/`gpu`/`cancel`/`logs` 快照、IPC fuzz 起步 | 无 | Completed |
 | M6 | 观察面 | M5 | `logs -f` 流式帧（offset 续传、`GAP`/`EOF`/`BACKPRESSURE`）、日志轮转、`yori tensorboard` | 无 | Planned |
 | M7 | 打包与 MVP 端到端验收 | M6 | systemd unit、安装打包、设计 §19 判据逐项验收 | `v0.1.0`（MVP） | Planned |
 
