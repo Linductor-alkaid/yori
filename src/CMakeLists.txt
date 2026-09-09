@@ -39,7 +39,9 @@ add_library(yori_runtime STATIC
   runtime/grace_escalation.cpp
   runtime/gpu_manager.cpp
   runtime/ipc_server.cpp
+  runtime/log_follow_service.cpp
   runtime/log_pump.cpp
+  runtime/log_streamer.cpp
   runtime/process_exit_monitor.cpp
   runtime/scheduler_task_runner.cpp
   runtime/store_task_runner.cpp)

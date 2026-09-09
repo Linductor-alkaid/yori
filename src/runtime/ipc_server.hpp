@@ -13,6 +13,26 @@ class Executor;
 
 namespace yori::runtime {
 
+// 流式请求委派（M6，runtime 层——fd 是平台细节，不进 Core 的
+// IpcRequestHandler 契约，RULE-02）。UdsIpcServer 在收到 LOGS_FOLLOW 请求
+// 并完成解码/SO_PEERCRED 后征询委派：taken_over=true 表示委派已接管该连接
+// （含初始响应帧、后续流帧与关闭），服务器不得再触碰该 fd；false 时服务器
+// 按普通路径写回 outcome 中的响应并关闭。
+class UdsIpcStreamDelegate {
+ public:
+  virtual ~UdsIpcStreamDelegate() = default;
+
+  struct Outcome final {
+    bool taken_over{false};
+    ipc::IpcResponse response{};
+  };
+
+  // client_fd 的所有权在 taken_over=true 时转移给委派。实现必须快速返回
+  // （只做验证与入队，不做流式 I/O）。
+  [[nodiscard]] virtual Outcome begin_stream(const ipc::PeerCredentials& peer,
+                                             const ipc::IpcRequest& request, int client_fd) = 0;
+};
+
 // UDS 服务端配置（DEC-010）。apply_ownership 为 true 时对 socket 执行
 // fchown(owner_uid, owner_gid)；非 root 进程无法 chown 将显式启动失败。
 struct UdsIpcServerConfig final {
@@ -40,8 +60,10 @@ struct UdsIpcServerConfig final {
 // 线程内被串行调用（单线程进入 IpcService）。停止后不可重启。
 class UdsIpcServer final : public ipc::IpcServerTransport {
  public:
+  // stream_delegate 可为 nullptr（该端点不启用流式会话，LOGS_FOLLOW 回
+  // kUnsupported）。委派的生命周期由调用方保证覆盖服务器的运行期。
   UdsIpcServer(executor::Executor& executor, ipc::IpcRequestHandler& handler,
-               UdsIpcServerConfig config);
+               UdsIpcServerConfig config, UdsIpcStreamDelegate* stream_delegate = nullptr);
   ~UdsIpcServer() override;
 
   UdsIpcServer(const UdsIpcServer&) = delete;

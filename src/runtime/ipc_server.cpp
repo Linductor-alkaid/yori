@@ -56,10 +56,12 @@ void reject_connection(int client_fd, IpcRequestKind kind, const char* detail) {
 class ServerWorker final : public executor::IBlockingIoWorker {
  public:
   ServerWorker(int listen_fd, int wake_read, ipc::IpcRequestHandler& handler,
-               std::chrono::milliseconds request_deadline, std::atomic<bool>& stopping)
+               UdsIpcStreamDelegate* stream_delegate, std::chrono::milliseconds request_deadline,
+               std::atomic<bool>& stopping)
       : listen_fd_(listen_fd),
         wake_read_(wake_read),
         handler_(handler),
+        stream_delegate_(stream_delegate),
         request_deadline_(request_deadline),
         stopping_(stopping) {}
 
@@ -156,6 +158,24 @@ class ServerWorker final : public executor::IBlockingIoWorker {
       return;
     }
 
+    // 流式请求（M6）：委派接管连接（验证 + fd 移交 + 会话 worker 承载）。
+    // 委派拒绝时按普通路径写回响应；无委派的构建同样得到显式错误。
+    if (decoded.value.kind == IpcRequestKind::kLogsFollow && stream_delegate_ != nullptr) {
+      UdsIpcStreamDelegate::Outcome outcome;
+      try {
+        outcome = stream_delegate_->begin_stream(peer, decoded.value, client_fd);
+      } catch (...) {
+        outcome.taken_over = false;
+        outcome.response =
+            error_response(decoded.value.kind, IpcError::kInternal, "internal error");
+      }
+      if (outcome.taken_over) {
+        return;  // fd 所有权已转移，服务器不再触碰。
+      }
+      write_response_and_close(client_fd, outcome.response, deadline);
+      return;
+    }
+
     // handler 异常映射为 INTERNAL 响应（不吞、不崩 daemon；异常被消费为
     // 显式结果而非丢失）。
     IpcResponse response;
@@ -164,13 +184,15 @@ class ServerWorker final : public executor::IBlockingIoWorker {
     } catch (...) {
       response = error_response(decoded.value.kind, IpcError::kInternal, "internal error");
     }
+    write_response_and_close(client_fd, response, deadline);
+  }
 
+  void write_response_and_close(int client_fd, const IpcResponse& response,
+                                ipc::uds::SteadyTime deadline) {
     std::vector<std::uint8_t> response_payload;
     if (!ipc::encode_response_payload(response, response_payload)) {
       // 响应越界属于 daemon 内部错误；退化为最小 INTERNAL 帧。
-      response_payload.clear();
-      IpcResponse fallback =
-          error_response(decoded.value.kind, IpcError::kInternal, "internal error");
+      IpcResponse fallback = error_response(response.kind, IpcError::kInternal, "internal error");
       if (!ipc::encode_response_payload(fallback, response_payload)) {
         static_cast<void>(::close(client_fd));
         return;
@@ -190,6 +212,7 @@ class ServerWorker final : public executor::IBlockingIoWorker {
   int wake_read_{-1};
   int wake_write_{-1};
   ipc::IpcRequestHandler& handler_;
+  UdsIpcStreamDelegate* stream_delegate_;
   std::chrono::milliseconds request_deadline_;
   std::atomic<bool>& stopping_;
 };
@@ -217,12 +240,16 @@ bool UdsIpcServerConfig::valid(std::string& error) const noexcept {
 class UdsIpcServer::Impl final {
  public:
   Impl(executor::Executor& executor_ref, ipc::IpcRequestHandler& handler_ref,
-       UdsIpcServerConfig config_ref)
-      : executor(executor_ref), handler(handler_ref), config(std::move(config_ref)) {}
+       UdsIpcServerConfig config_ref, UdsIpcStreamDelegate* stream_delegate_ref)
+      : executor(executor_ref),
+        handler(handler_ref),
+        config(std::move(config_ref)),
+        stream_delegate(stream_delegate_ref) {}
 
   executor::Executor& executor;
   ipc::IpcRequestHandler& handler;
   UdsIpcServerConfig config;
+  UdsIpcStreamDelegate* stream_delegate;
   executor::WorkerHandle handle;
   int listen_fd{-1};
   int wake_read{-1};
@@ -233,8 +260,8 @@ class UdsIpcServer::Impl final {
 };
 
 UdsIpcServer::UdsIpcServer(executor::Executor& executor, ipc::IpcRequestHandler& handler,
-                           UdsIpcServerConfig config)
-    : impl_(std::make_unique<Impl>(executor, handler, std::move(config))) {}
+                           UdsIpcServerConfig config, UdsIpcStreamDelegate* stream_delegate)
+    : impl_(std::make_unique<Impl>(executor, handler, std::move(config), stream_delegate)) {}
 
 UdsIpcServer::~UdsIpcServer() { stop(); }
 
@@ -318,9 +345,9 @@ ipc::IpcTransportStartResult UdsIpcServer::start() {
                          "wake pipe creation failed");
   }
 
-  auto worker =
-      std::make_unique<ServerWorker>(listen_fd, wake_pipe[0], impl_->handler,
-                                     impl_->config.request_deadline, impl_->worker_stopping);
+  auto worker = std::make_unique<ServerWorker>(
+      listen_fd, wake_pipe[0], impl_->handler, impl_->stream_delegate,
+      impl_->config.request_deadline, impl_->worker_stopping);
   worker->set_wake_write(wake_pipe[1]);
 
   // blocking worker 名字单次注册不可复用（DuplicateName 语义），实例唯一化。

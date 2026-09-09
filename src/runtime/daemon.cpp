@@ -52,6 +52,12 @@ const std::optional<recovery::RecoveryResult>& Daemon::last_recovery() const noe
   return last_recovery_;
 }
 
+LogStreamer& Daemon::log_streamer() noexcept { return *log_streamer_; }
+
+LogFollowStatistics Daemon::log_follow_statistics() const {
+  return log_follow_ != nullptr ? log_follow_->statistics() : LogFollowStatistics{};
+}
+
 DaemonStartResult Daemon::start() {
   if (started_) {
     return start_failure(DaemonStartCode::kAlreadyStarted, "daemon already started");
@@ -97,16 +103,52 @@ DaemonStartResult Daemon::start() {
   }
   gpu_status_ = std::make_unique<ManagerGpuStatusSource>(*gpu_manager_);
 
-  // 3) IPC 服务（EXEC-02）。
+  // 3) 观察面（M6）：LogStreamer（Topic/回看窗口/准入）先于会话 worker，
+  //     后者先于 IPC（承接 LOGS_FOLLOW 的 fd 移交）。
+  std::string streamer_error;
+  if (!config_.log_streamer.valid(streamer_error)) {
+    gpu_status_.reset();
+    static_cast<void>(gpu_manager_->stop());
+    gpu_manager_.reset();
+    queue_.reset();
+    return start_failure(DaemonStartCode::kInvalidConfig,
+                         std::string("log streamer config invalid: ") + streamer_error);
+  }
+  log_streamer_ = std::make_unique<LogStreamer>(config_.log_streamer);
+
   log_reader_ = ipc::file_log_snapshot_reader();
   service_ = std::make_unique<ipc::IpcService>(config_.service, *queue_, store_, *gpu_status_,
                                                *log_reader_);
-  ipc_server_ = std::make_unique<UdsIpcServer>(executor_, *service_, config_.ipc);
+  log_follow_ =
+      std::make_unique<LogFollowService>(executor_, *service_, *log_streamer_, config_.log_follow);
+  // Topic 无 fd 可 poll：发布/终态经变更监听显式唤醒会话 worker（EXEC-03/04）。
+  log_streamer_->set_change_listener([this] { log_follow_->notify(); });
+  const LogFollowStartResult follow_start = log_follow_->start();
+  if (!follow_start.ok()) {
+    log_follow_.reset();
+    service_.reset();
+    log_reader_.reset();
+    log_streamer_.reset();
+    gpu_status_.reset();
+    static_cast<void>(gpu_manager_->stop());
+    gpu_manager_.reset();
+    queue_.reset();
+    return start_failure(DaemonStartCode::kIpcFailed,
+                         std::string("log follow service start failed: ") +
+                             to_string(follow_start.code) +
+                             (follow_start.message.empty() ? "" : ": " + follow_start.message));
+  }
+
+  // 4) IPC 服务（EXEC-02）；LOGS_FOLLOW 委派给观察面（EXEC-03）。
+  ipc_server_ =
+      std::make_unique<UdsIpcServer>(executor_, *service_, config_.ipc, log_follow_.get());
   const ipc::IpcTransportStartResult ipc_start = ipc_server_->start();
   if (!ipc_start.ok()) {
     ipc_server_.reset();
+    log_follow_.reset();
     service_.reset();
     log_reader_.reset();
+    log_streamer_.reset();
     gpu_status_.reset();
     static_cast<void>(gpu_manager_->stop());
     gpu_manager_.reset();
@@ -129,13 +171,16 @@ DaemonStopCode Daemon::stop() {
     return DaemonStopCode::kNotRunning;
   }
 
-  // EXEC-10 适用子集：① 停止 IPC（新连接与请求生产者）-> ③ 停止 GPU 周期
-  // 任务。M5 无调度生产者与在飞守护任务；store 写路径在 IPC worker 内同步
-  // 完成，IPC join 后无未落盘写入。
+  // EXEC-10 适用子集：① 停止 IPC（新连接与请求生产者）-> ② 断开全部
+  // logs -f 跟随会话 -> ③ 停止 GPU 周期任务。M6 无调度生产者与在飞守护
+  // 任务；store 写路径在 IPC worker 内同步完成，IPC join 后无未落盘写入。
   ipc_server_->stop();
   ipc_server_.reset();
+  log_streamer_->set_change_listener(nullptr);  // 先解除回调，再回收 worker。
+  log_follow_.reset();
   service_.reset();
   log_reader_.reset();
+  log_streamer_.reset();
   static_cast<void>(gpu_manager_->stop());
   gpu_status_.reset();
   gpu_manager_.reset();

@@ -151,6 +151,13 @@ IpcResponse IpcService::handle(const PeerCredentials& peer, const IpcRequest& re
       return handle_cancel(peer, request.cancel.job_id);
     case IpcRequestKind::kLogs:
       return handle_logs(peer, request.logs);
+    case IpcRequestKind::kLogsFollow:
+      // 流式请求必须经传输层的流式委派接管（fd 移交）；走到普通 handler
+      // 说明该构建/装配未启用流式会话，显式拒绝而非假装支持。
+      return error_response(IpcRequestKind::kLogsFollow, IpcError::kUnsupported,
+                            "streaming follow is not enabled on this endpoint");
+    case IpcRequestKind::kTensorboard:
+      return handle_tensorboard(peer, request.tensorboard.job_id);
   }
   return error_response(request.kind, IpcError::kInternal, "unhandled request kind");
 }
@@ -474,6 +481,55 @@ IpcResponse IpcService::handle_logs(const PeerCredentials& peer, const IpcLogsRe
   response.logs.stdout_tail = std::move(stdout_tail.tail);
   response.logs.stderr_truncated = stderr_tail.truncated;
   response.logs.stderr_tail = std::move(stderr_tail.tail);
+  return response;
+}
+
+IpcResponse IpcService::validate_logs_follow(const PeerCredentials& peer,
+                                             const IpcLogsFollowRequest& request) {
+  const store::StateStoreLoadResult load = store_.load();
+  if (!load.ok()) {
+    return error_response(IpcRequestKind::kLogsFollow, IpcError::kStoreFailed,
+                          store::to_string(load.code));
+  }
+  const store::StoredJob* record = find_job(load.snapshot, request.job_id);
+  if (record == nullptr) {
+    return error_response(IpcRequestKind::kLogsFollow, IpcError::kNotFound, "job not found");
+  }
+  if (record->spec.owner_uid != peer.uid && !is_admin(peer)) {
+    return error_response(IpcRequestKind::kLogsFollow, IpcError::kDenied, "not job owner or admin");
+  }
+  if (!record->execution.log_path) {
+    return error_response(IpcRequestKind::kLogsFollow, IpcError::kInvalidState,
+                          "job has not started; no logs yet");
+  }
+  IpcResponse response;
+  response.kind = IpcRequestKind::kLogsFollow;
+  response.error = IpcError::kNone;
+  response.logs_follow.job_state = job_state_wire(record->state);
+  return response;
+}
+
+IpcResponse IpcService::handle_tensorboard(const PeerCredentials& peer, std::uint64_t job_id) {
+  const store::StateStoreLoadResult load = store_.load();
+  if (!load.ok()) {
+    return error_response(IpcRequestKind::kTensorboard, IpcError::kStoreFailed,
+                          store::to_string(load.code));
+  }
+  const store::StoredJob* record = find_job(load.snapshot, job_id);
+  if (record == nullptr) {
+    return error_response(IpcRequestKind::kTensorboard, IpcError::kNotFound, "job not found");
+  }
+  // cwd/tensorboard_logdir 属敏感字段（设计 11.5）：非 owner 非 admin 直接
+  // 拒绝，不提供脱敏视图。
+  if (record->spec.owner_uid != peer.uid && !is_admin(peer)) {
+    return error_response(IpcRequestKind::kTensorboard, IpcError::kDenied,
+                          "not job owner or admin");
+  }
+  IpcResponse response;
+  response.kind = IpcRequestKind::kTensorboard;
+  response.error = IpcError::kNone;
+  response.tensorboard.logdir = record->spec.tensorboard_logdir;
+  response.tensorboard.cwd = record->spec.cwd;
   return response;
 }
 
