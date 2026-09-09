@@ -1,0 +1,821 @@
+#include <cstring>
+#include <limits>
+#include <utility>
+#include <yori/ipc/ipc_protocol.hpp>
+
+namespace yori::ipc {
+namespace {
+
+// ---------------------------------------------------------------------------
+// 编码端。Writer 只追加；上层先在临时缓冲编码 payload，成功后写长度前缀，
+// 保证失败路径不产生半帧。
+// ---------------------------------------------------------------------------
+class Writer final {
+ public:
+  explicit Writer(std::vector<std::uint8_t>& buffer) : buffer_(buffer) {}
+
+  void u8(std::uint8_t value) { buffer_.push_back(value); }
+
+  void u32(std::uint32_t value) {
+    for (int shift = 0; shift < 32; shift += 8) {
+      buffer_.push_back(static_cast<std::uint8_t>((value >> shift) & 0xffu));
+    }
+  }
+
+  void u64(std::uint64_t value) {
+    for (int shift = 0; shift < 64; shift += 8) {
+      buffer_.push_back(static_cast<std::uint8_t>((value >> shift) & 0xffu));
+    }
+  }
+
+  void i32(std::int32_t value) {
+    std::uint32_t bits = 0;
+    static_assert(sizeof(bits) == sizeof(value), "int32 width mismatch");
+    std::memcpy(&bits, &value, sizeof(bits));
+    u32(bits);
+  }
+
+  // 成功返回 false 失败标记；调用方以 ok() 短路后续编码。
+  [[nodiscard]] bool string(const std::string& value) {
+    if (value.size() > IpcProtocolLimits::kMaxStringBytes ||
+        value.find('\0') != std::string::npos) {
+      return true;
+    }
+    u32(static_cast<std::uint32_t>(value.size()));
+    buffer_.insert(buffer_.end(), value.begin(), value.end());
+    return false;
+  }
+
+  [[nodiscard]] bool string(const std::optional<std::string>& value) {
+    if (!value) {
+      u8(0);
+      return false;
+    }
+    u8(1);
+    return string(*value);
+  }
+
+  [[nodiscard]] bool bytes(const std::vector<std::uint8_t>& value) {
+    if (value.size() > IpcProtocolLimits::kMaxBytesFieldBytes) {
+      return true;
+    }
+    u32(static_cast<std::uint32_t>(value.size()));
+    buffer_.insert(buffer_.end(), value.begin(), value.end());
+    return false;
+  }
+
+ private:
+  std::vector<std::uint8_t>& buffer_;
+};
+
+// ---------------------------------------------------------------------------
+// 解码端。所有读取先检查剩余长度；计数与长度先验证再分配；字符串拒绝 NUL。
+// ---------------------------------------------------------------------------
+class Reader final {
+ public:
+  Reader(const std::uint8_t* data, std::size_t size) : data_(data), size_(size) {}
+
+  [[nodiscard]] std::size_t remaining() const noexcept { return size_ - offset_; }
+  [[nodiscard]] bool exhausted() const noexcept { return offset_ == size_; }
+
+  [[nodiscard]] bool u8(std::uint8_t& out) {
+    if (remaining() < 1) {
+      return false;
+    }
+    out = data_[offset_];
+    offset_ += 1;
+    return true;
+  }
+
+  [[nodiscard]] bool u32(std::uint32_t& out) {
+    if (remaining() < 4) {
+      return false;
+    }
+    out = 0;
+    for (int shift = 0; shift < 32; shift += 8) {
+      out |= static_cast<std::uint32_t>(data_[offset_ + static_cast<std::size_t>(shift / 8)])
+             << shift;
+    }
+    offset_ += 4;
+    return true;
+  }
+
+  [[nodiscard]] bool u64(std::uint64_t& out) {
+    if (remaining() < 8) {
+      return false;
+    }
+    out = 0;
+    for (int shift = 0; shift < 64; shift += 8) {
+      out |= static_cast<std::uint64_t>(data_[offset_ + static_cast<std::size_t>(shift / 8)])
+             << shift;
+    }
+    offset_ += 8;
+    return true;
+  }
+
+  [[nodiscard]] bool i32(std::int32_t& out) {
+    std::uint32_t bits = 0;
+    if (!u32(bits)) {
+      return false;
+    }
+    static_assert(sizeof(bits) == sizeof(out), "int32 width mismatch");
+    std::memcpy(&out, &bits, sizeof(out));
+    return true;
+  }
+
+  // 长度不足/超上限返回 kOversize，含 NUL 返回 kBadString。
+  [[nodiscard]] IpcDecodeError string(std::string& out) {
+    std::uint32_t length = 0;
+    if (!u32(length)) {
+      return IpcDecodeError::kTruncated;
+    }
+    if (length > IpcProtocolLimits::kMaxStringBytes) {
+      return IpcDecodeError::kOversize;
+    }
+    if (remaining() < length) {
+      return IpcDecodeError::kTruncated;
+    }
+    out.assign(reinterpret_cast<const char*>(data_ + offset_), length);
+    offset_ += length;
+    if (out.find('\0') != std::string::npos) {
+      return IpcDecodeError::kBadString;
+    }
+    return IpcDecodeError::kNone;
+  }
+
+  [[nodiscard]] IpcDecodeError string(std::optional<std::string>& out) {
+    std::uint8_t present = 0;
+    if (!u8(present)) {
+      return IpcDecodeError::kTruncated;
+    }
+    if (present > 1) {
+      return IpcDecodeError::kInvalidValue;
+    }
+    if (present == 0) {
+      out.reset();
+      return IpcDecodeError::kNone;
+    }
+    out.emplace();
+    return string(*out);
+  }
+
+  [[nodiscard]] IpcDecodeError bytes(std::vector<std::uint8_t>& out) {
+    std::uint32_t length = 0;
+    if (!u32(length)) {
+      return IpcDecodeError::kTruncated;
+    }
+    if (length > IpcProtocolLimits::kMaxBytesFieldBytes) {
+      return IpcDecodeError::kOversize;
+    }
+    if (remaining() < length) {
+      return IpcDecodeError::kTruncated;
+    }
+    out.assign(data_ + offset_, data_ + offset_ + length);
+    offset_ += length;
+    return IpcDecodeError::kNone;
+  }
+
+  // 计数字段：先验证上限再产出。
+  [[nodiscard]] IpcDecodeError count(std::uint32_t cap, std::uint32_t& out) {
+    if (!u32(out)) {
+      return IpcDecodeError::kTruncated;
+    }
+    if (out > cap) {
+      return IpcDecodeError::kTooManyItems;
+    }
+    return IpcDecodeError::kNone;
+  }
+
+  // 0/1 布尔标记。
+  [[nodiscard]] IpcDecodeError flag(bool& out) {
+    std::uint8_t value = 0;
+    if (!u8(value)) {
+      return IpcDecodeError::kTruncated;
+    }
+    if (value > 1) {
+      return IpcDecodeError::kInvalidValue;
+    }
+    out = value == 1;
+    return IpcDecodeError::kNone;
+  }
+
+ private:
+  const std::uint8_t* data_;
+  std::size_t size_;
+  std::size_t offset_{0};
+};
+
+constexpr std::uint8_t kUnderlyingJobStateMax = 7;
+constexpr std::uint8_t kUnderlyingGpuObservedStateMax = 2;
+constexpr std::uint8_t kUnderlyingGpuLogicalStateMax = 3;
+
+// 编码请求 kind body（不含 version/kind 头）。返回 false 表示字段越界。
+bool encode_request_body(const IpcRequest& request, Writer& writer) {
+  switch (request.kind) {
+    case IpcRequestKind::kSubmit: {
+      const IpcSubmitRequest& submit = request.submit;
+      if (submit.argv.size() > IpcProtocolLimits::kMaxItemCount ||
+          submit.env.size() > IpcProtocolLimits::kMaxItemCount) {
+        return false;
+      }
+      writer.u32(static_cast<std::uint32_t>(submit.argv.size()));
+      for (const std::string& argument : submit.argv) {
+        if (writer.string(argument)) {
+          return false;
+        }
+      }
+      if (writer.string(submit.cwd)) {
+        return false;
+      }
+      writer.u32(static_cast<std::uint32_t>(submit.env.size()));
+      for (const auto& [name, value] : submit.env) {
+        if (writer.string(name) || writer.string(value)) {
+          return false;
+        }
+      }
+      writer.u32(submit.gpu_request);
+      if (writer.string(submit.launch_profile) || writer.string(submit.tensorboard_logdir)) {
+        return false;
+      }
+      return true;
+    }
+    case IpcRequestKind::kPs:
+    case IpcRequestKind::kQueue:
+    case IpcRequestKind::kGpu:
+      return true;
+    case IpcRequestKind::kCancel:
+      writer.u64(request.cancel.job_id);
+      return true;
+    case IpcRequestKind::kLogs:
+      writer.u64(request.logs.job_id);
+      writer.u32(request.logs.max_bytes);
+      return true;
+  }
+  return false;
+}
+
+bool encode_response_body(const IpcResponse& response, Writer& writer) {
+  writer.u8(static_cast<std::uint8_t>(response.error));
+  if (writer.string(response.detail)) {
+    return false;
+  }
+  switch (response.kind) {
+    case IpcRequestKind::kSubmit:
+      writer.u64(response.job_id);
+      return true;
+    case IpcRequestKind::kPs: {
+      if (response.jobs.size() > IpcProtocolLimits::kMaxListItems) {
+        return false;
+      }
+      writer.u32(static_cast<std::uint32_t>(response.jobs.size()));
+      for (const IpcJobSummary& summary : response.jobs) {
+        if (summary.argv.size() > IpcProtocolLimits::kMaxItemCount) {
+          return false;
+        }
+        writer.u64(summary.job_id);
+        writer.u8(summary.state);
+        writer.u32(summary.owner_uid);
+        writer.u64(summary.revision);
+        writer.u8(summary.masked ? 1 : 0);
+        if (!summary.masked) {
+          writer.u32(static_cast<std::uint32_t>(summary.argv.size()));
+          for (const std::string& argument : summary.argv) {
+            if (writer.string(argument)) {
+              return false;
+            }
+          }
+          if (writer.string(summary.cwd) || writer.string(summary.tensorboard_logdir)) {
+            return false;
+          }
+        }
+        if (summary.exit) {
+          writer.u8(1);
+          writer.u8(summary.exit->exited_normally ? 1 : 0);
+          writer.i32(summary.exit->code);
+        } else {
+          writer.u8(0);
+        }
+      }
+      return true;
+    }
+    case IpcRequestKind::kQueue: {
+      if (response.queue.size() > IpcProtocolLimits::kMaxListItems) {
+        return false;
+      }
+      writer.u32(static_cast<std::uint32_t>(response.queue.size()));
+      for (const IpcQueueEntry& entry : response.queue) {
+        writer.u64(entry.job_id);
+        writer.u32(entry.owner_uid);
+        writer.u64(entry.submit_time_unix_ns);
+        writer.u8(entry.state);
+      }
+      return true;
+    }
+    case IpcRequestKind::kGpu: {
+      if (response.devices.size() > IpcProtocolLimits::kMaxListItems) {
+        return false;
+      }
+      writer.u64(response.gpu_revision);
+      writer.u32(static_cast<std::uint32_t>(response.devices.size()));
+      for (const IpcGpuDevice& device : response.devices) {
+        if (writer.string(device.uuid)) {
+          return false;
+        }
+        writer.u32(device.index);
+        writer.u8(device.observed_state);
+        writer.u8(device.logical_state);
+        if (device.utilization_percent) {
+          writer.u8(1);
+          writer.u32(*device.utilization_percent);
+        } else {
+          writer.u8(0);
+        }
+        if (device.memory_used_bytes && device.memory_total_bytes) {
+          writer.u8(1);
+          writer.u64(*device.memory_used_bytes);
+          writer.u64(*device.memory_total_bytes);
+        } else {
+          writer.u8(0);
+        }
+        if (device.leased_by_job) {
+          writer.u8(1);
+          writer.u64(*device.leased_by_job);
+        } else {
+          writer.u8(0);
+        }
+      }
+      return true;
+    }
+    case IpcRequestKind::kCancel:
+      writer.u8(response.state);
+      return true;
+    case IpcRequestKind::kLogs:
+      writer.u8(response.logs.stdout_truncated ? 1 : 0);
+      if (writer.bytes(response.logs.stdout_tail)) {
+        return false;
+      }
+      writer.u8(response.logs.stderr_truncated ? 1 : 0);
+      return !writer.bytes(response.logs.stderr_tail);
+  }
+  return false;
+}
+
+IpcDecodeError decode_request_body(Reader& reader, IpcRequest& out) {
+  std::uint8_t version = 0;
+  std::uint8_t kind = 0;
+  if (!reader.u8(version)) {
+    return IpcDecodeError::kTruncated;
+  }
+  if (!reader.u8(kind)) {
+    return IpcDecodeError::kTruncated;
+  }
+  if (version != IpcProtocolLimits::kProtocolVersion) {
+    return IpcDecodeError::kBadVersion;
+  }
+  if (kind < static_cast<std::uint8_t>(IpcRequestKind::kSubmit) ||
+      kind > static_cast<std::uint8_t>(IpcRequestKind::kLogs)) {
+    return IpcDecodeError::kBadKind;
+  }
+  out = IpcRequest{};
+  out.kind = static_cast<IpcRequestKind>(kind);
+
+  switch (out.kind) {
+    case IpcRequestKind::kSubmit: {
+      IpcSubmitRequest& submit = out.submit;
+      std::uint32_t argv_count = 0;
+      IpcDecodeError error = reader.count(IpcProtocolLimits::kMaxItemCount, argv_count);
+      if (error != IpcDecodeError::kNone) {
+        return error;
+      }
+      submit.argv.reserve(argv_count);
+      for (std::uint32_t i = 0; i < argv_count; ++i) {
+        submit.argv.emplace_back();
+        error = reader.string(submit.argv.back());
+        if (error != IpcDecodeError::kNone) {
+          return error;
+        }
+      }
+      error = reader.string(submit.cwd);
+      if (error != IpcDecodeError::kNone) {
+        return error;
+      }
+      std::uint32_t env_count = 0;
+      error = reader.count(IpcProtocolLimits::kMaxItemCount, env_count);
+      if (error != IpcDecodeError::kNone) {
+        return error;
+      }
+      for (std::uint32_t i = 0; i < env_count; ++i) {
+        std::string name;
+        std::string value;
+        error = reader.string(name);
+        if (error != IpcDecodeError::kNone) {
+          return error;
+        }
+        error = reader.string(value);
+        if (error != IpcDecodeError::kNone) {
+          return error;
+        }
+        submit.env.emplace(std::move(name), std::move(value));
+      }
+      if (!reader.u32(submit.gpu_request)) {
+        return IpcDecodeError::kTruncated;
+      }
+      error = reader.string(submit.launch_profile);
+      if (error != IpcDecodeError::kNone) {
+        return error;
+      }
+      return reader.string(submit.tensorboard_logdir);
+    }
+    case IpcRequestKind::kPs:
+    case IpcRequestKind::kQueue:
+    case IpcRequestKind::kGpu:
+      break;
+    case IpcRequestKind::kCancel:
+      if (!reader.u64(out.cancel.job_id)) {
+        return IpcDecodeError::kTruncated;
+      }
+      break;
+    case IpcRequestKind::kLogs:
+      if (!reader.u64(out.logs.job_id) || !reader.u32(out.logs.max_bytes)) {
+        return IpcDecodeError::kTruncated;
+      }
+      break;
+  }
+  if (!reader.exhausted()) {
+    return IpcDecodeError::kTrailingBytes;
+  }
+  return IpcDecodeError::kNone;
+}
+
+IpcDecodeError decode_response_body(Reader& reader, IpcResponse& out) {
+  std::uint8_t version = 0;
+  std::uint8_t kind = 0;
+  std::uint8_t error_code = 0;
+  if (!reader.u8(version) || !reader.u8(kind)) {
+    return IpcDecodeError::kTruncated;
+  }
+  if (version != IpcProtocolLimits::kProtocolVersion) {
+    return IpcDecodeError::kBadVersion;
+  }
+  if (kind < static_cast<std::uint8_t>(IpcRequestKind::kSubmit) ||
+      kind > static_cast<std::uint8_t>(IpcRequestKind::kLogs)) {
+    return IpcDecodeError::kBadKind;
+  }
+  if (!reader.u8(error_code)) {
+    return IpcDecodeError::kTruncated;
+  }
+  if (error_code > static_cast<std::uint8_t>(IpcError::kInternal)) {
+    return IpcDecodeError::kInvalidValue;
+  }
+  out = IpcResponse{};
+  out.kind = static_cast<IpcRequestKind>(kind);
+  out.error = static_cast<IpcError>(error_code);
+
+  IpcDecodeError error = reader.string(out.detail);
+  if (error != IpcDecodeError::kNone) {
+    return error;
+  }
+
+  switch (out.kind) {
+    case IpcRequestKind::kSubmit:
+      if (!reader.u64(out.job_id)) {
+        return IpcDecodeError::kTruncated;
+      }
+      break;
+    case IpcRequestKind::kPs: {
+      std::uint32_t count = 0;
+      error = reader.count(IpcProtocolLimits::kMaxListItems, count);
+      if (error != IpcDecodeError::kNone) {
+        return error;
+      }
+      out.jobs.reserve(count);
+      for (std::uint32_t i = 0; i < count; ++i) {
+        IpcJobSummary summary;
+        if (!reader.u64(summary.job_id) || !reader.u8(summary.state) ||
+            !reader.u32(summary.owner_uid) || !reader.u64(summary.revision)) {
+          return IpcDecodeError::kTruncated;
+        }
+        if (summary.state > kUnderlyingJobStateMax) {
+          return IpcDecodeError::kInvalidValue;
+        }
+        bool masked = false;
+        error = reader.flag(masked);
+        if (error != IpcDecodeError::kNone) {
+          return error;
+        }
+        summary.masked = masked;
+        if (!masked) {
+          std::uint32_t argv_count = 0;
+          error = reader.count(IpcProtocolLimits::kMaxItemCount, argv_count);
+          if (error != IpcDecodeError::kNone) {
+            return error;
+          }
+          summary.argv.reserve(argv_count);
+          for (std::uint32_t j = 0; j < argv_count; ++j) {
+            summary.argv.emplace_back();
+            error = reader.string(summary.argv.back());
+            if (error != IpcDecodeError::kNone) {
+              return error;
+            }
+          }
+          error = reader.string(summary.cwd);
+          if (error != IpcDecodeError::kNone) {
+            return error;
+          }
+          error = reader.string(summary.tensorboard_logdir);
+          if (error != IpcDecodeError::kNone) {
+            return error;
+          }
+        }
+        bool has_exit = false;
+        error = reader.flag(has_exit);
+        if (error != IpcDecodeError::kNone) {
+          return error;
+        }
+        if (has_exit) {
+          IpcExitStatus exit_status;
+          std::uint8_t normal = 0;
+          if (!reader.u8(normal)) {
+            return IpcDecodeError::kTruncated;
+          }
+          if (normal > 1) {
+            return IpcDecodeError::kInvalidValue;
+          }
+          exit_status.exited_normally = normal == 1;
+          if (!reader.i32(exit_status.code)) {
+            return IpcDecodeError::kTruncated;
+          }
+          summary.exit = exit_status;
+        }
+        out.jobs.push_back(std::move(summary));
+      }
+      break;
+    }
+    case IpcRequestKind::kQueue: {
+      std::uint32_t count = 0;
+      error = reader.count(IpcProtocolLimits::kMaxListItems, count);
+      if (error != IpcDecodeError::kNone) {
+        return error;
+      }
+      out.queue.reserve(count);
+      for (std::uint32_t i = 0; i < count; ++i) {
+        IpcQueueEntry entry;
+        if (!reader.u64(entry.job_id) || !reader.u32(entry.owner_uid) ||
+            !reader.u64(entry.submit_time_unix_ns) || !reader.u8(entry.state)) {
+          return IpcDecodeError::kTruncated;
+        }
+        if (entry.state > kUnderlyingJobStateMax) {
+          return IpcDecodeError::kInvalidValue;
+        }
+        out.queue.push_back(entry);
+      }
+      break;
+    }
+    case IpcRequestKind::kGpu: {
+      if (!reader.u64(out.gpu_revision)) {
+        return IpcDecodeError::kTruncated;
+      }
+      std::uint32_t count = 0;
+      error = reader.count(IpcProtocolLimits::kMaxListItems, count);
+      if (error != IpcDecodeError::kNone) {
+        return error;
+      }
+      out.devices.reserve(count);
+      for (std::uint32_t i = 0; i < count; ++i) {
+        IpcGpuDevice device;
+        error = reader.string(device.uuid);
+        if (error != IpcDecodeError::kNone) {
+          return error;
+        }
+        bool has_util = false;
+        bool has_memory = false;
+        bool has_lease = false;
+        if (!reader.u32(device.index) || !reader.u8(device.observed_state) ||
+            !reader.u8(device.logical_state)) {
+          return IpcDecodeError::kTruncated;
+        }
+        if (device.observed_state > kUnderlyingGpuObservedStateMax ||
+            device.logical_state > kUnderlyingGpuLogicalStateMax) {
+          return IpcDecodeError::kInvalidValue;
+        }
+        error = reader.flag(has_util);
+        if (error != IpcDecodeError::kNone) {
+          return error;
+        }
+        if (has_util) {
+          std::uint32_t utilization = 0;
+          if (!reader.u32(utilization)) {
+            return IpcDecodeError::kTruncated;
+          }
+          if (utilization > 100) {
+            return IpcDecodeError::kInvalidValue;
+          }
+          device.utilization_percent = utilization;
+        }
+        error = reader.flag(has_memory);
+        if (error != IpcDecodeError::kNone) {
+          return error;
+        }
+        if (has_memory) {
+          std::uint64_t used = 0;
+          std::uint64_t total = 0;
+          if (!reader.u64(used) || !reader.u64(total)) {
+            return IpcDecodeError::kTruncated;
+          }
+          if (total < used) {
+            return IpcDecodeError::kInvalidValue;
+          }
+          device.memory_used_bytes = used;
+          device.memory_total_bytes = total;
+        }
+        error = reader.flag(has_lease);
+        if (error != IpcDecodeError::kNone) {
+          return error;
+        }
+        if (has_lease) {
+          std::uint64_t job = 0;
+          if (!reader.u64(job)) {
+            return IpcDecodeError::kTruncated;
+          }
+          device.leased_by_job = job;
+        }
+        out.devices.push_back(std::move(device));
+      }
+      break;
+    }
+    case IpcRequestKind::kCancel:
+      if (!reader.u8(out.state)) {
+        return IpcDecodeError::kTruncated;
+      }
+      if (out.state > kUnderlyingJobStateMax) {
+        return IpcDecodeError::kInvalidValue;
+      }
+      break;
+    case IpcRequestKind::kLogs: {
+      IpcDecodeError flag_error = reader.flag(out.logs.stdout_truncated);
+      if (flag_error != IpcDecodeError::kNone) {
+        return flag_error;
+      }
+      error = reader.bytes(out.logs.stdout_tail);
+      if (error != IpcDecodeError::kNone) {
+        return error;
+      }
+      flag_error = reader.flag(out.logs.stderr_truncated);
+      if (flag_error != IpcDecodeError::kNone) {
+        return flag_error;
+      }
+      error = reader.bytes(out.logs.stderr_tail);
+      if (error != IpcDecodeError::kNone) {
+        return error;
+      }
+      break;
+    }
+  }
+  if (!reader.exhausted()) {
+    return IpcDecodeError::kTrailingBytes;
+  }
+  return IpcDecodeError::kNone;
+}
+
+// 编码公共骨架：写 [version][kind][body]；失败保持 out 不变。
+template <typename Message>
+bool encode_payload(IpcRequestKind kind, const Message& message,
+                    bool (*encode_body)(const Message&, Writer&), std::vector<std::uint8_t>& out) {
+  std::vector<std::uint8_t> payload;
+  Writer writer(payload);
+  writer.u8(static_cast<std::uint8_t>(IpcProtocolLimits::kProtocolVersion));
+  writer.u8(static_cast<std::uint8_t>(kind));
+  if (!encode_body(message, writer) || payload.size() > IpcProtocolLimits::kMaxPayloadBytes) {
+    return false;
+  }
+  out.insert(out.end(), payload.begin(), payload.end());
+  return true;
+}
+
+}  // namespace
+
+const char* to_string(IpcRequestKind kind) noexcept {
+  switch (kind) {
+    case IpcRequestKind::kSubmit:
+      return "submit";
+    case IpcRequestKind::kPs:
+      return "ps";
+    case IpcRequestKind::kQueue:
+      return "queue";
+    case IpcRequestKind::kGpu:
+      return "gpu";
+    case IpcRequestKind::kCancel:
+      return "cancel";
+    case IpcRequestKind::kLogs:
+      return "logs";
+  }
+  return "unknown";
+}
+
+const char* to_string(IpcError error) noexcept {
+  switch (error) {
+    case IpcError::kNone:
+      return "none";
+    case IpcError::kProtocol:
+      return "protocol";
+    case IpcError::kUnsupported:
+      return "unsupported";
+    case IpcError::kDenied:
+      return "denied";
+    case IpcError::kInvalidSpec:
+      return "invalid spec";
+    case IpcError::kQueueRejected:
+      return "queue rejected";
+    case IpcError::kStoreFailed:
+      return "store failed";
+    case IpcError::kNotFound:
+      return "not found";
+    case IpcError::kInvalidState:
+      return "invalid state";
+    case IpcError::kNotAvailable:
+      return "not available";
+    case IpcError::kLimit:
+      return "limit";
+    case IpcError::kInternal:
+      return "internal";
+  }
+  return "unknown";
+}
+
+const char* to_string(IpcDecodeError error) noexcept {
+  switch (error) {
+    case IpcDecodeError::kNone:
+      return "none";
+    case IpcDecodeError::kTruncated:
+      return "truncated";
+    case IpcDecodeError::kOversize:
+      return "oversize";
+    case IpcDecodeError::kBadVersion:
+      return "bad version";
+    case IpcDecodeError::kBadKind:
+      return "bad kind";
+    case IpcDecodeError::kBadString:
+      return "bad string";
+    case IpcDecodeError::kTooManyItems:
+      return "too many items";
+    case IpcDecodeError::kTrailingBytes:
+      return "trailing bytes";
+    case IpcDecodeError::kInvalidValue:
+      return "invalid value";
+  }
+  return "unknown";
+}
+
+bool encode_request_payload(const IpcRequest& request, std::vector<std::uint8_t>& out) {
+  return encode_payload(request.kind, request, &encode_request_body, out);
+}
+
+bool encode_response_payload(const IpcResponse& response, std::vector<std::uint8_t>& out) {
+  return encode_payload(response.kind, response, &encode_response_body, out);
+}
+
+bool append_request_frame(const IpcRequest& request, std::vector<std::uint8_t>& out) {
+  std::vector<std::uint8_t> payload;
+  if (!encode_payload(request.kind, request, &encode_request_body, payload)) {
+    return false;
+  }
+  Writer framed(out);
+  framed.u32(static_cast<std::uint32_t>(payload.size()));
+  out.insert(out.end(), payload.begin(), payload.end());
+  return true;
+}
+
+bool append_response_frame(const IpcResponse& response, std::vector<std::uint8_t>& out) {
+  std::vector<std::uint8_t> payload;
+  if (!encode_payload(response.kind, response, &encode_response_body, payload)) {
+    return false;
+  }
+  Writer framed(out);
+  framed.u32(static_cast<std::uint32_t>(payload.size()));
+  out.insert(out.end(), payload.begin(), payload.end());
+  return true;
+}
+
+IpcRequestDecodeResult decode_request_payload(const std::uint8_t* data, std::size_t size) {
+  IpcRequestDecodeResult result;
+  if (size > IpcProtocolLimits::kMaxPayloadBytes) {
+    result.error = IpcDecodeError::kOversize;
+    return result;
+  }
+  Reader reader(data, size);
+  result.error = decode_request_body(reader, result.value);
+  return result;
+}
+
+IpcResponseDecodeResult decode_response_payload(const std::uint8_t* data, std::size_t size) {
+  IpcResponseDecodeResult result;
+  if (size > IpcProtocolLimits::kMaxPayloadBytes) {
+    result.error = IpcDecodeError::kOversize;
+    return result;
+  }
+  Reader reader(data, size);
+  result.error = decode_response_body(reader, result.value);
+  return result;
+}
+
+}  // namespace yori::ipc
