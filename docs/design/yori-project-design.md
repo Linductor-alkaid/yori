@@ -966,10 +966,10 @@ MVP 的 IPC 消息分为两类：
 ## 14. Executor 集成边界
 
 Yori 以 pinned git submodule 引入 Executor（`third_party/executor`，初始固定于
-origin/master `4fd8e60`，v0.4.0-82，MIT；来源与校验信息见仓库根
-`dependencies.lock.json`），并遵循仓库 [AGENTS.md](../../AGENTS.md) 的 Executor
-强制条款与能力路由。Yori 是 Executor 很好的真实生产级使用场景，但 GPU scheduler
-逻辑不能进入 Executor 核心。
+origin/master `4fd8e60`（2026-09-02），2026-09-09 升级至 `e2dc8ca`，MIT；
+来源与校验信息见仓库根 `dependencies.lock.json`），并遵循仓库
+[AGENTS.md](../../AGENTS.md) 的 Executor 强制条款与能力路由。Yori 是 Executor
+很好的真实生产级使用场景，但 GPU scheduler 逻辑不能进入 Executor 核心。
 
 职责边界：
 

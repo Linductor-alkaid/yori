@@ -26,6 +26,10 @@
 - 升级：独立 MR，记录旧版本、新 commit、能力变化、受影响范围与全量回归结果，
   并在 `docs/supply-chain/` 留审计记录；升级前先核对
   [反馈台账](../executor_feedback/ledger.md)状态。
+- 升级记录：2026-09-02 `4fd8e60` → 2026-09-09
+  `e2dc8ca2243345e2e6cf35b395793a58796457b9`（P-001/P-002 停机/提交竞态
+  修复、提交热路径与空闲驻停性能重建；公开 API 零影响），见
+  [upgrade-executor-20260909.md](../supply-chain/upgrade-executor-20260909.md)。
 
 ## 备选方案
 
