@@ -154,3 +154,29 @@ jobs:
           git submodule update --init third_party/executor
           cmake -S . -B build/verify -G Ninja -DCMAKE_BUILD_TYPE=Debug \
             -DYORI_FETCH_DEPENDENCIES=OFF
+
+  deb:
+    name: deb 打包冒烟（packaging/deb）
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: 安装工具链
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build g++ libsqlite3-dev
+      - name: 打包 deb 并自检（脚本自建 /usr 前缀构建树）
+        run: |
+          packaging/deb/build-deb.sh dist
+      - name: 解包冒烟（文件级与 --version）
+        run: |
+          D=$(mktemp -d)
+          dpkg-deb -x dist/yori_*.deb "${D}"
+          "${D}/usr/bin/yori" --version
+          "${D}/usr/bin/yorid" --version
+          test -f "${D}/usr/lib/systemd/system/yori.service"
+          grep -q "ExecStart=/usr/bin/yorid" "${D}/usr/lib/systemd/system/yori.service"
+          # 运行时包不含开发产物。
+          test ! -e "${D}/usr/include/yori"
+          ! dpkg-deb -c dist/yori_*.deb | grep -q 'libyori.*\.a'

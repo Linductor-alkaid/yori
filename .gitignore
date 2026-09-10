@@ -17,6 +17,7 @@ compile_commands.json
 # 日志与运行产物
 *.log
 /run/
+/dist/
 
 # 凭据与本地环境
 .env

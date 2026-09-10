@@ -4,7 +4,24 @@ systemd unit 与部署说明（设计 §10.1、DEC-004、DEC-010）。`yori.serv
 CMake `install()` 部署到 `${CMAKE_INSTALL_LIBEXECDIR}/systemd/system/`（默认
 前缀 `/usr/local` 时为 `/usr/local/lib/systemd/system/yori.service`）。
 
-## 安装与启用（root）
+## 安装与启用
+
+### deb 包（推荐）
+
+从 [Releases](https://github.com/Linductor-alkaid/yori/releases) 下载
+`yori_<version>_<arch>.deb`（GitHub Actions 在 `v*` tag 上自动构建并发布）：
+
+```bash
+sudo apt install ./yori_0.1.0_amd64.deb
+```
+
+安装自动完成：`yori`/`yorid` 安装到 `/usr/bin`、创建 `yori` 系统组、写入
+socket 属主 drop-in（`--socket-group <gid>`）、`systemctl enable --now
+yori.service`。本地构建 deb：`packaging/deb/build-deb.sh <out-dir>`（脚本
+自建 `/usr` 前缀构建树；卸载不删除 `/var/lib/yori` 状态与日志，服务停止不
+终止训练，RULE-10）。
+
+### 源码安装（root）
 
 ```bash
 cmake --preset release -DYORI_FETCH_DEPENDENCIES=OFF

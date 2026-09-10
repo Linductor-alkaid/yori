@@ -1,7 +1,7 @@
 # Yori 实施总计划
 
 > 状态：Active
-> 版本：1.10
+> 版本：1.11
 > 更新日期：2026-09-10
 > 负责人：Linductor-alkaid
 > 设计依据：[Yori 项目设计文档](../design/yori-project-design.md)（v0.5）
@@ -67,8 +67,11 @@
   交付；其中 EXEC-09 启动 `PhaseGate` 与六场景闭环集成测试已由 M7 守护总装
   承接（`m7.unit.job-manager`），触发合并未建独立 comm 层（由 JobManager
   命令通道承载）。M1 里程碑随 M7 关闭（见 M1 文档 2026-09-10 收口记录）。
-- 当前里程碑：无（M0-M7 全部完成；`v0.1.0` tag 与 LICENSE 选定为负责人
-  授权的发布动作，真机验收补跑条件见 M7 验收矩阵）。
+- 当前里程碑：无（M0-M7 全部完成）。`v0.1.0` 发布（2026-09-10）：LICENSE
+  选定 MIT（第 6 节冻结）、仓库级 `README.md` 与 `CHANGELOG.md`、deb 运行时
+  包（`packaging/deb/build-deb.sh`，安装即启用服务）与 Release 流水线
+  （`.github/workflows/release.yml`：`v*` tag 构建 deb 并发布）。真机验收
+  补跑条件见 M7 验收矩阵。
 - MVP 端到端验收以设计文档第 19 节判据为准，由 M7 执行并记录证据（见第 10 节）。
 - 里程碑文档在各自启动时创建（工程规范第 2 节）；当前实体文件：M0、M1、M2、
   M3、M4、M5、M6。
@@ -179,7 +182,7 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | 持久化实现 | 已冻结：SQLite 为唯一 `StateStore` 实现，内存实现仅测试用；dlopen 绑定与 schema 1 见 [DEC-009](../decisions/DEC-009-sqlite-state-store.md) | Linductor-alkaid | M4 | 已于 2026-09-09 冻结；格式变更需新决策记录 |
 | IPC 端点 | 已冻结：`/run/yori/yori.sock`、`root:yori 0660`、`yori` 系统组连接准入、admin 组双路径判定（[DEC-010](../decisions/DEC-010-uds-ipc-endpoint.md)） | Linductor-alkaid | M5 | 已于 2026-09-09 冻结；变更需新决策记录替代 DEC-010 |
 | 日志与跟随上限默认值 | 已冻结：落盘单文件 256 MiB / 保留 1 个历史文件（M2 `LogSink`）；跟随会话每 Job 8 / 全局 64、回看窗口 8 MiB/流（64 KiB ~ 64 MiB）、订阅队列 64 chunk、会话写出缓冲 2 MiB、单帧写截止 2 s（M6 `LogStreamer`/`LogFollowService`，全部配置化并有负向测试） | Linductor-alkaid | M6 | 已于 2026-09-10 冻结（配置定稿 + 测试）；变更走配置级评审 |
-| 仓库自身许可证 | 未决 | Linductor-alkaid | M7（发布前） | 选定并添加 LICENSE，同步[供应链策略](../supply-chain/dependency-policy.md) |
+| 仓库自身许可证 | 已冻结：MIT（2026-09-10 负责人选定，`v0.1.0` 发布）；与 Executor（MIT）兼容 | Linductor-alkaid | M7（发布前） | 已添加 `LICENSE` 并同步[供应链策略](../supply-chain/dependency-policy.md)与 `README.md` |
 
 ## 7. 跨里程碑完成定义（DOD）
 

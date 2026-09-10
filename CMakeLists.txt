@@ -41,11 +41,17 @@ add_subdirectory(apps)
 
 # ---- 打包（M7）：systemd unit 随安装部署 ----------------------------------
 # 设计 10.1 + DEC-004/RULE-10：Type=simple、RuntimeDirectory=yori；守护语义
-# （daemon 停止不终止训练）要求不以 control-group 方式回收后代。部署前置
-# （yori 组、--socket-group、状态目录）见 packaging/systemd/README.md。
+# （daemon 停止不终止训练）要求不以 control-group 方式回收后代。ExecStart 的
+# 安装前缀在 configure 阶段注入（源码安装 /usr/local，deb 安装 /usr）。
+# 部署前置（yori 组、--socket-group、状态目录）见 packaging/systemd/README.md；
+# deb 打包见 packaging/deb/build-deb.sh。
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  install(FILES packaging/systemd/yori.service
-          DESTINATION ${CMAKE_INSTALL_LIBDIR}/systemd/system)
+  configure_file(packaging/systemd/yori.service.in
+                 "${CMAKE_BINARY_DIR}/generated/packaging/yori.service" @ONLY)
+  # systemd 只扫描 <prefix>/lib/systemd/system（与 multiarch 的 LIBDIR 无关，
+  # Debian 上 CMAKE_INSTALL_LIBDIR 会变为 lib/<arch>，故使用固定相对路径）。
+  install(FILES "${CMAKE_BINARY_DIR}/generated/packaging/yori.service"
+          DESTINATION lib/systemd/system)
 endif()
 
 if(YORI_BUILD_TESTS AND PROJECT_IS_TOP_LEVEL)
