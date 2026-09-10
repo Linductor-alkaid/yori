@@ -24,6 +24,9 @@ const char* to_string(IpcClientError error) noexcept {
       return "none";
     case IpcClientError::kConnectFailed:
       return "connect failed";
+    case IpcClientError::kPermissionDenied:
+      return "permission denied (this session lacks the socket group; re-login or "
+             "newgrp yori, see DEC-010)";
     case IpcClientError::kTimeout:
       return "timeout";
     case IpcClientError::kClosed:

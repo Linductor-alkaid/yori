@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 
 project(yori
-  VERSION 0.1.2
+  VERSION 0.1.3
   DESCRIPTION "单节点多用户 GPU 训练任务排队、调度与进程守护系统"
   LANGUAGES CXX)
 

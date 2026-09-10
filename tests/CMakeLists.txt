@@ -219,6 +219,13 @@ yori_apply_warnings(unit_ipc_server_test)
 add_test(NAME m5.unit.ipc-server COMMAND unit_ipc_server_test)
 set_tests_properties(m5.unit.ipc-server PROPERTIES LABELS "unit;ipc" TIMEOUT 120)
 
+# ---- unit;ipc：客户端连接错误区分 permission denied（真机问题三）----------
+add_executable(unit_uds_client_permission_test unit_uds_client_permission_test.cpp)
+target_link_libraries(unit_uds_client_permission_test PRIVATE yori::ipc)
+yori_apply_warnings(unit_uds_client_permission_test)
+add_test(NAME m7.unit.uds-client-permission COMMAND unit_uds_client_permission_test)
+set_tests_properties(m7.unit.uds-client-permission PROPERTIES LABELS "unit;ipc" TIMEOUT 60)
+
 # ---- fuzz：IPC parser 确定性变异集（M5-05，起步）----------------------------
 add_executable(fuzz_ipc_parser_test fuzz_ipc_parser_test.cpp)
 target_link_libraries(fuzz_ipc_parser_test PRIVATE yori::yori_core)

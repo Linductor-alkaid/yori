@@ -63,6 +63,9 @@ class IpcServerTransport {
 enum class IpcClientError {
   kNone,
   kConnectFailed,
+  // connect(2) 被拒（EACCES/EPERM）：通常是当前会话没有端点属组身份
+  // （DEC-010 的 root:yori 0660 准入）；重新登录或 newgrp 生效。
+  kPermissionDenied,
   kTimeout,
   kClosed,
   kProtocol,

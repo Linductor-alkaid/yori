@@ -114,6 +114,9 @@ IpcClientResult UdsIpcClient::call(const std::string& endpoint, const IpcRequest
     if (errno == ETIMEDOUT) {
       return client_error(IpcClientError::kTimeout);
     }
+    if (errno == EACCES || errno == EPERM) {
+      return client_error(IpcClientError::kPermissionDenied);
+    }
     return client_error(IpcClientError::kConnectFailed);
   }
 
@@ -184,6 +187,9 @@ IpcFollowResult UdsIpcClient::follow(const std::string& endpoint, const IpcReque
   if (!connect_with_deadline(guard.get(), address, setup_deadline)) {
     if (errno == ETIMEDOUT) {
       return follow_error(IpcClientError::kTimeout);
+    }
+    if (errno == EACCES || errno == EPERM) {
+      return follow_error(IpcClientError::kPermissionDenied);
     }
     return follow_error(IpcClientError::kConnectFailed);
   }
