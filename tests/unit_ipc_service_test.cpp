@@ -496,6 +496,123 @@ void test_file_log_reader() {
 
 }  // namespace
 
+// 以 lease 不变量将 Job 推进到 STARTING 并记录 log_path（M6 跟随/tensorboard
+// 测试的“已启动”前置；tensorboard_logdir 属于 spec，必须在 create 时写入——
+// update 保持 JobSpec 不变）。
+void seed_started_job(yori::testing::InMemoryStateStore& store, JobId id, std::uint32_t owner_uid,
+                      const std::string& log_path, const std::string& tensorboard_logdir = {}) {
+  yori::job::JobSpec spec;
+  spec.owner_uid = owner_uid;
+  spec.owner_gid = owner_uid;
+  spec.argv = {"train"};
+  spec.cwd = "/srv";
+  if (!tensorboard_logdir.empty()) {
+    spec.tensorboard_logdir = tensorboard_logdir;
+  }
+  spec.submit_time = std::chrono::system_clock::time_point{std::chrono::seconds{10}};
+
+  yori::store::StoredJob record;
+  record.id = id;
+  record.spec = spec;
+  record.state = JobState::kQueued;
+  record.revision = 0;
+  yori::store::StateMutation create;
+  create.expected_revision = store.load().snapshot.revision;
+  create.create_jobs.push_back(record);
+  YORI_CHECK(store.apply(create).ok());
+
+  yori::store::StoredJob starting = record;
+  starting.state = JobState::kStarting;
+  starting.revision = 1;
+  starting.execution.log_path = log_path;
+  yori::store::StateMutation update;
+  update.expected_revision = store.load().snapshot.revision;
+  update.update_jobs.push_back(std::move(starting));
+  update.acquire_leases.push_back(yori::gpu::GpuLease{yori::gpu::GpuUuid{"GPU-f"}, id});
+  YORI_CHECK(store.apply(update).ok());
+}
+
+void test_logs_follow_validation() {
+  Fixture fixture;
+  IpcService service = make_service(fixture);
+
+  auto follow_request = [](std::uint64_t job_id) {
+    IpcRequest request;
+    request.kind = IpcRequestKind::kLogsFollow;
+    request.logs_follow.job_id = job_id;
+    return request;
+  };
+
+  // QUEUED Job：未启动显式拒绝。
+  YORI_CHECK(submit(service, kAliceUid, kAliceGid).error == IpcError::kNone);
+  const IpcResponse not_started =
+      service.validate_logs_follow(peer(kAliceUid, kAliceGid), follow_request(1).logs_follow);
+  YORI_CHECK(not_started.error == IpcError::kInvalidState);
+
+  // 不存在 / 未授权（owner/admin 矩阵与 logs 快照一致）。
+  YORI_CHECK(
+      service.validate_logs_follow(peer(kAliceUid, kAliceGid), follow_request(99).logs_follow)
+          .error == IpcError::kNotFound);
+  YORI_CHECK(
+      service.validate_logs_follow(peer(kBobUid, kBobGid), follow_request(1).logs_follow).error ==
+      IpcError::kDenied);
+
+  // 已启动：接受并携带当前状态。
+  seed_started_job(fixture.store, JobId{5}, kAliceUid, "/var/lib/yori/jobs/5");
+  const IpcResponse accepted =
+      service.validate_logs_follow(peer(kAliceUid, kAliceGid), follow_request(5).logs_follow);
+  YORI_CHECK(accepted.error == IpcError::kNone);
+  YORI_CHECK(accepted.logs_follow.job_state == static_cast<std::uint8_t>(JobState::kStarting));
+
+  // admin 可跟随他人 Job；普通 handle 路径（无流式委派）显式 kUnsupported。
+  const IpcResponse admin_follow =
+      service.validate_logs_follow(peer(kBobUid, kAdminGid), follow_request(5).logs_follow);
+  YORI_CHECK(admin_follow.error == IpcError::kNone);
+  const IpcResponse plain = service.handle(peer(kAliceUid, kAliceGid), follow_request(5));
+  YORI_CHECK(plain.error == IpcError::kUnsupported);
+
+  // store 失败路径。
+  fixture.store.fail_with(yori::store::StateStoreErrorCode::kBackendUnavailable);
+  YORI_CHECK(service.validate_logs_follow(peer(kAliceUid, kAliceGid), follow_request(5).logs_follow)
+                 .error == IpcError::kStoreFailed);
+  fixture.store.clear_failure();
+}
+
+void test_tensorboard_query() {
+  Fixture fixture;
+  IpcService service = make_service(fixture);
+
+  auto tensorboard_request = [](std::uint64_t job_id) {
+    IpcRequest request;
+    request.kind = IpcRequestKind::kTensorboard;
+    request.tensorboard.job_id = job_id;
+    return request;
+  };
+
+  // QUEUED Job（无 logdir 记录）：查询仍可解析 cwd（logdir 解析不依赖启动态）。
+  YORI_CHECK(submit(service, kAliceUid, kAliceGid).error == IpcError::kNone);
+  const IpcResponse queued = service.handle(peer(kAliceUid, kAliceGid), tensorboard_request(1));
+  YORI_CHECK(queued.error == IpcError::kNone);
+  YORI_CHECK(!queued.tensorboard.logdir);
+  YORI_CHECK(queued.tensorboard.cwd == "/srv/training");
+
+  // 记录了 tensorboard_logdir 的已启动 Job：返回字段原样。
+  seed_started_job(fixture.store, JobId{5}, kAliceUid, "/var/lib/yori/jobs/5", "runs/exp9");
+  const IpcResponse with_logdir =
+      service.handle(peer(kAliceUid, kAliceGid), tensorboard_request(5));
+  YORI_CHECK(with_logdir.error == IpcError::kNone);
+  YORI_CHECK(with_logdir.tensorboard.logdir == std::string("runs/exp9"));
+  YORI_CHECK(with_logdir.tensorboard.cwd == "/srv");
+
+  // 授权矩阵：第三方 DENIED（敏感字段不脱敏、直接拒绝）；admin 放行。
+  YORI_CHECK(service.handle(peer(kBobUid, kBobGid), tensorboard_request(5)).error ==
+             IpcError::kDenied);
+  YORI_CHECK(service.handle(peer(kBobUid, kAdminGid), tensorboard_request(5)).error ==
+             IpcError::kNone);
+  YORI_CHECK(service.handle(peer(kAliceUid, kAliceGid), tensorboard_request(77)).error ==
+             IpcError::kNotFound);
+}
+
 int main() {
   test_submit_basics();
   test_queue_capacity_rollback();
@@ -506,6 +623,8 @@ int main() {
   test_cancel_matrix();
   test_logs();
   test_file_log_reader();
+  test_logs_follow_validation();
+  test_tensorboard_query();
   if (yori::testing::failure_count != 0) {
     std::fprintf(stderr, "ipc service: %d failure(s)\n", yori::testing::failure_count);
     return 1;

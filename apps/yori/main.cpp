@@ -1,3 +1,6 @@
+#include <signal.h>  // NOLINT(modernize-deprecated-headers)
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <yori/version.h>
 
@@ -12,6 +15,7 @@
 #include <cstring>
 #include <ctime>
 #include <map>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -28,13 +32,17 @@ constexpr const char* kDefaultSocketPath = "/run/yori/yori.sock";
 constexpr int kCallTimeoutMs = 10000;
 // logs 快照默认每流字节数（daemon 上限内）。
 constexpr std::uint32_t kDefaultLogBytes = 64 * 1024;
+// logs -f 初始握手（连接 + 请求 + ack）预算；流式阶段无限等待（安静流）。
+constexpr int kFollowSetupTimeoutMs = 10000;
 
-// 退出码契约（M5 计划）：0 成功；1 请求失败（daemon 显式错误）；2 用法错误；
-// 3 传输失败（连接/超时/协议）。
+// 退出码契约（M5 计划；M6 扩展 4）：0 成功；1 请求失败（daemon 显式错误）；
+// 2 用法错误；3 传输失败（连接/超时/协议）；4 logs -f 以 BACKPRESSURE 结束
+// （可按提示以 --since-* 续传重连）。
 constexpr int kExitOk = 0;
 constexpr int kExitRequestFailed = 1;
 constexpr int kExitUsage = 2;
 constexpr int kExitTransport = 3;
+constexpr int kExitBackpressure = 4;
 
 const char* job_state_name(std::uint8_t state) {
   switch (static_cast<yori::job::JobState>(state)) {
@@ -94,7 +102,11 @@ void print_usage() {
                "  queue                       list queued jobs in FIFO order\n"
                "  gpu                         list GPUs with logical state\n"
                "  cancel <job-id>             cancel a queued job\n"
-               "  logs [--bytes N] <job-id>   print current log tail (follow lands in M6)\n"
+               "  logs [--bytes N] <job-id>   print current log tail\n"
+               "  logs -f [--since-stdout N] [--since-stderr N] <job-id>\n"
+               "                              follow logs (GAP/EOF/BACKPRESSURE aware)\n"
+               "  tensorboard [--logdir DIR] [--port N] [--host H] <job-id>\n"
+               "                              run TensorBoard for a job in this session\n"
                "options:\n"
                "  --socket PATH               daemon endpoint (default %s or $YORI_SOCKET)\n",
                kDefaultSocketPath);
@@ -378,8 +390,100 @@ int command_cancel(const std::string& socket_path, const std::string& job_text) 
   return status;
 }
 
+// logs -f 的流式帧呈现：数据按流写出、GAP 提示、BACKPRESSURE 记录并停止、
+// EOF 记录终态。
+class FollowPrinter final : public yori::ipc::IpcStreamFrameHandler {
+ public:
+  bool on_frame(const yori::ipc::IpcStreamFrame& frame) override {
+    switch (frame.kind) {
+      case yori::ipc::IpcStreamFrameKind::kLogData: {
+        std::FILE* target = frame.stream == 0 ? stdout : stderr;
+        if (!frame.data.empty()) {
+          static_cast<void>(std::fwrite(frame.data.data(), 1, frame.data.size(), target));
+          static_cast<void>(std::fflush(target));
+        }
+        return true;
+      }
+      case yori::ipc::IpcStreamFrameKind::kLogGap:
+        std::fprintf(stderr, "yori: log gap: bytes [%llu, %llu) on %s not retained; resumed\n",
+                     static_cast<unsigned long long>(frame.begin_offset),
+                     static_cast<unsigned long long>(frame.end_offset),
+                     frame.stream == 0 ? "stdout" : "stderr");
+        return true;
+      case yori::ipc::IpcStreamFrameKind::kLogBackpressure:
+        std::fprintf(stderr,
+                     "yori: following too far behind on %s at offset %llu; disconnected\n"
+                     "yori: reconnect with: yori logs -f --since-%s %llu\n",
+                     frame.stream == 0 ? "stdout" : "stderr",
+                     static_cast<unsigned long long>(frame.begin_offset),
+                     frame.stream == 0 ? "stdout" : "stderr",
+                     static_cast<unsigned long long>(frame.begin_offset));
+        backpressure_ = true;
+        return true;
+      case yori::ipc::IpcStreamFrameKind::kLogEof:
+        eof_state_ = frame.job_state;
+        return true;
+    }
+    return true;
+  }
+
+  [[nodiscard]] bool backpressure() const noexcept { return backpressure_; }
+  [[nodiscard]] bool eof_seen() const noexcept { return eof_state_ >= 0; }
+  [[nodiscard]] std::uint8_t eof_state() const noexcept {
+    return static_cast<std::uint8_t>(eof_state_);
+  }
+
+ private:
+  bool backpressure_{false};
+  int eof_state_{-1};
+};
+
+int command_logs_follow(const std::string& socket_path, std::uint64_t job_id,
+                        std::optional<std::uint64_t> since_stdout,
+                        std::optional<std::uint64_t> since_stderr) {
+  yori::ipc::IpcRequest request;
+  request.kind = yori::ipc::IpcRequestKind::kLogsFollow;
+  request.logs_follow.job_id = job_id;
+  request.logs_follow.since_stdout = since_stdout;
+  request.logs_follow.since_stderr = since_stderr;
+
+  FollowPrinter printer;
+  yori::ipc::UdsIpcClient client;
+  const yori::ipc::IpcFollowResult result =
+      client.follow(socket_path, request, std::chrono::milliseconds{kFollowSetupTimeoutMs},
+                    std::chrono::milliseconds::zero(), printer);
+  if (!result.ok()) {
+    std::fprintf(stderr, "yori: logs -f transport failed: %s\n",
+                 yori::ipc::to_string(result.error));
+    return kExitTransport;
+  }
+  if (result.ack.error != yori::ipc::IpcError::kNone) {
+    std::fprintf(stderr, "yori: logs -f failed: %s%s%s\n", yori::ipc::to_string(result.ack.error),
+                 result.ack.detail.empty() ? "" : ": ", result.ack.detail.c_str());
+    return kExitRequestFailed;
+  }
+  if (printer.backpressure()) {
+    return kExitBackpressure;
+  }
+  if (printer.eof_seen()) {
+    // 退出码与 Job 终态对齐（设计 11.3）：FINISHED -> 0，其余终态 -> 1。
+    const auto state = static_cast<yori::job::JobState>(printer.eof_state());
+    if (state == yori::job::JobState::kFinished) {
+      return kExitOk;
+    }
+    std::fprintf(stderr, "yori: job ended in state %s\n", job_state_name(printer.eof_state()));
+    return kExitRequestFailed;
+  }
+  return kExitOk;  // 客户端侧无终止帧的干净结束（当前路径不出现，保守成功）。
+}
+
 int command_logs(const std::string& socket_path, std::vector<std::string> arguments) {
   std::uint32_t max_bytes = kDefaultLogBytes;
+  bool follow = false;
+  std::optional<std::uint64_t> since_stdout;
+  std::optional<std::uint64_t> since_stderr;
+  std::optional<std::uint64_t> since_both;
+
   CommandLine parser(std::move(arguments));
   std::string value;
   while (parser.take_flag("--bytes", value)) {
@@ -392,21 +496,56 @@ int command_logs(const std::string& socket_path, std::vector<std::string> argume
     }
     max_bytes = static_cast<std::uint32_t>(std::min<unsigned long>(parsed, 0xffffffffUL));
   }
+  const auto parse_offset = [](const std::string& flag, const std::string& text,
+                               std::optional<std::uint64_t>& out) {
+    std::uint64_t parsed = 0;
+    if (!parse_u64(text.c_str(), parsed)) {
+      std::fprintf(stderr, "yori: %s expects a non-negative number\n", flag.c_str());
+      return false;
+    }
+    out = parsed;
+    return true;
+  };
+  while (parser.take_flag("--since-offset", value)) {
+    if (!parse_offset("--since-offset", value, since_both)) {
+      return kExitUsage;
+    }
+  }
+  while (parser.take_flag("--since-stdout", value)) {
+    if (!parse_offset("--since-stdout", value, since_stdout)) {
+      return kExitUsage;
+    }
+  }
+  while (parser.take_flag("--since-stderr", value)) {
+    if (!parse_offset("--since-stderr", value, since_stderr)) {
+      return kExitUsage;
+    }
+  }
+  if (since_both) {
+    if (!since_stdout) {
+      since_stdout = since_both;
+    }
+    if (!since_stderr) {
+      since_stderr = since_both;
+    }
+  }
 
-  const std::vector<std::string>& rest = parser.remaining();
+  std::vector<std::string> rest = parser.remaining();
+  if (!rest.empty() && (rest.front() == "-f" || rest.front() == "--follow")) {
+    follow = true;
+    rest.erase(rest.begin());
+  }
   if (rest.empty()) {
     std::fprintf(stderr, "yori: logs requires a job id\n");
-    return kExitUsage;
-  }
-  if (rest.front() == "-f" || rest.front() == "--follow") {
-    // M6：流式跟随（offset 续传、GAP/EOF/BACKPRESSURE）。
-    std::fprintf(stderr, "yori: logs --follow lands in M6; use snapshot form for now\n");
     return kExitUsage;
   }
   std::uint64_t job_id = 0;
   if (!parse_u64(rest.front().c_str(), job_id) || job_id == 0) {
     std::fprintf(stderr, "yori: logs expects a numeric job id\n");
     return kExitUsage;
+  }
+  if (follow) {
+    return command_logs_follow(socket_path, job_id, since_stdout, since_stderr);
   }
 
   yori::ipc::IpcRequest request;
@@ -435,6 +574,166 @@ int command_logs(const std::string& socket_path, std::vector<std::string> argume
       std::fwrite(response.logs.stderr_tail.data(), 1, response.logs.stderr_tail.size(), stderr));
   static_cast<void>(std::fflush(stderr));
   return kExitOk;
+}
+
+// ---------------------------------------------------------------------------
+// yori tensorboard（DEC-003）：CLI 用户会话拉起，前台运行，CLI 退出即终止。
+// ---------------------------------------------------------------------------
+
+// 信号转发：终端 Ctrl-C 同时到达同进程组的子进程；仅发往 CLI 的信号经
+// handler 转发，保证 TensorBoard 不成孤儿。
+volatile sig_atomic_t tensorboard_pid = 0;
+
+void forward_tensorboard_signal(int signal_number) {
+  const int child = static_cast<int>(tensorboard_pid);
+  if (child > 0) {
+    static_cast<void>(kill(static_cast<pid_t>(child), signal_number));
+  }
+}
+
+std::string resolve_logdir(const std::string& candidate, const std::string& job_cwd) {
+  if (!candidate.empty() && candidate.front() == '/') {
+    return candidate;
+  }
+  if (job_cwd.empty()) {
+    return candidate;
+  }
+  if (job_cwd.back() == '/') {
+    return job_cwd + candidate;
+  }
+  return job_cwd + "/" + candidate;
+}
+
+int command_tensorboard(const std::string& socket_path, std::vector<std::string> arguments) {
+  std::optional<std::string> logdir_argument;
+  std::uint64_t port = 0;  // 默认 0：OS 分配（DEC-003），TensorBoard 自行打印 URL。
+  std::string host = "127.0.0.1";
+
+  CommandLine parser(std::move(arguments));
+  std::string value;
+  while (parser.take_flag("--logdir", value)) {
+    logdir_argument = value;
+  }
+  while (parser.take_flag("--port", value)) {
+    std::uint64_t parsed = 0;
+    if (!parse_u64(value.c_str(), parsed) || parsed > 0xffff) {
+      std::fprintf(stderr, "yori: --port expects a port number\n");
+      return kExitUsage;
+    }
+    port = parsed;
+  }
+  while (parser.take_flag("--host", value)) {
+    host = value;
+  }
+  if (host.empty()) {
+    std::fprintf(stderr, "yori: --host must not be empty\n");
+    return kExitUsage;
+  }
+
+  const std::vector<std::string>& rest = parser.remaining();
+  if (rest.size() != 1) {
+    std::fprintf(stderr, "yori: tensorboard requires exactly one job id\n");
+    return kExitUsage;
+  }
+  std::uint64_t job_id = 0;
+  if (!parse_u64(rest.front().c_str(), job_id) || job_id == 0) {
+    std::fprintf(stderr, "yori: tensorboard expects a numeric job id\n");
+    return kExitUsage;
+  }
+
+  // logdir 解析原料来自 daemon 只读查询（owner/admin）；优先级判定在 CLI：
+  // --logdir 参数 > spec.tensorboard_logdir > Job cwd（DEC-003）。
+  yori::ipc::IpcRequest request;
+  request.kind = yori::ipc::IpcRequestKind::kTensorboard;
+  request.tensorboard.job_id = job_id;
+  yori::ipc::IpcResponse response;
+  const int status = call_daemon(socket_path, request, response);
+  if (status != kExitOk) {
+    if (status == kExitRequestFailed) {
+      return fail_request("tensorboard", response);
+    }
+    return status;
+  }
+  std::string logdir;
+  if (logdir_argument) {
+    logdir = resolve_logdir(*logdir_argument, response.tensorboard.cwd);
+  } else if (response.tensorboard.logdir) {
+    logdir = resolve_logdir(*response.tensorboard.logdir, response.tensorboard.cwd);
+  } else {
+    logdir = response.tensorboard.cwd;
+  }
+  if (logdir.empty()) {
+    std::fprintf(stderr, "yori: tensorboard: no logdir could be resolved\n");
+    return kExitRequestFailed;
+  }
+
+  std::vector<std::string> child_argv = {"tensorboard",        "--logdir", logdir, "--port",
+                                         std::to_string(port), "--host",   host};
+
+  // 前台 spawn：继承 stdio（TensorBoard 打印自己的 URL），同进程组（终端
+  // 信号直达），仅 CLI 的信号经 handler 转发。
+  struct sigaction forward_action {};
+  forward_action.sa_handler = forward_tensorboard_signal;
+  static_cast<void>(sigemptyset(&forward_action.sa_mask));
+  forward_action.sa_flags = 0;
+  const bool forward_installed = ::sigaction(SIGINT, &forward_action, nullptr) == 0 &&
+                                 ::sigaction(SIGTERM, &forward_action, nullptr) == 0;
+
+  std::fflush(nullptr);
+  const pid_t child = ::fork();
+  if (child < 0) {
+    std::fprintf(stderr, "yori: tensorboard: fork failed: %s\n", std::strerror(errno));
+    return kExitRequestFailed;
+  }
+  if (child == 0) {
+    std::vector<char*> argv_buffer;
+    argv_buffer.reserve(child_argv.size() + 1);
+    for (const std::string& argument : child_argv) {
+      argv_buffer.push_back(const_cast<char*>(argument.c_str()));
+    }
+    argv_buffer.push_back(nullptr);
+    ::execvp(argv_buffer[0], argv_buffer.data());
+    std::fprintf(stderr, "yori: tensorboard: exec failed: %s\n", std::strerror(errno));
+    ::_exit(127);
+  }
+
+  tensorboard_pid = static_cast<int>(child);
+  if (port != 0) {
+    std::printf("TensorBoard running at http://%s:%llu/ (job %llu)\n", host.c_str(),
+                static_cast<unsigned long long>(port), static_cast<unsigned long long>(job_id));
+  } else {
+    std::printf(
+        "TensorBoard starting for job %llu (port auto-assigned; URL is printed by "
+        "TensorBoard itself)\n",
+        static_cast<unsigned long long>(job_id));
+  }
+  std::fflush(stdout);
+
+  int child_status = 0;
+  while (::waitpid(child, &child_status, 0) < 0) {
+    if (errno != EINTR) {
+      tensorboard_pid = 0;
+      std::fprintf(stderr, "yori: tensorboard: wait failed: %s\n", std::strerror(errno));
+      return kExitRequestFailed;
+    }
+  }
+  tensorboard_pid = 0;
+  if (forward_installed) {
+    struct sigaction restore_default {};
+    restore_default.sa_handler = SIG_DFL;
+    static_cast<void>(sigemptyset(&restore_default.sa_mask));
+    static_cast<void>(::sigaction(SIGINT, &restore_default, nullptr));
+    static_cast<void>(::sigaction(SIGTERM, &restore_default, nullptr));
+  }
+
+  if (WIFEXITED(child_status)) {
+    return WEXITSTATUS(child_status) == 0 ? kExitOk : kExitRequestFailed;
+  }
+  if (WIFSIGNALED(child_status)) {
+    std::fprintf(stderr, "yori: tensorboard terminated by signal %d\n", WTERMSIG(child_status));
+    return kExitRequestFailed;
+  }
+  return kExitRequestFailed;
 }
 
 }  // namespace
@@ -517,6 +816,9 @@ int main(int argc, char* argv[]) {
   }
   if (command == "logs") {
     return command_logs(socket_path, std::move(command_args));
+  }
+  if (command == "tensorboard") {
+    return command_tensorboard(socket_path, std::move(command_args));
   }
 
   std::fprintf(stderr, "yori: unknown command %s\n", command.c_str());

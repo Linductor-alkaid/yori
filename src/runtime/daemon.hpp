@@ -12,6 +12,8 @@
 
 #include "gpu_manager.hpp"
 #include "ipc_server.hpp"
+#include "log_follow_service.hpp"
+#include "log_streamer.hpp"
 
 namespace executor {
 class Executor;
@@ -24,6 +26,9 @@ struct DaemonConfig final {
   UdsIpcServerConfig ipc;
   queue::QueueConfig queue;
   GpuManagerConfig gpu;
+  // M6 观察面：跟随会话与订阅分发。
+  LogStreamerConfig log_streamer;
+  LogFollowServiceConfig log_follow;
 };
 
 enum class DaemonStartCode {
@@ -55,11 +60,13 @@ enum class DaemonStopCode {
 [[nodiscard]] const char* to_string(DaemonStopCode code) noexcept;
 
 // M5 子集的 daemon 总装：启动序 = 恢复（JobRecovery，同步有界，RULE-06）
-// -> GPU 观察（GpuManager，EXEC-05/09）-> IPC 服务（UdsIpcServer，EXEC-02）；
-// 停止序为 EXEC-10 的适用子集 = ① IPC -> ③ GPU 周期任务。Executor owner 是
-// 进程主生命周期（yorid main / 集成测试），本类不做 executor 初始化或关闭。
-// 调度触发与进程守护的总装（EXEC-06/07 后半）随守护总装收口接入；M5 daemon
-// 不启动训练进程，Job 停留在 QUEUED。
+// -> GPU 观察（GpuManager，EXEC-05/09）-> 观察面（LogStreamer +
+// LogFollowService，EXEC-03/04，M6）-> IPC 服务（UdsIpcServer，EXEC-02）；
+// 停止序为 EXEC-10 的适用子集 = ① IPC -> ② 跟随会话 -> ③ GPU 周期任务。
+// Executor owner 是进程主生命周期（yorid main / 集成测试），本类不做
+// executor 初始化或关闭。调度触发与进程守护的总装（EXEC-06/07 后半）随
+// 守护总装收口接入；M6 daemon 不启动训练进程，Job 停留在 QUEUED，
+// logs -f 对无日志源的 Job 显式报 kNotAvailable。
 //
 // owner 纪律：单 owner 调用 start/stop；stop 后不可重启；析构以 stop 兜底。
 class Daemon final {
@@ -67,7 +74,6 @@ class Daemon final {
   Daemon(executor::Executor& executor, gpu::GpuProvider& gpu_provider, store::StateStore& store,
          DaemonConfig config = {});
   ~Daemon();
-
   Daemon(const Daemon&) = delete;
   Daemon& operator=(const Daemon&) = delete;
   Daemon(Daemon&&) = delete;
@@ -77,6 +83,10 @@ class Daemon final {
   [[nodiscard]] DaemonStopCode stop();
 
   [[nodiscard]] const std::optional<recovery::RecoveryResult>& last_recovery() const noexcept;
+
+  // 观察面访问口（测试与守护总装：注册 Job 日志源、发布终态）。
+  [[nodiscard]] LogStreamer& log_streamer() noexcept;
+  [[nodiscard]] LogFollowStatistics log_follow_statistics() const;
 
  private:
   // GpuStatusSource 的 GpuManager 投影（EXEC-09 DoubleBuffer 读取）。
@@ -101,6 +111,8 @@ class Daemon final {
   std::unique_ptr<GpuManager> gpu_manager_;
   std::unique_ptr<ManagerGpuStatusSource> gpu_status_;
   std::unique_ptr<ipc::LogSnapshotReader> log_reader_;
+  std::unique_ptr<LogStreamer> log_streamer_;
+  std::unique_ptr<LogFollowService> log_follow_;
   std::unique_ptr<ipc::IpcService> service_;
   std::unique_ptr<UdsIpcServer> ipc_server_;
   std::optional<recovery::RecoveryResult> last_recovery_;

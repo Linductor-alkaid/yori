@@ -116,6 +116,10 @@ std::string log_file_name(LogStreamKind stream) {
   return "unknown.log";
 }
 
+std::string drop_marker_text(std::uint64_t dropped_bytes) {
+  return "[yori] dropped " + std::to_string(dropped_bytes) + " bytes\n";
+}
+
 bool LogSinkConfig::valid() const noexcept {
   return !directory.empty() && directory.size() <= LogSinkLimits::kMaxDirectoryBytes &&
          directory.find('\0') == std::string::npos && directory.front() == '/' &&
@@ -294,7 +298,7 @@ LogWriteResult LogSink::append(LogStreamKind stream_kind, std::string_view data)
   }
 
   if (state.pending_drop > 0) {
-    const std::string marker = "[yori] dropped " + std::to_string(state.pending_drop) + " bytes\n";
+    const std::string marker = drop_marker_text(state.pending_drop);
     std::string marker_error;
     if (impl_->io->write_all(state.fd, marker.data(), marker.size(), marker_error)) {
       state.file_bytes += marker.size();

@@ -139,9 +139,10 @@ int main() {
   YORI_CHECK(code == 1);
   YORI_CHECK(contains(err, "invalid state"));
 
-  // logs -f：M6 才提供，显式用法错误。
+  // logs -f：M6 起为真实流式跟随；对未启动 Job 显式失败（请求级错误）。
   code = run_cli(directory, socket_path, "logs -f 1", out, err);
-  YORI_CHECK(code == 2);
+  YORI_CHECK(code == 1);
+  YORI_CHECK(contains(err, "invalid state"));
 
   // cancel：排队期取消成功；重复取消幂等成功；不存在显式失败。
   code = run_cli(directory, socket_path, "cancel 1", out, err);

@@ -70,6 +70,8 @@ yori CLI（用户会话） --> tensorboard 子进程（用户身份，默认 127
 | 21 | 恢复绝不无条件重启数据库中的 RUNNING/STARTING Job：核验 PID/PGID/启动 ticks 三元组，进程消失、身份不符（PID reuse）或身份缺失一律 `LOST` 并释放 lease；`LOST` 残留进程由 `EXTERNAL_BUSY` 兜底而非接管/终止；SQLite 行数据篡改（非法状态、revision 矛盾、编码越界、lease 矩阵破坏）使 `load()` 显式失败；SQLite 库路径只接受管理员配置或测试注入 | PID reuse 错误接管（特权路径作用到无关进程）；崩溃窗口孤儿进程导致 GPU 双重分配；状态文件篡改注入非法调度事实 | M4 | 恢复决策矩阵与重入幂等（`m4.unit.job-recovery`）；PID reuse 防护与重启闭环（`m4.integration.recovery-restart`）；篡改/故障注入（`m4.unit.sqlite-state-store`） |
 | 22 | IPC 帧边界全部显式：负载 1 MiB、单字符串 64 KiB（禁 NUL）、请求计数 256、列表 1024、日志尾部每流 256 KiB；超限/截断/坏版本/坏 kind/值域非法均映射稳定错误码，帧界违规回 PROTOCOL 错误帧后断开；每连接请求总预算（默认 5s）到期断开；handler 异常映射 INTERNAL 响应；响应列表超限截断并置 LIMIT（不静默） | 内存耗尽与队头阻塞（超长帧、慢客户端）；解析器内存安全漏洞成为 root RCE 入口；异常吞噬掩盖故障 | M5 | 协议畸形矩阵（`m5.unit.ipc-protocol`）；超载帧/静默连接/半帧断开与 handler 异常路径（`m5.unit.ipc-server`）；确定性 fuzz 集（`m5.fuzz.ipc-parser`，`fuzz` 标签、sanitizer 常规运行） |
 | 23 | IPC 授权与脱敏仅在 daemon 侧判定：owner = `SO_PEERCRED` uid 相等；admin = 主 GID 匹配配置组或 UID 属于启动时解析的组成员集（客户端声明不可信）；非 owner 非 admin 的 `ps`/`queue` 仅见 JobId/状态/revision/owner_uid/退出状态，argv/cwd/tensorboard_logdir 不出现在响应；admin 组成员解析失败降级为仅主 GID 匹配 | 跨用户信息泄露（argv/日志路径/env 探测）；伪造 admin 身份绕过授权 | M5 | 授权矩阵（owner/admin/第三方 x ps/queue/gpu/cancel/logs）与脱敏字段断言（`m5.unit.ipc-service`）；协议无身份字段的结构性保证（基线 2/3）；真实多用户环境补跑见 M5 计划 |
+| 24 | `logs -f` 流式会话有界：会话数每 Job 8/全局 64、每订阅者队列 64 chunk、会话写出缓冲 2 MiB、单帧写截止 2 s（全部可配）；溢出以订阅者侧 offset 间断检出并回 BACKPRESSURE 帧后断开（含当前 offset，不静默丢弃）；写超时/对端断开的会话有界回收；流式帧解码与请求/响应共用畸形矩阵与 fuzz 集（含 golden vector）；无日志源的 Job 显式 `NOT_AVAILABLE`，不伪造流；fd 接管发生在 runtime 层流式委派，Core 契约不暴露平台类型 | 慢客户端拖垮 daemon（队头阻塞/内存耗尽）；流式 parser 漏洞成为 root 入口；会话资源耗尽 | M6 | 六场景会话单测（正常 EOF/对端断开/准入拒绝/执行中取消/写超时/shutdown）+ 慢客户端 BACKPRESSURE 负向 + `--since-*` 回放与 GAP（`m6.unit.log-follow`）；流式帧畸形矩阵与 golden vector（`m5.unit.ipc-protocol` 扩展）；fuzz 集三方向变异（`m5.fuzz.ipc-parser` 扩展）；E2E 全链路（`m6.integration.logs-follow-e2e`） |
+| 25 | `TENSORBOARD` 查询仅对 owner/admin 返回 spec.tensorboard_logdir 与 cwd（非 owner 非 admin 直接 DENIED，无脱敏视图）；`yori tensorboard` 由 CLI 以当前用户身份拉起，默认仅监听 127.0.0.1、端口默认 OS 分配，绑定更大范围必须显式 `--host`（DEC-003）；TensorBoard 进程属于用户观察会话，不占 GPU lease、不进队列 | 训练曲线与日志目录路径泄露给同机其他用户；指标面板默认暴露给网络邻居 | M6 | 授权矩阵与敏感字段不泄漏断言（`m5.unit.ipc-service` 扩展）；CLI 参数/解析优先级/回环默认 E2E（PATH 注入假二进制，`m6.integration.logs-follow-e2e`）；真实 TensorBoard 二进制不在 CI，M7 真机补跑 |
 
 ## 5. 初步威胁清单（待细化）
 
@@ -100,7 +102,11 @@ yori CLI（用户会话） --> tensorboard 子进程（用户身份，默认 127
   响应两个方向、种子化变异集、sanitizer 常规运行；独立 libFuzzer 基础设施
   另行立项）与 23（daemon 侧授权/脱敏/admin 判定），并收口基线 2/3/6/7/9/12
   的 M5 证据。root 环境（socket 属主收敛、多用户连接准入）在 M7 补跑。
-- [ ] M6 实施前：观察面（流式跟随、背压、脱敏、tensorboard 网络边界）细化。
+- [x] M6 实施前：观察面（流式跟随、背压、脱敏、tensorboard 网络边界）细化
+  —— 已随 M6 落地为基线条目 24（流式会话有界性、BACKPRESSURE 显式断开、
+  流式帧 fuzz 与 golden vector、无日志源不伪造流）与 25（TENSORBOARD 查询
+  授权、CLI 侧拉起与回环默认监听），并收口基线 7/9 的 M6 部分（流式观察
+  纳入 owner/admin 授权；fuzz 集扩展至流式帧方向）。
 - [ ] M7 发布前：全模型复查、残留风险清单定稿，本文件升级为 Active。
 - [ ] root 环境补跑：`m2.security.process-demotion`（DEC-004 降权身份断言，
   非 root 环境显式 skip；补跑条件：root 下设置 `YORI_DEMOTION_TEST_UID`/

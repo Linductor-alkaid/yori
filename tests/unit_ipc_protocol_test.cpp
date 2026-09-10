@@ -395,6 +395,298 @@ void test_boundary_values() {
   YORI_CHECK(!ipc_payload_length_valid(IpcProtocolLimits::kMaxPayloadBytes + 1));
 }
 
+// ---------------------------------------------------------------------------
+// M6：LOGS_FOLLOW / TENSORBOARD 请求与响应、流式帧族。
+// ---------------------------------------------------------------------------
+
+bool roundtrip_stream_frame(const IpcStreamFrame& frame, IpcStreamFrame& decoded) {
+  std::vector<std::uint8_t> buffer;
+  if (!append_stream_frame(frame, buffer)) {
+    return false;
+  }
+  const std::uint32_t length =
+      static_cast<std::uint32_t>(buffer[0]) | (static_cast<std::uint32_t>(buffer[1]) << 8) |
+      (static_cast<std::uint32_t>(buffer[2]) << 16) | (static_cast<std::uint32_t>(buffer[3]) << 24);
+  if (length != buffer.size() - 4) {
+    return false;
+  }
+  const IpcStreamFrameDecodeResult result = decode_stream_frame_payload(buffer.data() + 4, length);
+  if (!result.ok()) {
+    return false;
+  }
+  decoded = result.value;
+  return true;
+}
+
+void test_m6_request_roundtrips() {
+  IpcRequest request;
+  request.kind = IpcRequestKind::kLogsFollow;
+  request.logs_follow.job_id = 9;
+  request.logs_follow.since_stdout = std::uint64_t{4096};
+  request.logs_follow.since_stderr = std::uint64_t{0};
+  IpcRequest decoded;
+  YORI_CHECK(roundtrip_request(request, decoded));
+  YORI_CHECK(decoded.kind == IpcRequestKind::kLogsFollow);
+  YORI_CHECK(decoded.logs_follow.job_id == 9);
+  YORI_CHECK(decoded.logs_follow.since_stdout == std::uint64_t{4096});
+  YORI_CHECK(decoded.logs_follow.since_stderr == std::uint64_t{0});
+
+  // 不带 since（两流都从当前末尾跟随）。
+  request.logs_follow.since_stdout.reset();
+  request.logs_follow.since_stderr.reset();
+  YORI_CHECK(roundtrip_request(request, decoded));
+  YORI_CHECK(!decoded.logs_follow.since_stdout && !decoded.logs_follow.since_stderr);
+
+  request.kind = IpcRequestKind::kTensorboard;
+  request.tensorboard.job_id = 11;
+  YORI_CHECK(roundtrip_request(request, decoded));
+  YORI_CHECK(decoded.kind == IpcRequestKind::kTensorboard);
+  YORI_CHECK(decoded.tensorboard.job_id == 11);
+}
+
+void test_m6_response_roundtrips() {
+  IpcResponse response;
+  response.kind = IpcRequestKind::kLogsFollow;
+  response.error = IpcError::kNone;
+  response.logs_follow.job_state = 3;  // RUNNING
+  response.logs_follow.stdout_offset = 100;
+  response.logs_follow.stderr_offset = 200;
+  IpcResponse decoded;
+  YORI_CHECK(roundtrip_response(response, decoded));
+  YORI_CHECK(decoded.kind == IpcRequestKind::kLogsFollow);
+  YORI_CHECK(decoded.logs_follow.job_state == 3);
+  YORI_CHECK(decoded.logs_follow.stdout_offset == 100);
+  YORI_CHECK(decoded.logs_follow.stderr_offset == 200);
+
+  response.kind = IpcRequestKind::kTensorboard;
+  response.tensorboard.logdir = std::string("runs/exp1");
+  response.tensorboard.cwd = "/srv/training";
+  YORI_CHECK(roundtrip_response(response, decoded));
+  YORI_CHECK(decoded.tensorboard.logdir == std::string("runs/exp1"));
+  YORI_CHECK(decoded.tensorboard.cwd == "/srv/training");
+
+  // 无 logdir 的 TENSORBOARD 响应（回退 cwd）。
+  response.tensorboard.logdir.reset();
+  YORI_CHECK(roundtrip_response(response, decoded));
+  YORI_CHECK(!decoded.tensorboard.logdir);
+  YORI_CHECK(decoded.tensorboard.cwd == "/srv/training");
+}
+
+void test_m6_stream_frame_roundtrips() {
+  IpcStreamFrame frame;
+  IpcStreamFrame decoded;
+
+  frame = IpcStreamFrame{};
+  frame.kind = IpcStreamFrameKind::kLogData;
+  frame.stream = 0;
+  frame.begin_offset = 10;
+  frame.end_offset = 20;
+  frame.data = {'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'};
+  YORI_CHECK(roundtrip_stream_frame(frame, decoded));
+  YORI_CHECK(decoded.kind == IpcStreamFrameKind::kLogData);
+  YORI_CHECK(decoded.stream == 0);
+  YORI_CHECK(decoded.begin_offset == 10 && decoded.end_offset == 20);
+  YORI_CHECK(decoded.data == frame.data);
+
+  // 丢弃标记 chunk：begin == end 且 data 非空。
+  frame.stream = 1;
+  frame.begin_offset = 20;
+  frame.end_offset = 20;
+  frame.data = {'[', 'y', 'o', 'r', 'i', ']'};
+  YORI_CHECK(roundtrip_stream_frame(frame, decoded));
+  YORI_CHECK(decoded.begin_offset == 20 && decoded.end_offset == 20);
+  YORI_CHECK(decoded.data.size() == 6);
+
+  frame = IpcStreamFrame{};
+  frame.kind = IpcStreamFrameKind::kLogGap;
+  frame.stream = 0;
+  frame.begin_offset = 5;
+  frame.end_offset = 1000;
+  YORI_CHECK(roundtrip_stream_frame(frame, decoded));
+  YORI_CHECK(decoded.kind == IpcStreamFrameKind::kLogGap);
+  YORI_CHECK(decoded.begin_offset == 5 && decoded.end_offset == 1000);
+
+  frame.kind = IpcStreamFrameKind::kLogBackpressure;
+  frame.begin_offset = 4096;
+  YORI_CHECK(roundtrip_stream_frame(frame, decoded));
+  YORI_CHECK(decoded.kind == IpcStreamFrameKind::kLogBackpressure);
+  YORI_CHECK(decoded.begin_offset == 4096);
+
+  frame = IpcStreamFrame{};
+  frame.kind = IpcStreamFrameKind::kLogEof;
+  frame.job_state = 4;  // FINISHED
+  frame.exit = IpcExitStatus{true, 0};
+  YORI_CHECK(roundtrip_stream_frame(frame, decoded));
+  YORI_CHECK(decoded.kind == IpcStreamFrameKind::kLogEof);
+  YORI_CHECK(decoded.job_state == 4);
+  YORI_CHECK(decoded.exit && decoded.exit->exited_normally && decoded.exit->code == 0);
+
+  frame.exit = IpcExitStatus{false, 9};
+  YORI_CHECK(roundtrip_stream_frame(frame, decoded));
+  YORI_CHECK(decoded.exit && !decoded.exit->exited_normally && decoded.exit->code == 9);
+
+  frame.exit.reset();
+  YORI_CHECK(roundtrip_stream_frame(frame, decoded));
+  YORI_CHECK(!decoded.exit);
+}
+
+void test_m6_stream_frame_malformed() {
+  IpcStreamFrame frame;
+  frame.kind = IpcStreamFrameKind::kLogData;
+  frame.stream = 0;
+  frame.begin_offset = 0;
+  frame.end_offset = 3;
+  frame.data = {'x', 'y', 'z'};
+  std::vector<std::uint8_t> buffer;
+  YORI_CHECK(append_stream_frame(frame, buffer));
+  const std::uint8_t* payload = buffer.data() + 4;
+  const std::size_t size = buffer.size() - 4;
+
+  // 逐字节截断：仅允许 kTruncated。
+  for (std::size_t cut = 0; cut < size; ++cut) {
+    const IpcStreamFrameDecodeResult result = decode_stream_frame_payload(payload, cut);
+    YORI_CHECK(result.error == IpcDecodeError::kTruncated);
+  }
+
+  // 完整解码 + 尾部多余字节。
+  std::vector<std::uint8_t> trailing(payload, payload + size);
+  trailing.push_back(0);
+  YORI_CHECK(decode_stream_frame_payload(trailing.data(), trailing.size()).error ==
+             IpcDecodeError::kTrailingBytes);
+
+  // 坏版本 / 坏帧 kind。
+  std::vector<std::uint8_t> bad_version(payload, payload + size);
+  bad_version[0] = 2;
+  YORI_CHECK(decode_stream_frame_payload(bad_version.data(), bad_version.size()).error ==
+             IpcDecodeError::kBadVersion);
+  std::vector<std::uint8_t> bad_kind(payload, payload + size);
+  bad_kind[1] = 5;
+  YORI_CHECK(decode_stream_frame_payload(bad_kind.data(), bad_kind.size()).error ==
+             IpcDecodeError::kBadKind);
+  bad_kind[1] = 0;
+  YORI_CHECK(decode_stream_frame_payload(bad_kind.data(), bad_kind.size()).error ==
+             IpcDecodeError::kBadKind);
+
+  // 坏流标识（> 1）。
+  std::vector<std::uint8_t> bad_stream(payload, payload + size);
+  bad_stream[2] = 2;
+  YORI_CHECK(decode_stream_frame_payload(bad_stream.data(), bad_stream.size()).error ==
+             IpcDecodeError::kInvalidValue);
+
+  // EOF 帧的坏终态字节与坏退出标记。
+  IpcStreamFrame eof_frame;
+  eof_frame.kind = IpcStreamFrameKind::kLogEof;
+  eof_frame.job_state = 4;
+  eof_frame.exit = IpcExitStatus{true, 0};
+  std::vector<std::uint8_t> eof_buffer;
+  YORI_CHECK(append_stream_frame(eof_frame, eof_buffer));
+  std::vector<std::uint8_t> bad_state(eof_buffer.begin() + 4, eof_buffer.end());
+  bad_state[2] = 8;
+  YORI_CHECK(decode_stream_frame_payload(bad_state.data(), bad_state.size()).error ==
+             IpcDecodeError::kInvalidValue);
+  std::vector<std::uint8_t> bad_exit(eof_buffer.begin() + 4, eof_buffer.end());
+  bad_exit[4] = 2;  // exited_normally 标记非法
+  YORI_CHECK(decode_stream_frame_payload(bad_exit.data(), bad_exit.size()).error ==
+             IpcDecodeError::kInvalidValue);
+
+  // 编码端拒绝：end < begin、超限数据、坏流标识、坏终态。
+  IpcStreamFrame invalid = frame;
+  invalid.begin_offset = 5;
+  invalid.end_offset = 3;
+  invalid.data = {'x', 'y'};
+  std::vector<std::uint8_t> reject;
+  YORI_CHECK(!encode_stream_frame_payload(invalid, reject));
+  invalid = frame;
+  invalid.data.assign(IpcProtocolLimits::kMaxStreamDataBytes + 1, 'x');
+  YORI_CHECK(!encode_stream_frame_payload(invalid, reject));
+  invalid = frame;
+  invalid.stream = 7;
+  YORI_CHECK(!encode_stream_frame_payload(invalid, reject));
+  invalid = IpcStreamFrame{};
+  invalid.kind = IpcStreamFrameKind::kLogEof;
+  invalid.job_state = 200;
+  YORI_CHECK(!encode_stream_frame_payload(invalid, reject));
+
+  // 数据字段超过流式上限（但低于通用字节数组上限）时编码拒绝；解码端以
+  // 手工构造的超限帧验证 kOversize。
+  IpcStreamFrame oversize = frame;
+  oversize.begin_offset = 0;
+  oversize.end_offset = std::uint64_t{300} * 1024;
+  oversize.data.assign(static_cast<std::size_t>(300) * 1024, 'x');
+  std::vector<std::uint8_t> oversize_reject;
+  YORI_CHECK(!encode_stream_frame_payload(oversize, oversize_reject));
+
+  const std::uint32_t oversize_length = static_cast<std::uint32_t>(std::uint64_t{300} * 1024);
+  std::vector<std::uint8_t> handcrafted = {0x01, 0x01, 0x00};
+  handcrafted.insert(handcrafted.end(), 8, 0);  // begin = 0
+  handcrafted.insert(handcrafted.end(), 8, 0);  // end = 0
+  for (int shift = 0; shift < 32; shift += 8) {
+    handcrafted.push_back(static_cast<std::uint8_t>((oversize_length >> shift) & 0xffu));
+  }
+  handcrafted.insert(handcrafted.end(), oversize_length, 'x');
+  const IpcStreamFrameDecodeResult oversize_decoded =
+      decode_stream_frame_payload(handcrafted.data(), handcrafted.size());
+  YORI_CHECK(oversize_decoded.error == IpcDecodeError::kOversize);
+}
+
+// golden vector（M5 风险项收口）：固定字节序列锁定线格式。
+void test_m6_golden_vectors() {
+  // LOGS_FOLLOW 请求：version=1, kind=7, job=9, since_stdout 有（4096），
+  // since_stderr 无。
+  IpcRequest request;
+  request.kind = IpcRequestKind::kLogsFollow;
+  request.logs_follow.job_id = 9;
+  request.logs_follow.since_stdout = std::uint64_t{4096};
+  std::vector<std::uint8_t> buffer;
+  YORI_CHECK(append_request_frame(request, buffer));
+  const std::vector<std::uint8_t> expected_request = {
+      0x14, 0x00, 0x00, 0x00,                          // 长度 20（2 头 + 8 + 1 + 8 + 1）
+      0x01, 0x07,                                      // version 1, kind 7
+      0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // job 9
+      0x01,                                            // since_stdout 存在
+      0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // 4096
+      0x00,                                            // since_stderr 不存在
+  };
+  YORI_CHECK(buffer == expected_request);
+
+  // LOG_DATA 流式帧：stream=1, begin=2, end=5, data="abc"。
+  IpcStreamFrame frame;
+  frame.kind = IpcStreamFrameKind::kLogData;
+  frame.stream = 1;
+  frame.begin_offset = 2;
+  frame.end_offset = 5;
+  frame.data = {'a', 'b', 'c'};
+  buffer.clear();
+  YORI_CHECK(append_stream_frame(frame, buffer));
+  const std::vector<std::uint8_t> expected_frame = {
+      0x1a, 0x00, 0x00, 0x00,                          // 长度 26（2 头 + 1 + 8 + 8 + 4 + 3）
+      0x01, 0x01,                                      // version 1, LOG_DATA
+      0x01,                                            // stderr
+      0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // begin 2
+      0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // end 5
+      0x03, 0x00, 0x00, 0x00,                          // 数据长度 3
+      'a',  'b',  'c',
+  };
+  YORI_CHECK(buffer == expected_frame);
+
+  // LOG_EOF 流式帧：job_state=4（FINISHED），exited 0。
+  frame = IpcStreamFrame{};
+  frame.kind = IpcStreamFrameKind::kLogEof;
+  frame.job_state = 4;
+  frame.exit = IpcExitStatus{true, 0};
+  buffer.clear();
+  YORI_CHECK(append_stream_frame(frame, buffer));
+  const std::vector<std::uint8_t> expected_eof = {
+      0x09, 0x00, 0x00, 0x00,  // 长度 9（2 头 + 1 + 1 + 1 + 4）
+      0x01, 0x04,              // version 1, LOG_EOF
+      0x04,                    // FINISHED
+      0x01,                    // exit 存在
+      0x01,                    // exited_normally
+      0x00, 0x00, 0x00, 0x00,  // code 0
+  };
+  YORI_CHECK(buffer == expected_eof);
+}
+
 }  // namespace
 
 int main() {
@@ -404,6 +696,11 @@ int main() {
   test_malformed_responses();
   test_encoder_rejects_oversize();
   test_boundary_values();
+  test_m6_request_roundtrips();
+  test_m6_response_roundtrips();
+  test_m6_stream_frame_roundtrips();
+  test_m6_stream_frame_malformed();
+  test_m6_golden_vectors();
   if (yori::testing::failure_count != 0) {
     std::fprintf(stderr, "ipc protocol: %d failure(s)\n", yori::testing::failure_count);
     return 1;

@@ -61,6 +61,67 @@ std::vector<std::vector<std::uint8_t>> seed_corpus() {
   YORI_CHECK(append_request_frame(logs, frame));
   corpus.push_back(frame);
 
+  // M6：LOGS_FOLLOW / TENSORBOARD 请求与流式帧族种子。
+  IpcRequest follow;
+  follow.kind = IpcRequestKind::kLogsFollow;
+  follow.logs_follow.job_id = 12;
+  follow.logs_follow.since_stdout = std::uint64_t{4096};
+  follow.logs_follow.since_stderr = std::uint64_t{128};
+  frame.clear();
+  YORI_CHECK(append_request_frame(follow, frame));
+  corpus.push_back(frame);
+
+  IpcRequest tensorboard;
+  tensorboard.kind = IpcRequestKind::kTensorboard;
+  tensorboard.tensorboard.job_id = 12;
+  frame.clear();
+  YORI_CHECK(append_request_frame(tensorboard, frame));
+  corpus.push_back(frame);
+
+  IpcResponse follow_ack;
+  follow_ack.kind = IpcRequestKind::kLogsFollow;
+  follow_ack.logs_follow.job_state = 3;
+  follow_ack.logs_follow.stdout_offset = 100;
+  follow_ack.logs_follow.stderr_offset = 200;
+  frame.clear();
+  YORI_CHECK(append_response_frame(follow_ack, frame));
+  corpus.push_back(frame);
+
+  IpcStreamFrame data;
+  data.kind = IpcStreamFrameKind::kLogData;
+  data.stream = 1;
+  data.begin_offset = 10;
+  data.end_offset = 34;
+  data.data.assign(24, 'z');
+  frame.clear();
+  YORI_CHECK(append_stream_frame(data, frame));
+  corpus.push_back(frame);
+
+  IpcStreamFrame eof;
+  eof.kind = IpcStreamFrameKind::kLogEof;
+  eof.job_state = 4;
+  eof.exit = IpcExitStatus{true, 0};
+  frame.clear();
+  YORI_CHECK(append_stream_frame(eof, frame));
+  corpus.push_back(frame);
+
+  IpcStreamFrame gap;
+  gap.kind = IpcStreamFrameKind::kLogGap;
+  gap.stream = 0;
+  gap.begin_offset = 1;
+  gap.end_offset = 5000;
+  frame.clear();
+  YORI_CHECK(append_stream_frame(gap, frame));
+  corpus.push_back(frame);
+
+  IpcStreamFrame backpressure;
+  backpressure.kind = IpcStreamFrameKind::kLogBackpressure;
+  backpressure.stream = 0;
+  backpressure.begin_offset = 9999;
+  frame.clear();
+  YORI_CHECK(append_stream_frame(backpressure, frame));
+  corpus.push_back(frame);
+
   IpcResponse ps;
   ps.kind = IpcRequestKind::kPs;
   ps.error = IpcError::kNone;
@@ -157,7 +218,7 @@ std::vector<std::uint8_t> mutate(const std::vector<std::uint8_t>& input, Mutator
   return output;
 }
 
-// 解码入口：请求与响应两个方向都驱动。
+// 解码入口：请求、响应与流式帧三个方向都驱动。
 void drive_decode(const std::vector<std::uint8_t>& payload) {
   if (payload.size() > IpcProtocolLimits::kMaxPayloadBytes + 1) {
     return;  // 长度域放大后无真实缓冲，跳过（decode 以 size 判定已单独覆盖）
@@ -177,6 +238,15 @@ void drive_decode(const std::vector<std::uint8_t>& payload) {
     YORI_CHECK(append_response_frame(response.value, frame));
   } else {
     YORI_CHECK(response.error != IpcDecodeError::kNone);
+  }
+
+  const IpcStreamFrameDecodeResult stream_frame =
+      decode_stream_frame_payload(payload.data(), payload.size());
+  if (stream_frame.ok()) {
+    std::vector<std::uint8_t> frame;
+    YORI_CHECK(append_stream_frame(stream_frame.value, frame));
+  } else {
+    YORI_CHECK(stream_frame.error != IpcDecodeError::kNone);
   }
 }
 

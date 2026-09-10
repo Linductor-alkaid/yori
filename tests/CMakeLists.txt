@@ -239,6 +239,34 @@ add_test(NAME m5.integration.ipc-e2e COMMAND integration_ipc_cli_test)
 set_tests_properties(m5.integration.ipc-e2e PROPERTIES
   LABELS "integration;ipc" TIMEOUT 180)
 
+# ---- unit：LogStreamer 订阅分发、回看窗口与准入（M6-02，EXEC-04）-------------
+add_executable(unit_log_streamer_test unit_log_streamer_test.cpp)
+target_link_libraries(unit_log_streamer_test
+  PRIVATE yori::yori_core yori::runtime executor::executor)
+yori_apply_warnings(unit_log_streamer_test)
+add_test(NAME m6.unit.log-streamer COMMAND unit_log_streamer_test)
+set_tests_properties(m6.unit.log-streamer PROPERTIES LABELS "unit" TIMEOUT 60)
+
+# ---- unit：跟随会话六场景 + 慢客户端背压（M6-04，EXEC-03）--------------------
+add_executable(unit_log_follow_test unit_log_follow_test.cpp)
+target_link_libraries(unit_log_follow_test
+  PRIVATE yori::yori_core yori::runtime yori::test_support executor::executor)
+yori_apply_warnings(unit_log_follow_test)
+add_test(NAME m6.unit.log-follow COMMAND unit_log_follow_test)
+set_tests_properties(m6.unit.log-follow PROPERTIES LABELS "unit;ipc" TIMEOUT 120)
+
+# ---- integration;ipc：logs -f / tensorboard 全链路（M6-05）-------------------
+# 真实子进程产日志 -> LogPump 观察者 -> LogStreamer -> 会话 worker -> UDS ->
+# 真实 yori CLI；tensorboard 以 PATH 注入假二进制验证 CLI 契约。
+add_executable(integration_logs_follow_test integration_logs_follow_test.cpp)
+target_link_libraries(integration_logs_follow_test
+  PRIVATE yori::yori_core yori::runtime yori::test_support executor::executor)
+target_compile_definitions(integration_logs_follow_test PRIVATE YORI_CLI_BIN="$<TARGET_FILE:yori>")
+yori_apply_warnings(integration_logs_follow_test)
+add_test(NAME m6.integration.logs-follow-e2e COMMAND integration_logs_follow_test)
+set_tests_properties(m6.integration.logs-follow-e2e PROPERTIES
+  LABELS "integration;ipc" TIMEOUT 180)
+
 # ---- integration：CLI/daemon 冒烟 ----------------------------------------
 add_test(NAME example.integration.yori-version COMMAND $<TARGET_FILE:yori> --version)
 set_tests_properties(example.integration.yori-version PROPERTIES

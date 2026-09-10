@@ -78,6 +78,13 @@ class IpcService final : public IpcRequestHandler {
 
   [[nodiscard]] IpcResponse handle(const PeerCredentials& peer, const IpcRequest& request) override;
 
+  // LOGS_FOLLOW 的验证面（M6）：owner/admin 授权、Job 存在性与已启动状态
+  // （log_path 存在）。error != kNone 的响应由调用方直接写回（无流式委派的
+  // 服务器、或流式网关的拒绝路径）；error == kNone 时 logs_follow.job_state
+  // 已填，两路 offset 由流式网关在订阅后填入。
+  [[nodiscard]] IpcResponse validate_logs_follow(const PeerCredentials& peer,
+                                                 const IpcLogsFollowRequest& request);
+
  private:
   [[nodiscard]] IpcResponse handle_submit(const PeerCredentials& peer,
                                           const IpcSubmitRequest& request);
@@ -86,6 +93,7 @@ class IpcService final : public IpcRequestHandler {
   [[nodiscard]] IpcResponse handle_gpu();
   [[nodiscard]] IpcResponse handle_cancel(const PeerCredentials& peer, std::uint64_t job_id);
   [[nodiscard]] IpcResponse handle_logs(const PeerCredentials& peer, const IpcLogsRequest& request);
+  [[nodiscard]] IpcResponse handle_tensorboard(const PeerCredentials& peer, std::uint64_t job_id);
 
   [[nodiscard]] bool is_admin(const PeerCredentials& peer) const noexcept;
   [[nodiscard]] static IpcResponse error_response(IpcRequestKind kind, IpcError error,

@@ -16,6 +16,11 @@ enum class LogStreamKind {
 [[nodiscard]] const char* to_string(LogStreamKind stream) noexcept;
 [[nodiscard]] std::string log_file_name(LogStreamKind stream);
 
+// 写失败丢弃后插入流中的标记文本（设计 11.2）："[yori] dropped N bytes\n"。
+// 落盘（LogSink 挂起标记）与直播分发（LogStreamer 标记 chunk）共用同一格式，
+// 保证文件视图与跟随视图一致；标记字节不计入逻辑 offset。
+[[nodiscard]] std::string drop_marker_text(std::uint64_t dropped_bytes);
+
 struct LogSinkLimits final {
   static constexpr std::uint64_t kMinFileBytes = 4096;
   static constexpr std::uint64_t kMaxFileBytes = 1ULL << 30;        // 1 GiB

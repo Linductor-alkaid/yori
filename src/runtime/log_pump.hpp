@@ -5,6 +5,7 @@
 #include <executor/comm/channel.hpp>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <yori/job/job.hpp>
 #include <yori/observe/log_sink.hpp>
 #include <yori/process/process_supervisor.hpp>
@@ -15,13 +16,29 @@ class Executor;
 
 namespace yori::runtime {
 
+// 日志块观察者（M6，EXEC-04 数据面）：LogPump worker 在落盘接受后调用，
+// 携带该次接受的逻辑 offset 区间。实现（LogStreamer 桥）必须非阻塞、不抛
+// 出；观察失败不得影响落盘主路径（观察不得影响被观察者，设计 11.1）。
+class LogChunkObserver {
+ public:
+  virtual ~LogChunkObserver() = default;
+
+  // 一块已落盘接受的字节：[begin_offset, end_offset)，data 即接受的数据。
+  virtual void on_chunk(const job::JobId& job, observe::LogStreamKind stream, std::string_view data,
+                        std::uint64_t begin_offset, std::uint64_t end_offset) = 0;
+  // 落盘写失败丢弃：offset 不前进，观察侧发布丢弃标记（设计 11.2）。
+  virtual void on_drop(const job::JobId& job, observe::LogStreamKind stream, std::uint64_t offset,
+                       std::uint64_t dropped_bytes) = 0;
+};
+
 // attach 到日志泵的一个 Job：两路管道读端与已打开的 LogSink。读端可以无效（该流
-// 未捕获），无效流立即视为完成。
+// 未捕获），无效流立即视为完成。observer 可为空（不启用直播分发，纯落盘）。
 struct LogPumpJobInput final {
   job::JobId job{};
   process::FileDescriptor stdout_read;
   process::FileDescriptor stderr_read;
   observe::LogSink sink;
+  std::shared_ptr<LogChunkObserver> observer;
 };
 
 // Job 日志排空结果：completed 表示两路流均 EOF；error 汇总读/写错误。

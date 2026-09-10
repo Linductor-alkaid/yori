@@ -71,6 +71,7 @@ class PumpWorker final : public executor::IBlockingIoWorker {
     Stream stdout_stream;
     Stream stderr_stream;
     observe::LogSink sink;
+    std::shared_ptr<LogChunkObserver> observer;
     std::string error;
   };
 
@@ -155,6 +156,7 @@ class PumpWorker final : public executor::IBlockingIoWorker {
     entry.stdout_stream.fd = input.stdout_read.release();
     entry.stderr_stream.fd = input.stderr_read.release();
     entry.sink = std::move(input.sink);
+    entry.observer = std::move(input.observer);
     entries_.emplace(job_value, std::move(entry));
     command.completion.set_value({LogPumpAttachCode::kAttached, {}});
     check_entry_completion(job_value);
@@ -185,10 +187,29 @@ class PumpWorker final : public executor::IBlockingIoWorker {
     std::array<char, kMaxChunkBytes> buffer{};
     const ssize_t n = ::read(stream.fd, buffer.data(), buffer.size());
     if (n > 0) {
+      // 落盘优先：接受的字节区间随后发布给观察者（直播分发）。观察者的
+      // 异常与失败不进入泵的错误路径（观察不得影响被观察者）。
+      const std::uint64_t begin_offset = entry.sink.logical_offset(stream_kind);
       const auto result = entry.sink.append(
           stream_kind, std::string_view(buffer.data(), static_cast<std::size_t>(n)));
       if (!result.ok()) {
         entry.error += std::string(entry.error.empty() ? "" : "; ") + result.message;
+      }
+      if (entry.observer) {
+        try {
+          if (result.bytes_accepted > 0) {
+            entry.observer->on_chunk(entry.job, stream_kind,
+                                     std::string_view(buffer.data(), result.bytes_accepted),
+                                     begin_offset, begin_offset + result.bytes_accepted);
+          }
+          if (result.dropped_bytes > 0) {
+            entry.observer->on_drop(entry.job, stream_kind, begin_offset + result.bytes_accepted,
+                                    result.dropped_bytes);
+          }
+        } catch (...) {  // NOLINT(bugprone-empty-catch)
+          // 观察路径异常不落盘错误、不中断排空（设计 11.1：观察不得影响被
+          // 观察者）；分发缺失由观察侧统计呈现。
+        }
       }
       return;
     }

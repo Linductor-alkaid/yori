@@ -36,6 +36,8 @@ struct IpcProtocolLimits final {
   static constexpr std::uint32_t kMaxListItems = 1024;
   // LOGS 响应尾部字节数组的服务端上限（每流）。
   static constexpr std::uint32_t kMaxLogTailBytes = 256 * 1024;
+  // 流式帧 LOG_DATA 数据上限（覆盖 LogPump 64 KiB 读块与回放分块）。
+  static constexpr std::uint32_t kMaxStreamDataBytes = 256 * 1024;
   // 解码器接受的字节数组上限（两路尾部合计加协议开销须 < kMaxPayloadBytes）。
   static constexpr std::uint32_t kMaxBytesFieldBytes = 512 * 1024;
 };
@@ -52,6 +54,10 @@ enum class IpcRequestKind : std::uint8_t {
   kGpu = 4,
   kCancel = 5,
   kLogs = 6,
+  // M6：流式跟随（初始响应帧后接流式帧族，见 IpcStreamFrame）。
+  kLogsFollow = 7,
+  // M6：TensorBoard logdir 解析查询（DEC-003；优先级判定在 CLI 侧）。
+  kTensorboard = 8,
 };
 
 [[nodiscard]] const char* to_string(IpcRequestKind kind) noexcept;
@@ -75,12 +81,28 @@ struct IpcLogsRequest final {
   std::uint32_t max_bytes{0};
 };
 
+// logs -f 会话请求（M6）。两路流 offset 独立（设计 11.3 的 --since-offset
+// 按流具体化）；未设置的流从当前末尾开始跟随。不携带身份字段。
+struct IpcLogsFollowRequest final {
+  std::uint64_t job_id{0};
+  std::optional<std::uint64_t> since_stdout;
+  std::optional<std::uint64_t> since_stderr;
+};
+
+// TensorBoard logdir 解析查询（M6，DEC-003）。daemon 返回解析原料，优先级
+// （--logdir 参数 > spec.tensorboard_logdir > cwd）由 CLI 判定。
+struct IpcTensorboardRequest final {
+  std::uint64_t job_id{0};
+};
+
 struct IpcRequest final {
   IpcRequestKind kind{IpcRequestKind::kSubmit};
   // 按 kind 取用；未用字段保持默认。
   IpcSubmitRequest submit;
   IpcCancelRequest cancel;
   IpcLogsRequest logs;
+  IpcLogsFollowRequest logs_follow;
+  IpcTensorboardRequest tensorboard;
 };
 
 enum class IpcError : std::uint8_t {
@@ -160,6 +182,21 @@ struct IpcLogsPayload final {
   std::vector<std::uint8_t> stderr_tail;
 };
 
+// LOGS_FOLLOW 接受后的会话上下文（初始响应帧）：两路流的实际起始 offset
+// （GAP 校正后）与当时 Job 状态。offset 之后由各流式帧携带。
+struct IpcLogsFollowPayload final {
+  std::uint8_t job_state{0};
+  std::uint64_t stdout_offset{0};
+  std::uint64_t stderr_offset{0};
+};
+
+// TENSORBOARD 查询结果：logdir 为 spec.tensorboard_logdir（可能为空），
+// cwd 为 Job 工作目录；两者均只对 owner/admin 可见（脱敏不适用，直接拒绝）。
+struct IpcTensorboardPayload final {
+  std::optional<std::string> logdir;
+  std::string cwd;
+};
+
 // 响应按 kind 取用结果字段；error 非 kNone 时除 kind/detail（及 CANCEL 的
 // state 上下文）外字段无意义。
 struct IpcResponse final {
@@ -173,6 +210,8 @@ struct IpcResponse final {
   std::vector<IpcGpuDevice> devices;  // GPU
   std::uint8_t state{0};              // CANCEL：终态或拒绝时的当前状态
   IpcLogsPayload logs;                // LOGS
+  IpcLogsFollowPayload logs_follow;   // LOGS_FOLLOW ack
+  IpcTensorboardPayload tensorboard;  // TENSORBOARD
 };
 
 enum class IpcDecodeError : std::uint8_t {
@@ -211,6 +250,47 @@ struct IpcResponseDecodeResult final {
   explicit constexpr operator bool() const noexcept { return ok(); }
 };
 
+// ---------------------------------------------------------------------------
+// 流式帧族（M6，设计 13.2）：仅 daemon -> CLI，在 LOGS_FOLLOW 的初始响应帧
+// 之后连续推送，同受 [u32 LE payload_bytes] 帧界约束。payload =
+//   [u8 version=1][u8 frame_kind][kind body]
+// LOG_DATA 携带 [begin_offset, end_offset) 数据（丢弃标记 chunk 为
+// begin==end 且 data 非空的帧）；LOG_GAP 告知不可回放区间并发送即跳到
+// to_offset；LOG_BACKPRESSURE 携带当前 offset，发送后会话即断开；
+// LOG_EOF 携带 Job 终态（可选退出状态），发送后排空关闭。
+// ---------------------------------------------------------------------------
+
+enum class IpcStreamFrameKind : std::uint8_t {
+  kLogData = 1,
+  kLogGap = 2,
+  kLogBackpressure = 3,
+  kLogEof = 4,
+};
+
+[[nodiscard]] const char* to_string(IpcStreamFrameKind kind) noexcept;
+
+struct IpcStreamFrame final {
+  IpcStreamFrameKind kind{IpcStreamFrameKind::kLogData};
+  // 流标识：0 = stdout，1 = stderr（observe::LogStreamKind 的数值；控制帧
+  // 中仅 DATA/GAP/BACKPRESSURE 有意义，EOF 为整会话语义）。
+  std::uint8_t stream{0};
+  // DATA：区间 [begin_offset, end_offset)；GAP：[from, to)；
+  // BACKPRESSURE：当前 offset。
+  std::uint64_t begin_offset{0};
+  std::uint64_t end_offset{0};
+  std::vector<std::uint8_t> data;     // DATA
+  std::uint8_t job_state{0};          // EOF：job::JobState 数值
+  std::optional<IpcExitStatus> exit;  // EOF
+};
+
+struct IpcStreamFrameDecodeResult final {
+  IpcDecodeError error{IpcDecodeError::kTruncated};
+  IpcStreamFrame value{};
+
+  [[nodiscard]] constexpr bool ok() const noexcept { return error == IpcDecodeError::kNone; }
+  explicit constexpr operator bool() const noexcept { return ok(); }
+};
+
 // 编码 payload 本体（[version][kind][body]，不含长度前缀）。任何字段越界
 // （长度、计数、NUL、总负载超限）返回 false 且 out 保持调用前状态。传输层
 // 以此配合自身的长度前缀读写，避免双重封装。
@@ -230,5 +310,12 @@ struct IpcResponseDecodeResult final {
                                                             std::size_t size);
 [[nodiscard]] IpcResponseDecodeResult decode_response_payload(const std::uint8_t* data,
                                                               std::size_t size);
+[[nodiscard]] IpcStreamFrameDecodeResult decode_stream_frame_payload(const std::uint8_t* data,
+                                                                     std::size_t size);
+
+// 流式帧的编码镜像（payload 本体 / 含长度前缀的完整帧），约束同上。
+[[nodiscard]] bool encode_stream_frame_payload(const IpcStreamFrame& frame,
+                                               std::vector<std::uint8_t>& out);
+[[nodiscard]] bool append_stream_frame(const IpcStreamFrame& frame, std::vector<std::uint8_t>& out);
 
 }  // namespace yori::ipc
