@@ -1,6 +1,6 @@
 [Unit]
 Description=Yori GPU Scheduler (single-node multi-user GPU job queue)
-Documentation=file:/usr/share/doc/yori/README.md
+Documentation=https://github.com/Linductor-alkaid/yori#readme
 After=local-fs.target nvidia-persistenced.service
 Wants=nvidia-persistenced.service
 # 训练进程与 daemon 解耦（RULE-10）：daemon 停止不停训练，训练生命周期由
@@ -12,7 +12,8 @@ Type=simple
 User=root
 Group=root
 # DEC-004：特权 daemon，exec 前降权为提交用户；root 是多用户身份切换的前提。
-ExecStart=/usr/local/bin/yorid
+# 安装前缀由 configure 阶段注入（源码安装 /usr/local，deb 安装 /usr）。
+ExecStart=@CMAKE_INSTALL_FULL_BINDIR@/yorid
 Restart=on-failure
 RestartSec=2
 # /run/yori（IPC 端点，DEC-010）与 /var/lib/yori（SQLite 状态库 + Job 日志）。
@@ -22,7 +23,7 @@ StateDirectory=yori
 StateDirectoryMode=0750
 # 环境变量白名单（DEC-006）：只继承身份块与显式白名单键（PATH、LANG、
 # LC_*、CUDA 相关、NVIDIA 相关）；管理员扩展经 drop-in 追加。
-Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PATH=@CMAKE_INSTALL_FULL_BINDIR@:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # 加固：不依赖特权以外的能力；匿名私有 tmp；系统调用不需要特权升级路径
 # 之外的额外能力。setuid/setgid 切换由 root euid 承担（CAP_SETUID/SETGID）。
 NoNewPrivileges=no

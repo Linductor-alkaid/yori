@@ -1,0 +1,54 @@
+name: Release
+
+# 发布流水线（工程规范 10.5）：v* tag 触发——构建 + 测试 + deb 打包 +
+# GitHub Release（附 yori_<version>_<arch>.deb 与校验和）。
+# tag 由负责人在 master 的发布点 commit 上显式打入（M7 文档记录发布点）。
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: 构建 deb 并发布 release（ubuntu-24.04 / gcc）
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: 安装工具链
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build g++ libsqlite3-dev
+      - name: configure + build + test（release 预设）
+        run: |
+          cmake --preset release -DYORI_FETCH_DEPENDENCIES=OFF
+          cmake --build --preset release
+          ctest --preset release
+      - name: 打包 deb（独立 /usr 前缀构建树）
+        run: |
+          packaging/deb/build-deb.sh dist
+      - name: 校验和
+        run: |
+          cd dist && sha256sum yori_*.deb > sha256sums.txt && cat sha256sums.txt
+      - name: 解包冒烟（发布前验证；CI 无 root/GPU，仅文件级与 --version）
+        run: |
+          D=$(mktemp -d)
+          dpkg-deb -x dist/yori_*.deb "${D}"
+          "${D}/usr/bin/yori" --version
+          "${D}/usr/bin/yorid" --version
+          test -f "${D}/usr/lib/systemd/system/yori.service"
+          grep -q "ExecStart=/usr/bin/yorid" "${D}/usr/lib/systemd/system/yori.service"
+      - name: 创建 release 并上传产物
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          gh release create "${TAG}" \
+            dist/yori_*.deb dist/sha256sums.txt \
+            --title "Yori ${TAG}" \
+            --generate-notes \
+            --notes "安装：sudo apt install ./yori_<version>_<arch>.deb（自动创建 yori 组并启用启动 yori.service；用户执行 sudo usermod -aG yori <user> 后重新登录）。源码构建与部署细节见仓库 README 与 packaging/systemd/README.md。版本变更见 CHANGELOG.md。"
