@@ -35,12 +35,13 @@ yori submit 提交 Job -> yorid 全局队列排队 -> Scheduler 匹配空闲 GPU
 `yori_<version>_<arch>.deb`，在服务器上安装：
 
 ```bash
-sudo apt install ./yori_0.1.0_amd64.deb
+sudo apt install ./yori_0.1.1_amd64.deb
 ```
 
 安装即完成：`yori`/`yorid` 进入 PATH、创建 `yori` 系统组、写入
 `/run/yori` 端点配置并**自动启用并启动** `yori.service`（systemd）。
-运行时依赖仅需 `libsqlite3-0`；NVML 库随 NVIDIA 驱动提供。
+运行时依赖仅需 `libsqlite3-0`；NVML 库随机器上已有的 NVIDIA 驱动提供，
+deb 不会安装或改动任何驱动包。
 
 把允许使用 Yori 的用户加入 `yori` 组（重新登录生效）：
 

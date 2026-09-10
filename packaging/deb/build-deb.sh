@@ -57,7 +57,6 @@ Section: admin
 Priority: optional
 Architecture: ${ARCH}
 Depends: libsqlite3-0
-Recommends: nvidia-driver
 Maintainer: Linductor-alkaid <linductor-alkaid@users.noreply.github.com>
 Description: single-node multi-user GPU training job queue, scheduler and supervisor
  Yori queues, schedules and supervises GPU training jobs submitted by multiple
@@ -130,6 +129,15 @@ echo "build-deb: ${OUT_DIR}/${DEB_NAME}"
 # 自检：control 可解析、关键文件在位（contents 先落变量，避免 grep -q 的
 # 早退 SIGPIPE 噪声）。
 dpkg-deb --field "${OUT_DIR}/${DEB_NAME}" Package Version Architecture
+# 防回归：deb 不得携带任何 NVIDIA 依赖——NVML 由运行期 dlopen 解析，驱动
+# 栈由管理员维护；apt 默认安装 Recommends，拉入新版驱动组件会与已安装的
+# 版本化驱动系列（如 nvidia-driver-570）冲突，导致 apt 卸载既有驱动栈
+# （v0.1.0 已知问题，v0.1.1 修复）。
+if dpkg-deb --field "${OUT_DIR}/${DEB_NAME}" Depends Recommends Suggests 2>/dev/null \
+    | grep -qi nvidia; then
+  echo "build-deb: control must not reference nvidia packages" >&2
+  exit 1
+fi
 CONTENTS=$(dpkg-deb --contents "${OUT_DIR}/${DEB_NAME}")
 for entry in '/usr/bin/yorid$' '/usr/bin/yori$' 'systemd/system/yori.service$'; do
   echo "${CONTENTS}" | grep -Eq "${entry}" || { echo "build-deb: missing ${entry}" >&2; exit 1; }
