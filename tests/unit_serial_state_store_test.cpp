@@ -79,6 +79,7 @@ int main() {
     // 读任务（并发）与写任务（单写者：状态推进）经 Executor 驱动；读任务在
     // 写进行中并发 load，全部结果一致（同 revision 快照）。
     std::vector<std::future<bool>> readers;
+    readers.reserve(8);
     for (int i = 0; i < 8; ++i) {
       readers.push_back(runtime.executor().submit_auto([&store]() {
         for (int round = 0; round < 64; ++round) {
@@ -122,7 +123,7 @@ int main() {
       YORI_CHECK(reader.get());
     }
     YORI_CHECK(writes_ok);
-    YORI_CHECK(store.serialized_calls() > 8 * 64);
+    YORI_CHECK(store.serialized_calls() > std::uint64_t{8} * 64);
 
     YORI_CHECK(runtime.shutdown() == yori::runtime::ExecutorRuntimeShutdownResult::kCompleted);
   }

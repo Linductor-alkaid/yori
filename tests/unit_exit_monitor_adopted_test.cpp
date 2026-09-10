@@ -68,7 +68,9 @@ process::ProcessIdentity spawn_detached() {
   const auto pid = std::atoll(pid_bytes.data());
   const auto pgid = process::read_process_pgid(pid);
   const auto ticks = process::read_process_start_ticks(pid);
-  YORI_CHECK(pgid.has_value() && ticks.has_value());
+  if (!pgid.has_value() || !ticks.has_value()) {
+    return process::ProcessIdentity{};
+  }
   return process::ProcessIdentity{pid, *pgid, *ticks};
 }
 

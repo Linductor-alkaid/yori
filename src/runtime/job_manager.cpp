@@ -698,7 +698,8 @@ class ManagerWorker final : public executor::IBlockingIoWorker {
       return;
     }
     const scheduler::ScheduleResult& result = *completion.schedule_result;
-    if (result.scheduled()) {
+    if (result.scheduled() && result.event.job_id.has_value() &&
+        result.event.gpu_uuid.has_value()) {
       stats_.scheduler_scheduled.fetch_add(1, std::memory_order_relaxed);
       launch_scheduled(result.event.job_id.value().value(), result.event.gpu_uuid.value());
     } else if (result.failed()) {
@@ -1091,8 +1092,7 @@ class JobManager::Impl final {
        queue::GlobalJobQueue& queue_ref, GpuManager& gpu_manager_ref, LogStreamer& log_streamer_ref,
        launch::IdentityResolver& identity_resolver_ref, launch::LaunchAdapter& launch_adapter_ref,
        executor::comm::PhaseGate& startup_gate_ref, JobManagerConfig config_value)
-      : config(std::move(config_value)),
-        commands(executor::comm::ChannelOptions{config_value.command_capacity,
+      : commands(executor::comm::ChannelOptions{config_value.command_capacity,
                                                 executor::comm::DropPolicy::RejectNewest, true,
                                                 "yori-job-manager-commands"}),
         executor(executor_ref),
@@ -1101,15 +1101,15 @@ class JobManager::Impl final {
         gpu_manager(gpu_manager_ref),
         log_streamer(log_streamer_ref),
         startup_gate(startup_gate_ref),
-        scheduler(queue_ref, store_ref),
         scheduler_runner(executor_ref, scheduler),
         store_runner(executor_ref, store_ref),
         exit_monitor(executor_ref),
         log_pump(executor_ref),
         identity_resolver(identity_resolver_ref),
-        launch_adapter(launch_adapter_ref) {}
+        launch_adapter(launch_adapter_ref),
+        scheduler(queue_ref, store_ref),
+        config(std::move(config_value)) {}
 
-  JobManagerConfig config;
   executor::comm::MpscChannel<Command> commands;
   executor::Executor& executor;
   store::StateStore& store;
@@ -1117,13 +1117,14 @@ class JobManager::Impl final {
   GpuManager& gpu_manager;
   LogStreamer& log_streamer;
   executor::comm::PhaseGate& startup_gate;
-  scheduler::FifoScheduler scheduler;
   SchedulerTaskRunner scheduler_runner;
   StoreTaskRunner store_runner;
   ProcessExitMonitor exit_monitor;
   LogPump log_pump;
   launch::IdentityResolver& identity_resolver;
   launch::LaunchAdapter& launch_adapter;
+  scheduler::FifoScheduler scheduler;
+  JobManagerConfig config;
 
   // 唤醒源（退出监视/GPU 事件监听回调，非阻塞）：停止后忽略，fd 关闭前先
   // 由 stop() 解除全部挂钩。

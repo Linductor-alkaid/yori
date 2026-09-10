@@ -170,8 +170,12 @@ int main() {
     YORI_CHECK(daemon.start().ok());
 
     // 恢复决策：Job 1 采纳为 RUNNING（同一进程身份，未重启）；Job 2 重新入队。
-    YORI_CHECK(daemon.last_recovery().has_value() && daemon.last_recovery()->ok());
-    YORI_CHECK(daemon.last_recovery()->outcomes.size() == 2);
+    const auto& recovery = daemon.last_recovery();
+    if (!recovery.has_value() || !recovery->ok()) {
+      std::fprintf(stderr, "closure: recovery missing or failed\n");
+      return 1;
+    }
+    YORI_CHECK(recovery->outcomes.size() == 2);
     {
       const auto running = find_stored(*store_ptr, 1);
       YORI_CHECK(running.has_value() && running->state == job::JobState::kRunning);

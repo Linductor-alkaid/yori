@@ -316,9 +316,14 @@ class ProcessExitMonitor::Impl final {
   executor::Executor& executor;
   std::atomic<std::size_t> registered_count{0};
   std::atomic<std::uint64_t> delivery_retries{0};
+  std::atomic<std::uint64_t> timer_failures{0};
   // blocking worker 由 Executor 持有；该指针在 start 后、stop 前有效，仅用于
   // 从调用方线程写入自管道唤醒。
   ReaperWorker* worker{nullptr};
+  std::function<void()> event_listener;
+  std::mutex timer_mutex;
+  std::mutex listener_mutex;
+  executor::TimerHandle timer;
   executor::WorkerHandle handle;
   struct sigaction previous_sigchld {};
   int wake_read{-1};
@@ -327,6 +332,7 @@ class ProcessExitMonitor::Impl final {
   bool started{false};
   bool stop_requested{false};
   bool signal_installed{false};
+  bool timer_active{false};
 
   // 采纳进程的周期探测定时器：仅当注册表中存在采纳进程时保持激活。启动/取消
   // 只发生在 worker 线程（注册表变更）与 stop（owner 线程），以 timer_mutex
@@ -369,14 +375,6 @@ class ProcessExitMonitor::Impl final {
       timer_active = false;
     }
   }
-
-  executor::TimerHandle timer;
-  std::mutex timer_mutex;
-  std::atomic<std::uint64_t> timer_failures{0};
-  bool timer_active{false};
-
-  std::mutex listener_mutex;
-  std::function<void()> event_listener;
 
   void notify_event_listener() noexcept {
     std::function<void()> listener;

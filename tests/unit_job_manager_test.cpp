@@ -200,7 +200,7 @@ class ManagerFixture final {
 
 }  // namespace
 
-int main() {
+int run_test() {
   // ---- 场景 A：正常完成（RUNNING -> FINISHED + lease 释放 + 日志落盘）----
   {
     ManagerFixture fixture;
@@ -629,4 +629,15 @@ int main() {
   }
   std::printf("job manager: all checks passed\n");
   return 0;
+}
+
+int main() noexcept {
+  try {
+    return run_test();
+  } catch (const std::exception& error) {
+    std::fprintf(stderr, "unexpected exception: %s\n", error.what());
+  } catch (...) {
+    std::fputs("unexpected non-standard exception\n", stderr);
+  }
+  return 1;
 }
