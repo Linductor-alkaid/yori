@@ -138,17 +138,30 @@ bool connection_closed(int fd, int timeout_ms) {
   return false;
 }
 
+// JobControl 空实现：跟随会话测试不触发状态变更。
+class NullJobControl final : public yori::ipc::JobControl {
+ public:
+  yori::ipc::JobSubmitOutcome submit_job(const yori::job::JobSpec&) override {
+    return yori::ipc::JobSubmitOutcome{yori::ipc::JobSubmitOutcome::Code::kUnavailable, 0,
+                                       "null job control"};
+  }
+  yori::ipc::JobCancelOutcome cancel_job(std::uint64_t) override {
+    return yori::ipc::JobCancelOutcome{yori::ipc::JobCancelOutcome::Code::kUnavailable, 0,
+                                       "null job control"};
+  }
+};
+
 struct FollowFixture final {
   FollowFixture() {
     std::string error;
     YORI_CHECK(runtime.initialize({}, error));
 
-    yori::queue::QueueErrorCode queue_error = yori::queue::QueueErrorCode::kNone;
-    queue = yori::queue::GlobalJobQueue::create({}, queue_error);
-
     IpcServiceConfig service_config;
     service_config.admin_gids = {3000};
-    service = std::make_unique<IpcService>(service_config, *queue, store, gpu_status, log_reader);
+    // 守护委派的假实现（M7 起 submit/cancel 走 JobControl）：跟随会话测试
+    // 不触发状态变更，静态空实现即可。
+    control = std::make_unique<NullJobControl>();
+    service = std::make_unique<IpcService>(service_config, store, gpu_status, log_reader, *control);
 
     streamer_config.subscription_capacity = 4;
     streamer_config.backlog_bytes_per_stream = LogStreamerConfig::kMinBacklogBytes;
@@ -236,10 +249,10 @@ struct FollowFixture final {
 
   ExecutorRuntime runtime;
   yori::testing::InMemoryStateStore store;
-  std::unique_ptr<yori::queue::GlobalJobQueue> queue;
   FakeGpuStatus gpu_status;
   FakeLogReader log_reader;
   std::unique_ptr<IpcService> service;
+  std::unique_ptr<NullJobControl> control;
   LogStreamerConfig streamer_config;
   std::unique_ptr<LogStreamer> streamer;
   LogFollowServiceConfig follow_config;

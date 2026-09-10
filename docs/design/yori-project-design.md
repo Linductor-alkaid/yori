@@ -1,7 +1,7 @@
 # Yori 项目设计文档
 
 > **定位**：单节点多用户 GPU 训练任务排队、调度与进程守护系统\
-> **状态**：设计草案 v0.10（M6 观察面：logs -f 流式帧与回看窗口、tensorboard 落地）\
+> **状态**：设计草案 v0.11（M7 守护总装收口：JobManager、恢复采纳、systemd 打包）\
 > **日期**：2026-09-10
 
 ## 1. 项目摘要
@@ -271,8 +271,14 @@ daemon 重启时，对数据库中 `RUNNING` / `STARTING` 的 Job 进入恢复�
 **绝不能因为 daemon 重启就直接重新启动数据库中的 RUNNING Job。**
 
 M4 冻结的恢复 Core 位于 `include/yori/recovery/job_recovery.hpp`
-（`JobRecovery`，同步、单 owner、无内部线程；Executor 承载与启动编排随
-daemon 总装落地）。决策输入为 `StateStore` 一致快照，核验依据是 M2 冻结的
+（`JobRecovery`，同步、单 owner、无内部线程）。M7 守护总装收口后，Executor
+承载与启动编排由 daemon 的 `JobManager`（`src/runtime/job_manager.*`）落地：
+恢复决策先行落盘，随后 `ProcessSupervisor::adopt()` 采纳存活进程并注册退出
+监视；采纳进程不是本进程的子进程，`waitpid` 不可用，其退出由
+`ProcessExitMonitor` 的周期 `/proc` 存在性探测（默认 1s，仅存在采纳进程时
+激活）发现，且自然退出的退出状态不可得——终态为 `FAILED`，`failure_reason`
+显式说明状态不可用（pidfd 增强见总计划 `POST-08`）。决策输入为 `StateStore`
+一致快照，核验依据是 M2 冻结的
 进程身份三元组（`/proc/<pid>/stat` 的 PGID 与启动 ticks，`RULE-06`；GPU 侧
 一致性由启动序列的重新观测与 lease 事实分列保证，见第 7 节）：
 
@@ -566,6 +572,18 @@ M1-05 的 `FifoScheduler::run_once()` 将每个调度事件实现为一个有界
 开始的 StateStore 原子操作。M1-06 再用 Executor comm 组件承接并合并并发触发，
 本适配器不自建事件队列、锁或线程。
 
+M7 守护总装收口后的承载形态：`JobManager`（`src/runtime/job_manager.*`）是
+调度触发的唯一生产者与消费者——submit/cancel/退出事件/GPU 事件（经
+`GpuManager` 事件监听回调唤醒）汇聚到其 blocking worker 的命令通道，
+worker 触发 `SchedulerTaskRunner` 后立即消费结果并在同一串行上下文落地启动
+（见第 10.2 节）。因此 `GlobalJobQueue` 的全部变更只发生在该 worker 与启动前
+的恢复路径；调度结果落地（身份解析 -> `LaunchPlan` -> 日志目录/`LogSink`/
+`LogStreamer` 注册 -> spawn -> `STARTING` 至 `RUNNING` 同 mutation 落盘身份/
+起始时间/日志路径 -> 退出监视注册 -> 日志泵接入）与失败收敛（`FAILED` +
+lease 释放同 mutation）都在 worker 内闭合。启动落地遵循 `JobSpec.launch_profile`
+的 MVP 约定（第 8.1 节）：缺省/空为 `cuda_visible_devices`，非空值为
+`physical_argument` 模式的参数名。
+
 ------------------------------------------------------------------------
 
 ## 10. 进程守护
@@ -588,7 +606,10 @@ RuntimeDirectory=yori
 WantedBy=multi-user.target
 ```
 
-现代 Linux 下不需要自行实现传统 double-fork daemonization。
+现代 Linux 下不需要自行实现传统 double-fork daemonization。M7 交付的 unit
+位于 `packaging/systemd/yori.service`（含 `RuntimeDirectory=yori`、
+`StateDirectory=yori` 与 RULE-10 守护语义说明——不以 control-group 方式回收
+后代；部署前置见 `packaging/systemd/README.md`）。
 
 ### 10.2 训练进程守护
 
@@ -642,11 +663,20 @@ M2 冻结的公开契约位于 `include/yori/process/process_supervisor.hpp`：
 - `poll_exit()` 以 `waitpid(WNOHANG)` 有界推进一步，`consume_exit()` 终态幂等；
   退出状态区分正常退出（携带退出码）与信号终止（携带信号号）。析构对仍在运行
   的进程组执行 SIGKILL 并有界回收，保证不留孤儿与僵尸。
+- `adopt(ProcessIdentity)`（M7）：采纳一个已通过身份核验的既有进程（daemon
+  重启后的恢复路径）——不 fork、不建立管道（DEC-008：重启窗口输出不可恢复），
+  进入 `kRunning` 后 `request_cancel()`/`escalate()` 的进程组信号语义与 spawn
+  的进程一致。`abandon()`（M7，RULE-10）：忘记当前进程且不发送任何信号，
+  用于 daemon 关闭（训练进程继续运行，由恢复路径或 init 接续）。
 - Executor 承载（总计划 `EXEC-07`）：`ProcessExitMonitor` 以单个 blocking
   worker 安装 SIGCHLD 自管道唤醒，按注册 PID 逐个核验身份后 `waitpid(WNOHANG)`
   回收并投递 `ExitEvent`；注册/注销命令与事件均走有界 `MpscChannel`，事件容量
   满时 worker 有界重试并经 comm 统计可见。宽限升级经 `submit_delayed` 一次性
-  任务承载（`GraceEscalation`，arm/disarm 显式消费 future）。
+  任务承载（`GraceEscalation`，arm/disarm 显式消费 future）。M7 起：注册即以
+  `waitpid` 探针分类——本进程子进程走 SIGCHLD 回收，采纳进程（非子进程，
+  `ECHILD`）转入周期 `/proc` 存在性探测（默认 1s 的 timer 任务，仅存在采纳
+  PID 时保持激活）；事件成功入队后经事件监听回调唤醒守护承载（`JobManager`），
+  与 `LogStreamer` 的变更监听同型。
 
 ------------------------------------------------------------------------
 
@@ -826,6 +856,11 @@ Job/GPU 状态快照（ps/gpu 查询）    DoubleBuffer 一致快照
 回调进入服务监控，不静默吞掉。daemon 关闭时按 AGENTS.md 关闭顺序先停止 IPC
 生产者与跟随会话，再回收 blocking worker。
 
+M7 守护总装后的 EOF 时序：Job 终态先落盘（持久化事实），观察面 `EOF` 在该
+Job 的日志泵排空（两路 EOF 的 `LogPumpDone`）之后发布——退出事件与泵完成
+事件任意先后到达，两者都到齐才发布——保证跟随者不丢失管道尾部数据。采纳
+进程（无日志泵）在退出事件内直接发布。
+
 ------------------------------------------------------------------------
 
 ## 12. 持久化
@@ -899,6 +934,15 @@ M4 扩展了 `StoredJob` 的执行记录（`JobExecutionRecord`）：进程身�
 携带；`start_time` 仅身份存在时不早于 `submit_time`。违规 mutation 以
 `kInvalidExecutionRecord` 拒绝。两个后端的接受/拒绝决策共享
 `src/store/mutation_core.cpp` 验证核心，保证同语义。
+
+M7 守护总装后的运行期所有权：两个后端都保持"单 owner、无内部锁"契约
+（DEC-009 第 5 条），而 IPC worker 的同步读（ps/queue/gpu/logs）与
+JobManager 的写（经 `StoreTaskRunner` 在 Executor 任务线程执行 `apply`）是
+两个访问上下文。daemon 以 `SerialStateStore`（`src/runtime/serial_state_store.*`）
+包装后端，以一把互斥量串行化全部 `load()/apply()`——与 `LogStreamer` 注册表
+同语义（mutex 是单 owner 资源的生命周期所有权保护，不是通信通道的替代）；
+写路径的语义串行（单在飞、revision 组合、FIFO）仍由 `StoreTaskRunner` 与
+JobManager 的串行 worker 承载，包装层不重排、不缓存、不吞错误。
 
 `InMemoryStateStore` 是容量显式、单 owner 的 M1 测试实现，通过副本校验后一次
 提交保证原子性；`SqliteStateStore`（M4，`include/yori/store/sqlite_state_store.hpp`，

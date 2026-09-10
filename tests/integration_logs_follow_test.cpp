@@ -1,3 +1,4 @@
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <yori/version.h>
@@ -171,7 +172,10 @@ int main() {
   const std::string socket_path = directory + "/yori.sock";
   const std::string jobs_root = directory + "/jobs";
   const std::string job_dir = jobs_root + "/1";
-  YORI_CHECK(std::system(("mkdir -p " + job_dir).c_str()) == 0);
+  // 0700：满足日志根目录链的属主/写位校验（威胁模型基线 8；本机 umask 002
+  // 下 mkdir -p 会产生组可写目录而被守护总装拒绝）。
+  YORI_CHECK(::mkdir(jobs_root.c_str(), 0700) == 0);
+  YORI_CHECK(::mkdir(job_dir.c_str(), 0700) == 0);
 
   yori::runtime::ExecutorRuntime runtime;
   std::string error;
@@ -188,7 +192,11 @@ int main() {
     snapshot.devices = {device};
     YORI_CHECK(provider.replace_observations(snapshot.devices, snapshot.observed_at).ok());
   }
-  yori::testing::InMemoryStateStore store;
+  // 所有权串行化包装（M7）：IPC 读与 JobManager 写并发访问单 owner 后端。
+  std::unique_ptr<yori::testing::InMemoryStateStore> inner_store =
+      std::make_unique<yori::testing::InMemoryStateStore>();
+  yori::testing::InMemoryStateStore& store = *inner_store;
+  auto store_owner = std::make_unique<yori::runtime::SerialStateStore>(std::move(inner_store));
 
   // 播种在 daemon 启动前（store 单 owner）：Job 1 带日志目录与 tensorboard
   // logdir；Job 2 无流式注册（kNotAvailable 路径）。恢复将两者收敛为 LOST，
@@ -200,8 +208,9 @@ int main() {
   config.ipc.socket_path = socket_path;
   config.ipc.socket_mode = 0600;
   config.ipc.request_deadline = 2000ms;
+  config.job_manager.log_root = jobs_root;
 
-  Daemon daemon(runtime.executor(), provider, store, config);
+  Daemon daemon(runtime.executor(), provider, std::move(store_owner), config);
   const auto started = daemon.start();
   YORI_CHECK(started.ok());
 

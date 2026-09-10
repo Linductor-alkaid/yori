@@ -61,14 +61,62 @@ class LogSnapshotReader {
                                                 std::uint32_t max_bytes) = 0;
 };
 
-// 文件实现：从文件末尾有界读取（O_NOFOLLOW，基线 8/23）。大于 max_bytes 时
-// 返回尾部并置 truncated。
+// 文件实现：从文件末尾有界读取（O_NOFOLLOW，基线 8/23）。
+// 大于 max_bytes 时返回尾部并置 truncated。
 [[nodiscard]] std::unique_ptr<LogSnapshotReader> file_log_snapshot_reader();
+
+// ---------------------------------------------------------------------------
+// 提交与取消的守护委派接口（M7 守护总装收口）。`StateStore` 与
+// `GlobalJobQueue` 是单 owner 契约：全部运行期变更由唯一的写者上下文
+// （daemon 的 JobManager worker，经 StoreTaskRunner）执行；IPC 服务在完成
+// 授权与校验后把状态变更委派到这里，同步等待有界结果。授权（owner/admin）、
+// 请求校验与脱敏仍属于 IpcService；本接口只承载状态变更及其结果。
+// ---------------------------------------------------------------------------
+
+struct JobSubmitOutcome final {
+  enum class Code : std::uint8_t {
+    kSubmitted,
+    kStoreFailed,
+    kQueueRejected,
+    kUnavailable,  // 承载未启动、停止中或应答超时
+  } code{Code::kUnavailable};
+  std::uint64_t job_id{0};
+  std::string detail;
+
+  [[nodiscard]] bool ok() const noexcept { return code == Code::kSubmitted; }
+};
+
+struct JobCancelOutcome final {
+  enum class Code : std::uint8_t {
+    kCancelled,  // QUEUED：已终态化并移出队列（幂等成功）
+    kStopping,   // STARTING/RUNNING/STOPPING：已进入/已在取消升级路径
+    kNotFound,
+    kInvalidState,  // 其他终态：显式拒绝（携带当前状态）
+    kStoreFailed,
+    kUnavailable,
+  } code{Code::kUnavailable};
+  // 结果状态的 wire 值（kCancelled -> CANCELLED；kStopping -> STOPPING；
+  // kInvalidState -> 拒绝时的当前状态）。
+  std::uint8_t state{0};
+  std::string detail;
+};
+
+class JobControl {
+ public:
+  virtual ~JobControl() = default;
+
+  // 提交一个已通过 job::validate 的 JobSpec（owner 身份来自 peer，已由调用方
+  // 填写）。成功返回分配的 JobId；失败映射稳定错误。
+  [[nodiscard]] virtual JobSubmitOutcome submit_job(const job::JobSpec& spec) = 0;
+
+  // 请求取消（授权已由调用方完成）。按执行时点的实际状态决定路径并返回结果。
+  [[nodiscard]] virtual JobCancelOutcome cancel_job(std::uint64_t job_id) = 0;
+};
 
 class IpcService final : public IpcRequestHandler {
  public:
-  IpcService(IpcServiceConfig config, queue::GlobalJobQueue& queue, store::StateStore& store,
-             GpuStatusSource& gpu_source, LogSnapshotReader& log_reader);
+  IpcService(IpcServiceConfig config, store::StateStore& store, GpuStatusSource& gpu_source,
+             LogSnapshotReader& log_reader, JobControl& job_control);
 
   IpcService(const IpcService&) = delete;
   IpcService& operator=(const IpcService&) = delete;
@@ -100,10 +148,10 @@ class IpcService final : public IpcRequestHandler {
                                                   std::string detail);
 
   IpcServiceConfig config_;
-  queue::GlobalJobQueue& queue_;
   store::StateStore& store_;
   GpuStatusSource& gpu_source_;
   LogSnapshotReader& log_reader_;
+  JobControl& job_control_;
 };
 
 }  // namespace yori::ipc

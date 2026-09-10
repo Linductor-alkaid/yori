@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <executor/comm/channel.hpp>
 #include <executor/comm/double_buffer.hpp>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -138,6 +139,11 @@ class GpuManager final {
   // 事件消费（单消费者）。stop 之后缓冲事件仍可读取，析构前应排空。
   [[nodiscard]] bool try_receive_event(GpuManagerEvent& out);
   [[nodiscard]] bool receive_event_for(GpuManagerEvent& out, std::chrono::milliseconds timeout);
+
+  // 变更通知（M7 守护总装）：事件成功入队后回调，供调度承载（JobManager）的
+  // 唤醒管道触发（MpscChannel 无 fd 可 poll）。必须在并发使用前设置一次；
+  // 回调自身必须非阻塞、不抛出、可从采样线程调用；清空以解除挂钩。
+  void set_event_listener(std::function<void()> listener);
 
   [[nodiscard]] GpuManagerStats stats() const;
 

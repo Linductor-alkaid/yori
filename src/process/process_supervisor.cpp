@@ -430,6 +430,20 @@ const char* to_string(SpawnErrorCode code) noexcept {
   return "unknown";
 }
 
+const char* to_string(AdoptErrorCode code) noexcept {
+  switch (code) {
+    case AdoptErrorCode::kNone:
+      return "none";
+    case AdoptErrorCode::kAlreadyRunning:
+      return "supervisor already manages a running process";
+    case AdoptErrorCode::kInvalidIdentity:
+      return "invalid process identity";
+    case AdoptErrorCode::kIdentityVerifyFailed:
+      return "process identity verification failed";
+  }
+  return "unknown";
+}
+
 const char* to_string(CancelOutcome outcome) noexcept {
   switch (outcome) {
     case CancelOutcome::kTerminating:
@@ -626,6 +640,47 @@ SpawnResult ProcessSupervisor::spawn(const launch::LaunchPlan& plan) {
   result.stdout_read = std::move(stdout_read);
   result.stderr_read = std::move(stderr_read);
   return result;
+}
+
+AdoptResult ProcessSupervisor::adopt(const ProcessIdentity& identity) noexcept {
+  AdoptResult result;
+  if (impl_->phase == Phase::kRunning || impl_->phase == Phase::kTerminating) {
+    result.code = AdoptErrorCode::kAlreadyRunning;
+    result.message = yori::process::to_string(result.code);
+    return result;
+  }
+  if (!identity.valid()) {
+    result.code = AdoptErrorCode::kInvalidIdentity;
+    result.message = yori::process::to_string(result.code);
+    return result;
+  }
+  if (!verify_process_identity(identity)) {
+    result.code = AdoptErrorCode::kIdentityVerifyFailed;
+    result.message = yori::process::to_string(result.code);
+    return result;
+  }
+  impl_->identity = identity;
+  impl_->exit_status = ExitStatus{};
+  impl_->phase = Phase::kRunning;
+  result.code = AdoptErrorCode::kNone;
+  return result;
+}
+
+AbandonCode ProcessSupervisor::abandon() noexcept {
+  switch (impl_->phase) {
+    case Phase::kIdle:
+    case Phase::kExited:
+      return AbandonCode::kNotRunning;
+    case Phase::kRunning:
+    case Phase::kTerminating:
+      break;
+  }
+  // RULE-10：不发信号、不回收；进程留在自己的进程组继续运行，身份与状态
+  // 清零后本实例回到可复用的 kIdle。
+  impl_->identity = ProcessIdentity{};
+  impl_->exit_status = ExitStatus{};
+  impl_->phase = Phase::kIdle;
+  return AbandonCode::kAbandoned;
 }
 
 CancelResult ProcessSupervisor::request_cancel() noexcept {

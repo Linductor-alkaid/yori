@@ -5,7 +5,9 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "runtime/daemon.hpp"
@@ -97,14 +99,20 @@ int main() {
     YORI_CHECK(provider.replace_observations(snapshot.devices, snapshot.observed_at).ok());
   }
 
-  yori::testing::InMemoryStateStore store;
+  // 所有权串行化包装（M7）：IPC 读与 JobManager 写（StoreTaskRunner）对单
+  // owner 后端的并发访问经 SerialStateStore 互斥串行化。
+  auto store = std::make_unique<yori::runtime::SerialStateStore>(
+      std::make_unique<yori::testing::InMemoryStateStore>());
 
   yori::runtime::DaemonConfig config;
   config.ipc.socket_path = socket_path;
   config.ipc.socket_mode = 0600;
-  config.ipc.request_deadline = 2000ms;
+  config.ipc.request_deadline = 5000ms;
+  config.gpu.sample_period = 200ms;
+  config.job_manager.log_root = directory + "/jobs";
+  config.job_manager.cancel_grace = 500ms;
 
-  yori::runtime::Daemon daemon(runtime.executor(), provider, store, config);
+  yori::runtime::Daemon daemon(runtime.executor(), provider, std::move(store), config);
   const auto started = daemon.start();
   YORI_CHECK(started.ok());
 
@@ -112,45 +120,76 @@ int main() {
   std::string err;
   int code = 0;
 
-  // submit：成功返回 JobId（设计 13.1）。
-  code = run_cli(directory, socket_path,
-                 "submit --tensorboard-logdir runs/exp -- python train.py --epochs 3", out, err);
+  // 守护总装（M7）下的全链路：submit -> FIFO 调度 -> 真实 spawn -> 日志 ->
+  // 取消升级 -> lease 释放 -> 队首推进。
+  const auto wait_for_state = [&](std::uint64_t job_id, const char* state) {
+    const auto deadline = std::chrono::steady_clock::now() + 15s;
+    while (std::chrono::steady_clock::now() < deadline) {
+      code = run_cli(directory, socket_path, "ps", out, err);
+      YORI_CHECK(code == 0);
+      if (contains(out, std::to_string(job_id)) && contains(out, state)) {
+        return true;
+      }
+      std::this_thread::sleep_for(100ms);
+    }
+    return false;
+  };
+
+  // job 1：长驻训练占住唯一 FREE GPU。
+  code = run_cli(directory, socket_path, "submit -- /bin/sh -c 'sleep 30'", out, err);
   YORI_CHECK(code == 0);
   YORI_CHECK(contains(out, "Submitted job 1"));
+  YORI_CHECK(wait_for_state(1, "RUNNING"));
 
-  // queue / ps：QUEUED Job 可见，自有 Job 明细完整。
+  // job 2：无空闲 GPU，保持 QUEUED（FIFO 头部阻塞，不绕过）。
+  code = run_cli(directory, socket_path,
+                 "submit -- /bin/sh -c 'echo e2e-stdout; echo e2e-stderr 1>&2'", out, err);
+  YORI_CHECK(code == 0);
+  YORI_CHECK(contains(out, "Submitted job 2"));
+  std::this_thread::sleep_for(300ms);
+
   code = run_cli(directory, socket_path, "queue", out, err);
   YORI_CHECK(code == 0);
-  YORI_CHECK(contains(out, "JOB") && contains(out, "1") && contains(out, "QUEUED"));
+  YORI_CHECK(contains(out, "2") && contains(out, "QUEUED"));
 
   code = run_cli(directory, socket_path, "ps", out, err);
   YORI_CHECK(code == 0);
-  YORI_CHECK(contains(out, "python train.py --epochs 3"));
+  YORI_CHECK(contains(out, "RUNNING"));
   YORI_CHECK(contains(out, "QUEUED"));
 
-  // gpu：观测 + 逻辑状态视图（一台 FREE、一台 EXTERNAL_BUSY）。
+  // gpu：观测 + 逻辑状态视图（唯一 FREE GPU 已被 lease -> ALLOCATED；
+  // 另一台 EXTERNAL_BUSY）。
   code = run_cli(directory, socket_path, "gpu", out, err);
   YORI_CHECK(code == 0);
-  YORI_CHECK(contains(out, "GPU-e2e-a") && contains(out, "FREE"));
+  YORI_CHECK(contains(out, "GPU-e2e-a") && contains(out, "ALLOCATED"));
   YORI_CHECK(contains(out, "GPU-e2e-b") && contains(out, "EXTERNAL_BUSY"));
 
-  // logs：未启动的 Job 显式失败（M5 无守护；M6 起有真实日志路径语义）。
-  code = run_cli(directory, socket_path, "logs 1", out, err);
-  YORI_CHECK(code == 1);
-  YORI_CHECK(contains(err, "invalid state"));
-
-  // logs -f：M6 起为真实流式跟随；对未启动 Job 显式失败（请求级错误）。
-  code = run_cli(directory, socket_path, "logs -f 1", out, err);
-  YORI_CHECK(code == 1);
-  YORI_CHECK(contains(err, "invalid state"));
-
-  // cancel：排队期取消成功；重复取消幂等成功；不存在显式失败。
+  // 运行中 Job 的取消（SIGTERM -> 宽限 -> SIGKILL 路径）：响应 STOPPING，
+  // 随后终态 CANCELLED 并释放 lease -> job 2 自动调度（队首推进）。
   code = run_cli(directory, socket_path, "cancel 1", out, err);
   YORI_CHECK(code == 0);
   YORI_CHECK(contains(out, "Cancelled job 1"));
+  YORI_CHECK(wait_for_state(1, "CANCELLED"));
 
+  // FIFO 链式启动：前一个释放 GPU 后，后一个自动 RUNNING -> FINISHED。
+  YORI_CHECK(wait_for_state(2, "FINISHED"));
+
+  // 日志快照：job 2 的两路输出落盘可见（stdout 走 CLI stdout、stderr 走
+  // CLI stderr）。
+  code = run_cli(directory, socket_path, "logs 2", out, err);
+  YORI_CHECK(code == 0);
+  YORI_CHECK(contains(out, "e2e-stdout"));
+  YORI_CHECK(contains(err, "e2e-stderr"));
+
+  // logs -f：对已终态 Job 以 since=0 回放全部窗口后 EOF，退出码与终态对齐
+  // （FINISHED -> 0）；无 since 时按设计从订阅时刻的流末开始（空回放）。
+  code = run_cli(directory, socket_path, "logs -f 2 --since-stdout 0 --since-stderr 0", out, err);
+  YORI_CHECK(code == 0);
+  YORI_CHECK(contains(out, "e2e-stdout"));
+  YORI_CHECK(contains(err, "e2e-stderr"));
+
+  // 终态幂等（RULE-04）：重复取消已 CANCELLED 的 Job 成功；不存在显式失败。
   code = run_cli(directory, socket_path, "cancel 1", out, err);
-  // 终态幂等（RULE-04）：协议层对已 CANCELLED 的重复取消返回成功。
   YORI_CHECK(code == 0);
   YORI_CHECK(contains(out, "Cancelled job 1"));
 
@@ -158,7 +197,7 @@ int main() {
   YORI_CHECK(code == 1);
   YORI_CHECK(contains(err, "not found"));
 
-  // 取消后队列与 ps 收缩到无条目。
+  // 队列收缩到无条目。
   code = run_cli(directory, socket_path, "queue", out, err);
   YORI_CHECK(code == 0);
   YORI_CHECK(!contains(out, "QUEUED"));

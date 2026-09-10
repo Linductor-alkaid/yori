@@ -9,7 +9,9 @@
 #include <array>
 #include <cerrno>
 #include <executor/executor.hpp>
+#include <functional>
 #include <future>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -54,18 +56,33 @@ ExitEvent make_exit_event(std::int64_t pid, const process::ProcessIdentity& iden
   return ExitEvent{pid, identity, status, identity_verified};
 }
 
+// 采纳进程（非本进程子进程，daemon 重启后恢复的 Job）的 /proc 存在性探测
+// 周期。SIGCHLD 只对本进程的子进程触发，采纳进程的退出只能经有界周期探测
+// 发现（M7）；退出状态不可获得（waitpid 不可用），显式投递 unknown。
+constexpr std::chrono::milliseconds kAdoptedScanPeriod{1000};
+
+// 注册表条目：身份 + 是否为采纳进程（决定回收路径）。
+struct RegistryEntry final {
+  process::ProcessIdentity identity{};
+  bool adopted{false};
+};
+
 class ReaperWorker final : public executor::IBlockingIoWorker {
  public:
   ReaperWorker(int wake_read, executor::comm::MpscChannel<Command>& commands,
                executor::comm::MpscChannel<ExitEvent>& events,
                std::atomic<std::size_t>& registered_count,
-               std::atomic<std::uint64_t>& delivery_retries, std::atomic<bool>& stopping)
+               std::atomic<std::uint64_t>& delivery_retries, std::atomic<bool>& stopping,
+               std::function<void(bool)> request_adopted_timer,
+               std::function<void()> notify_listener)
       : wake_read_(wake_read),
         commands_(commands),
         events_(events),
         registered_count_(registered_count),
         delivery_retries_(delivery_retries),
-        stopping_(stopping) {}
+        stopping_(stopping),
+        request_adopted_timer_(std::move(request_adopted_timer)),
+        notify_impl_(std::move(notify_listener)) {}
 
   void run(executor::StopToken stop_token) override {
     while (!stop_token.stop_requested()) {
@@ -134,11 +151,37 @@ class ReaperWorker final : public executor::IBlockingIoWorker {
       command.completion.set_value({ExitRegisterCode::kDuplicate, "pid already registered"});
       return;
     }
-    registry_.emplace(pid, command.identity);
+    // 注册即分类：waitpid 探针返回 ECHILD 说明不是本进程的子进程（采纳进程，
+    // daemon 重启后恢复的 Job），退出只能经周期 /proc 探测发现且状态不可得；
+    // 探针返回 pid 说明注册前已退出且刚被本探针回收，立即投递真实状态。
+    int probe_status = 0;
+    const pid_t probed = ::waitpid(static_cast<pid_t>(pid), &probe_status, WNOHANG);
+    const bool adopted = probed < 0 && errno == ECHILD;
+
+    RegistryEntry entry;
+    entry.identity = command.identity;
+    entry.adopted = adopted;
+    registry_.emplace(pid, entry);
     registered_count_.store(registry_.size(), std::memory_order_relaxed);
+    update_adopted_timer();
     command.completion.set_value({ExitRegisterCode::kRegistered, {}});
-    // 注册后立即补扫该 PID，覆盖注册前已退出的竞态。
-    scan_one(pid, command.identity);
+    if (probed == static_cast<pid_t>(pid)) {
+      process::ExitStatus status;
+      if (WIFEXITED(probe_status)) {
+        status.reason = process::ExitReason::kExited;
+        status.exit_code = WEXITSTATUS(probe_status);
+      } else if (WIFSIGNALED(probe_status)) {
+        status.reason = process::ExitReason::kSignaled;
+        status.signal_number = WTERMSIG(probe_status);
+      }
+      deliver(make_exit_event(pid, command.identity, status, true), pid);
+      return;
+    }
+    // 注册后立即补扫该 PID，覆盖注册前已退出的竞态（采纳进程：/proc 消失路径）。
+    const auto iter = registry_.find(pid);
+    if (iter != registry_.end()) {
+      scan_one(pid, iter->second);
+    }
   }
 
   void apply_unregister(UnregisterCommand&& command) {
@@ -149,14 +192,15 @@ class ReaperWorker final : public executor::IBlockingIoWorker {
     }
     registry_.erase(iter);
     registered_count_.store(registry_.size(), std::memory_order_relaxed);
+    update_adopted_timer();
     command.completion.set_value({ExitUnregisterCode::kUnregistered, {}});
   }
 
   void scan_registered(const executor::StopToken& stop_token) {
     std::vector<std::int64_t> pids;
     pids.reserve(registry_.size());
-    for (const auto& [pid, identity] : registry_) {
-      static_cast<void>(identity);
+    for (const auto& [pid, entry] : registry_) {
+      static_cast<void>(entry);
       pids.push_back(pid);
     }
     for (const auto pid : pids) {
@@ -170,11 +214,16 @@ class ReaperWorker final : public executor::IBlockingIoWorker {
     }
   }
 
-  void scan_one(std::int64_t pid, const process::ProcessIdentity& identity) {
+  void scan_one(std::int64_t pid, RegistryEntry& entry) {
     const auto current_ticks = process::read_process_start_ticks(pid);
-    if (!current_ticks.has_value() || *current_ticks != identity.start_ticks) {
+    if (!current_ticks.has_value() || *current_ticks != entry.identity.start_ticks) {
       // /proc 不可读或启动时间不一致：PID 已被回收复用，无法获得真实退出状态。
-      deliver(make_exit_event(pid, identity, process::ExitStatus{}, false), pid);
+      deliver(make_exit_event(pid, entry.identity, process::ExitStatus{}, false), pid);
+      return;
+    }
+    if (entry.adopted) {
+      // 采纳进程：非子进程，waitpid 不可用；身份核验通过即仍在运行，退出由
+      // 周期探测在 /proc 消失后发现（状态 unknown，显式投递）。
       return;
     }
     int raw_status = 0;
@@ -191,13 +240,28 @@ class ReaperWorker final : public executor::IBlockingIoWorker {
         status.reason = process::ExitReason::kSignaled;
         status.signal_number = WTERMSIG(raw_status);
       }
-      deliver(make_exit_event(pid, identity, status, true), pid);
+      deliver(make_exit_event(pid, entry.identity, status, true), pid);
       return;
     }
     if (errno == ECHILD) {
       // 已被他人回收：状态不可知，显式投递 unknown。
-      deliver(make_exit_event(pid, identity, process::ExitStatus{}, false), pid);
+      deliver(make_exit_event(pid, entry.identity, process::ExitStatus{}, false), pid);
     }
+  }
+
+  void update_adopted_timer() {
+    if (!request_adopted_timer_) {
+      return;
+    }
+    bool any_adopted = false;
+    for (const auto& [pid, entry] : registry_) {
+      static_cast<void>(pid);
+      if (entry.adopted) {
+        any_adopted = true;
+        break;
+      }
+    }
+    request_adopted_timer_(any_adopted);
   }
 
   // 退出事件不可丢弃：容量满时有界重试并计数；停止请求期间放弃投递（事件留在
@@ -205,13 +269,21 @@ class ReaperWorker final : public executor::IBlockingIoWorker {
   void deliver(ExitEvent event, std::int64_t pid) {
     registry_.erase(pid);
     registered_count_.store(registry_.size(), std::memory_order_relaxed);
+    update_adopted_timer();
     while (!stopping_.load(std::memory_order_relaxed)) {
       const ExitEvent attempt = event;
       const auto result = events_.send_for(attempt, std::chrono::seconds{5});
       if (result.ok) {
+        notify_listener();
         return;
       }
       delivery_retries_.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+
+  void notify_listener() noexcept {
+    if (notify_impl_) {
+      notify_impl_();
     }
   }
 
@@ -222,7 +294,9 @@ class ReaperWorker final : public executor::IBlockingIoWorker {
   std::atomic<std::size_t>& registered_count_;
   std::atomic<std::uint64_t>& delivery_retries_;
   std::atomic<bool>& stopping_;
-  std::unordered_map<std::int64_t, process::ProcessIdentity> registry_;
+  std::function<void(bool)> request_adopted_timer_;
+  std::function<void()> notify_impl_;
+  std::unordered_map<std::int64_t, RegistryEntry> registry_;
 };
 
 }  // namespace
@@ -242,9 +316,14 @@ class ProcessExitMonitor::Impl final {
   executor::Executor& executor;
   std::atomic<std::size_t> registered_count{0};
   std::atomic<std::uint64_t> delivery_retries{0};
+  std::atomic<std::uint64_t> timer_failures{0};
   // blocking worker 由 Executor 持有；该指针在 start 后、stop 前有效，仅用于
   // 从调用方线程写入自管道唤醒。
   ReaperWorker* worker{nullptr};
+  std::function<void()> event_listener;
+  std::mutex timer_mutex;
+  std::mutex listener_mutex;
+  executor::TimerHandle timer;
   executor::WorkerHandle handle;
   struct sigaction previous_sigchld {};
   int wake_read{-1};
@@ -253,6 +332,60 @@ class ProcessExitMonitor::Impl final {
   bool started{false};
   bool stop_requested{false};
   bool signal_installed{false};
+  bool timer_active{false};
+
+  // 采纳进程的周期探测定时器：仅当注册表中存在采纳进程时保持激活。启动/取消
+  // 只发生在 worker 线程（注册表变更）与 stop（owner 线程），以 timer_mutex
+  // 串行化；tick 只写一个唤醒字节（非阻塞）。
+  void sync_adopted_timer(bool any_adopted) {
+    std::lock_guard<std::mutex> lock(timer_mutex);
+    if (worker_stopping.load(std::memory_order_relaxed)) {
+      return;
+    }
+    if (any_adopted && !timer_active) {
+      try {
+        const int fd = wake_write;
+        timer = executor.submit_periodic_with_handle(
+            static_cast<std::int64_t>(kAdoptedScanPeriod.count()), [fd]() noexcept {
+              if (fd < 0) {
+                return;
+              }
+              const char byte = 1;
+              ssize_t written = 0;
+              do {
+                written = ::write(fd, &byte, 1);
+              } while (written < 0 && errno == EINTR);
+            });
+        timer_active = true;
+      } catch (...) {
+        // 提交失败（如关闭中）：保持未激活，下一次注册表变更重试；采纳进程
+        // 的退出发现退化为仅依赖其他 SIGCHLD 唤醒，统计可见。
+        timer_failures.fetch_add(1, std::memory_order_relaxed);
+      }
+    } else if (!any_adopted && timer_active) {
+      static_cast<void>(timer.cancel());
+      timer_active = false;
+    }
+  }
+
+  void stop_adopted_timer() {
+    std::lock_guard<std::mutex> lock(timer_mutex);
+    if (timer_active) {
+      static_cast<void>(timer.cancel());
+      timer_active = false;
+    }
+  }
+
+  void notify_event_listener() noexcept {
+    std::function<void()> listener;
+    {
+      std::lock_guard<std::mutex> lock(listener_mutex);
+      listener = event_listener;
+    }
+    if (listener) {
+      listener();
+    }
+  }
 };
 
 ProcessExitMonitor::ProcessExitMonitor(executor::Executor& executor, std::size_t event_capacity,
@@ -289,7 +422,9 @@ ExitMonitorStartResult ProcessExitMonitor::start() {
 
   auto worker_storage = std::make_unique<ReaperWorker>(
       wake_pipe[0], impl_->commands, impl_->events, impl_->registered_count,
-      impl_->delivery_retries, impl_->worker_stopping);
+      impl_->delivery_retries, impl_->worker_stopping,
+      [impl = impl_.get()](bool any_adopted) { impl->sync_adopted_timer(any_adopted); },
+      [impl = impl_.get()]() noexcept { impl->notify_event_listener(); });
   worker_storage->set_wake_write(wake_pipe[1]);
 
   impl_->worker = worker_storage.get();
@@ -364,6 +499,11 @@ bool ProcessExitMonitor::receive_exit_for(ExitEvent& out, std::chrono::milliseco
   return impl_->events.receive_for(out, timeout).ok;
 }
 
+void ProcessExitMonitor::set_event_listener(std::function<void()> listener) {
+  std::lock_guard<std::mutex> lock(impl_->listener_mutex);
+  impl_->event_listener = std::move(listener);
+}
+
 std::size_t ProcessExitMonitor::registered_count() const noexcept {
   return impl_->registered_count.load(std::memory_order_relaxed);
 }
@@ -374,6 +514,7 @@ std::uint64_t ProcessExitMonitor::delivery_retry_count() const noexcept {
 
 void ProcessExitMonitor::stop() {
   impl_->worker_stopping.store(true, std::memory_order_relaxed);
+  impl_->stop_adopted_timer();
   if (!impl_->started) {
     impl_->stop_requested = true;
     return;

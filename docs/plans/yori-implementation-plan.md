@@ -1,7 +1,7 @@
 # Yori 实施总计划
 
 > 状态：Active
-> 版本：1.8
+> 版本：1.10
 > 更新日期：2026-09-10
 > 负责人：Linductor-alkaid
 > 设计依据：[Yori 项目设计文档](../design/yori-project-design.md)（v0.5）
@@ -56,8 +56,19 @@
   [#8](https://github.com/Linductor-alkaid/yori/pull/8) 最终 CI
   [全绿](https://github.com/Linductor-alkaid/yori/actions/runs/34400184509)
   （证据见 [M6 验证记录](m6-observability.md)）。
-- 当前里程碑：无（M6 已完成；M7 打包与 MVP 端到端验收可依序启动，含
-  守护总装收口前置项，见第 5 节）。
+- M7（打包与 MVP 端到端验收）已完成：守护总装收口（`JobManager` 调度
+  触发联动与进程守护、恢复采纳与 STOPPING 重取消、`SerialStateStore`
+  所有权串行化、`StoreTaskRunner` 写路径接入、启动 `PhaseGate`、EXEC-10
+  完整停止序与 RULE-10 abandon）、systemd unit 与安装打包、MVP §19 验收
+  矩阵（CI 项附证据）全部落地；PR [#11](https://github.com/Linductor-alkaid/yori/pull/11)
+  最终 CI [全绿](https://github.com/Linductor-alkaid/yori/actions/runs/34446034703)
+  （证据见 [M7 验证记录](m7-packaging-acceptance.md)）。
+- M1 收口（2026-09-10）：`M1-06`/`M1-07` 按 2026-09-04 范围决定不再独立
+  交付；其中 EXEC-09 启动 `PhaseGate` 与六场景闭环集成测试已由 M7 守护总装
+  承接（`m7.unit.job-manager`），触发合并未建独立 comm 层（由 JobManager
+  命令通道承载）。M1 里程碑随 M7 关闭（见 M1 文档 2026-09-10 收口记录）。
+- 当前里程碑：无（M0-M7 全部完成；`v0.1.0` tag 与 LICENSE 选定为负责人
+  授权的发布动作，真机验收补跑条件见 M7 验收矩阵）。
 - MVP 端到端验收以设计文档第 19 节判据为准，由 M7 执行并记录证据（见第 10 节）。
 - 里程碑文档在各自启动时创建（工程规范第 2 节）；当前实体文件：M0、M1、M2、
   M3、M4、M5、M6。
@@ -118,10 +129,10 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | `EXEC-03` | `logs -f` 会话与日志管道读取（log pump） | blocking worker | LogStreamer | wakeup + 关闭管道读端；订阅者断开不影响落盘主路径 | ② 断开跟随会话（`EOF`/错误帧） |
 | `EXEC-04` | 日志块订阅分发 | `executor::comm::Topic<LogChunk>`（每 Job 一个），每订阅者有界队列 | LogStreamer | 队列满即断开订阅并回 `BACKPRESSURE`，不静默丢弃 | ② |
 | `EXEC-05` | NVML 遥测采样与外部占用扫描 | `submit_periodic` + `TimerHandle`（允许抖动） | GpuManager | 取消 `TimerHandle` | ③ |
-| `EXEC-06` | Job 状态推进与调度触发 | 事件驱动有限任务 `submit_auto()`，保留并消费 future；排队取消用 `submit_cancellable` + `StopToken` | JobManager / Scheduler | 触发事件：新提交、Job 退出、取消、GPU 状态变化、恢复完成、管理员操作 | ④ 停止调度生产者 |
+| `EXEC-06` | Job 状态推进与调度触发 | M7 已落地：触发经 JobManager blocking worker 的命令通道汇聚（submit/cancel 命令、退出监视与 GPU 事件监听回调唤醒），调度单元仍由 `SchedulerTaskRunner` 以 `submit_cancellable()` 承载（worker 触发后立即消费结果）；队列变更只发生在该 worker 与启动前恢复路径 | JobManager / Scheduler | 触发事件：新提交、Job 退出、取消、GPU 状态变化、恢复完成、管理员操作 | ④ 停止调度生产者 |
 | `EXEC-07` | 进程退出监视与回收（waitpid） | blocking worker 或可取消有限任务 | ProcessSupervisor | wakeup；Job 取消为进程组 `SIGTERM` -> grace -> `SIGKILL`（Yori 外部进程语义，不与 Executor 任务取消混同） | ⑤ |
-| `EXEC-08` | SQLite 写入与恢复读取 | 写路径经 `StoreTaskRunner`（M4 已落地：单在飞 `submit_cancellable`，逐条 FIFO 由生产者组合 revision，前一结果未消费即 `BUSY`）；恢复读取为 daemon 启动序列的有界同步单元（`EXEC-09` 启动 `PhaseGate` 随总装接入） | StoreTaskRunner / daemon 主生命周期 | 排队期取消 + `TaskCancelled` 显式结果；admission 拒绝显式化 | ⑦ 等待终态落盘完成 |
-| `EXEC-09` | 状态快照、更新与启动协调 | GPU/调度状态快照 `DoubleBuffer`；Job 状态更新 `MpscChannel`/`LatestMailbox`（按语义）；启动阶段 `PhaseGate`（恢复 -> GPU 观察 -> 调度开启） | 对应组件 | 快照无取消语义，随组件回收 | ⑥ |
+| `EXEC-08` | SQLite 写入与恢复读取 | M7 已接入：全部运行期 mutation 经 JobManager worker 组合并由 `StoreTaskRunner` 执行（单在飞、逐条 FIFO、revision 组合）；IPC 读路径与写的并发经 `SerialStateStore` 所有权互斥串行化；恢复读取为 daemon 启动序列的有界同步单元 | StoreTaskRunner / JobManager worker / daemon 主生命周期 | 排队期取消 + `TaskCancelled` 显式结果；admission 拒绝显式化 | ⑦ 等待终态落盘完成（JobManager worker 串行路径内闭合） |
+| `EXEC-09` | 状态快照、更新与启动协调 | M7 已落地：GPU 快照 `DoubleBuffer`（M3）保持；启动阶段 `PhaseGate`（恢复 -> GPU 观察 -> 调度开启）由 Daemon 持有、JobManager 消费（未达调度阶段不消费调度事件）；Job 状态更新的独立 comm 通道未建（M1-06 范围决定，由 JobManager 命令通道承载） | 对应组件 | 快照无取消语义，随组件回收 | ⑥ |
 
 `EXEC-10`（daemon 关闭顺序，依据 AGENTS.md 第 7 条与设计 §11.7）：
 ① 停止 IPC 生产者与新连接 -> ② 断开 `logs -f` 跟随会话 -> ③ 停止 NVML 周期任务 ->
@@ -135,13 +146,13 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | 里程碑 | 名称 | 前置 | 能力增量 | 建议发布点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
 | M0 | 工程骨架与基线 | 无 | CMake/CI/测试标签/规范工具/文档框架、Executor 锁定校验 | 无（内部基线） | Completed |
-| M1 | 核心域契约与进程内调度闭环 | M0 | JobSpec、状态机、全局队列、FIFO 调度、GPU lease 记账；内存 StateStore 与伪 GpuProvider 下的进程内可测闭环 | 无 | In Progress |
+| M1 | 核心域契约与进程内调度闭环 | M0 | JobSpec、状态机、全局队列、FIFO 调度、GPU lease 记账；内存 StateStore 与伪 GpuProvider 下的进程内可测闭环 | 无 | Completed（2026-09-10 随 M7 收口，M1-06/07 见第 1 节） |
 | M2 | 进程守护与启动适配 | M1 | ProcessSupervisor（spawn、进程组、取消、退出回收）、LaunchProfile、`exec` 前降权、日志捕获与落盘 | 无 | Completed |
 | M3 | NVML 真实 GPU 集成 | M2 | `GpuProvider` NVML 适配：发现、UUID 身份、遥测、外部占用检测（`EXTERNAL_BUSY`）；`GpuManager` 周期采样（`EXEC-05`/`EXEC-09` GPU 快照） | 无 | Completed |
 | M4 | 持久化与恢复 | M2 | SQLite StateStore、daemon 重启恢复、PID reuse 核验、`LOST` 语义 | 无 | Completed |
 | M5 | IPC 与 CLI | M3、M4 | UDS 传输、`SO_PEERCRED` 鉴权、请求/响应协议与 owner/admin 授权、`submit`/`ps`/`queue`/`gpu`/`cancel`/`logs` 快照、IPC fuzz 起步 | 无 | Completed |
 | M6 | 观察面 | M5 | `logs -f` 流式帧（offset 续传、`GAP`/`EOF`/`BACKPRESSURE`）、日志轮转、`yori tensorboard` | 无 | Completed |
-| M7 | 打包与 MVP 端到端验收 | M6 | systemd unit、安装打包、设计 §19 判据逐项验收 | `v0.1.0`（MVP） | Planned |
+| M7 | 打包与 MVP 端到端验收 | M6 | systemd unit、安装打包、设计 §19 判据逐项验收；前置：守护总装收口 | `v0.1.0`（MVP；tag/发布需负责人授权） | Completed |
 
 - M3 与 M4 在 M2 完成后可并行推进。
 - 里程碑文件命名 `m<N>-<scope>.md`，在该里程碑启动时创建；当前实体文件：
@@ -151,7 +162,8 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
   [M3 NVML 真实 GPU 集成](m3-nvml-gpu-integration.md)、
   [M4 持久化与恢复](m4-persistence-recovery.md)、
   [M5 IPC 与 CLI](m5-ipc-cli.md)、
-  [M6 观察面](m6-observability.md)。
+  [M6 观察面](m6-observability.md)、
+  [M7 打包与 MVP 端到端验收](m7-packaging-acceptance.md)。
 
 ## 6. 暂定默认值与未决问题
 
@@ -213,7 +225,7 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | `POST-05` | TUI | MVP 稳定且出现交互需求 | §16.2 |
 | `POST-06` | Web UI、Container backend、Job dependency、Reservation、GPU affinity、MIG | MVP 与第二阶段稳定后逐项评估 | §16.3 |
 | `POST-07` | Heyaki transport、Central Scheduler、多节点调度 | 单节点容量饱和或出现跨服务器调度需求 | §15、§16.3 |
-| `POST-08` | pidfd 进程生命周期增强 | 实现守护时确认 wait + 启动时间核验不足 | §10.2 |
+| `POST-08` | pidfd 进程生命周期增强 | 守护总装（M7）已确认 wait + 启动时间核验的不足：采纳进程（daemon 重启后恢复的 Job）非子进程，自然退出的状态不可得（FAILED + 显式原因），且退出发现有约 1 个探测周期的延迟；pidfd（`waitid(P_PIDFD)`）可消除两者 | §10.2、§6.2 |
 | `POST-09` | 拆分 `yori-launch-helper`（最小特权 launcher） | MVP 稳定后的安全演进 | §5、DEC-004 |
 | `POST-10` | daemon 托管常驻指标面板 | 用户提出常驻 TensorBoard 需求；届时必须新建设计与决策记录 | §11.6、DEC-003 |
 
@@ -234,7 +246,8 @@ CI 无法覆盖的项按工程规范第 4 节保持未勾选并记录原因与�
   [M3 NVML 真实 GPU 集成](m3-nvml-gpu-integration.md)、
   [M4 持久化与恢复](m4-persistence-recovery.md)、
   [M5 IPC 与 CLI](m5-ipc-cli.md)、
-  [M6 观察面](m6-observability.md)
+  [M6 观察面](m6-observability.md)、
+  [M7 打包与 MVP 端到端验收](m7-packaging-acceptance.md)
 - 决策：[DEC-001 Executor 依赖引入与锁定](../decisions/DEC-001-executor-pinning.md)、
   [DEC-002 MVP 纳入训练观察面](../decisions/DEC-002-mvp-observability.md)、
   [DEC-003 TensorBoard 由 CLI 拉起](../decisions/DEC-003-tensorboard-cli-hosting.md)、

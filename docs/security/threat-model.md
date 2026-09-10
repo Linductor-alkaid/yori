@@ -54,7 +54,7 @@ yori CLI（用户会话） --> tensorboard 子进程（用户身份，默认 127
 | 5 | 环境变量白名单继承 | 凭据泄漏到用户 Job | M2 | 白名单外变量不出现 |
 | 6 | `/run/yori/yori.sock` 权限收敛 | 未授权连接 | M5/M7（M5 已落地非 root 部分） | bind 以收紧 umask 创建 + 显式 chmod/chown（Linux fchmod 对 socket fd 不生效）；非 socket 陈旧文件拒绝替换；模式/属主断言（`m5.unit.ipc-server`）；root+yori 组的完整收敛在 M7 root 环境补跑（DEC-010） |
 | 7 | 查询/日志/取消/观察执行 owner/admin 授权 | 跨用户越权 | M5/M6（M5 已落地查询/日志快照/取消） | owner/admin/第三方授权矩阵与脱敏字段断言（`m5.unit.ipc-service`）；admin 组成员启动时解析、主 GID+补充组双路径（DEC-010）；M6 补流式观察 |
-| 8 | 日志路径、cwd、runtime 与持久化目录防符号链接攻击 | 路径逃逸/文件覆盖 | M2/M7（持久化文件 M4 已落地；日志读取 M5 已落地） | 日志 `O_NOFOLLOW` 断言（M2）；数据库文件为符号链接时拒绝打开、打开后收敛 `0600`（M4 已落地：`m4.unit.sqlite-state-store`）；logs 快照尾部读取 `O_NOFOLLOW`、非常规文件拒绝（M5 已落地：`m5.unit.ipc-service`）；父目录链属主校验留 M7 |
+| 8 | 日志路径、cwd、runtime 与持久化目录防符号链接攻击 | 路径逃逸/文件覆盖 | M2/M4/M5/M7（守护总装已落地日志根目录校验） | 日志 `O_NOFOLLOW` 断言（M2）；数据库文件为符号链接时拒绝打开、打开后收敛 `0600`（M4 已落地：`m4.unit.sqlite-state-store`）；logs 快照尾部读取 `O_NOFOLLOW`、非常规文件拒绝（M5 已落地：`m5.unit.ipc-service`）；M7 守护总装落地日志根目录与 Job 子目录的属主/写位链校验（`JobManager::start` 的 `prepare_log_root`：每级真实目录、属主 root 或 daemon euid、无组/其他写位——带 sticky 的 `/tmp` 例外；Job 子目录 mkdir `0750` 后 `lstat` 复核拒绝符号链接）；cwd 的 `chdir` 在子进程降权（`setuid`）之后执行（M2 顺序），符号链接逃逸只影响提交用户自身，不构成 daemon 侧威胁 |
 | 9 | 特权 daemon 的 IPC parser 与 launch path 保持最小 | root 进程 RCE | M5（已落地） | parser 为纯字节解码、无分配前未验证计数、无解释执行；确定性 fuzz 集（种子化翻转/截断/超载变异）覆盖请求与响应两个方向（`m5.fuzz.ipc-parser`，sanitizer 下运行） |
 | 10 | 外部 GPU 进程只影响资源状态，不主动终止或接管 | 误杀用户进程 | M3 | `EXTERNAL_BUSY` 测试（M3 已落地：`m3.unit.nvml-gpu-provider` 外部占用仅改变观测状态、无信号/接管路径；适配器只读 NVML；2026-09-10 真实 RTX 4080 SUPER 补跑以临时 CUDA 进程验证 `EXTERNAL_BUSY -> FREE`，进程仅由测试 owner 自行清理） |
 | 11 | 长期拆分 privileged launcher（`yori-launch-helper`） | 缩小 TCB | `POST-09` | 非本 MVP |
@@ -92,8 +92,9 @@ yori CLI（用户会话） --> tensorboard 子进程（用户身份，默认 127
 ## 6. 待完成项
 
 - [x] M2 实施前：launch path 与降权序列的威胁细化 —— 已随 M2 落地为基线条目
-  16-19（fork 前构造、fd 收敛、保留键、SIGPIPE/日志打开方式）；cwd 父目录链
-  属主校验仍留给 M7。
+  16-19（fork 前构造、fd 收敛、保留键、SIGPIPE/日志打开方式）；cwd 的父目录链
+  属主校验经 M7 复核收敛：`chdir` 位于子进程 `setuid` 之后，目录选择只影响
+  提交用户自身，不构成特权侧攻击面（基线 8 已更新）。
 - [x] M4 实施前：持久化与恢复的威胁细化 —— 已随 M4 落地为基线条目 21
   （恢复不重启、PID reuse 核验、篡改显式失败），并更新基线 8/13 的 M4 部分
   （数据库符号链接拒绝、事务回滚负向测试）。
@@ -107,7 +108,13 @@ yori CLI（用户会话） --> tensorboard 子进程（用户身份，默认 127
   流式帧 fuzz 与 golden vector、无日志源不伪造流）与 25（TENSORBOARD 查询
   授权、CLI 侧拉起与回环默认监听），并收口基线 7/9 的 M6 部分（流式观察
   纳入 owner/admin 授权；fuzz 集扩展至流式帧方向）。
-- [ ] M7 发布前：全模型复查、残留风险清单定稿，本文件升级为 Active。
+- [x] M7 实施中：守护总装（JobManager、恢复采纳、取消升级、日志目录创建）
+  的威胁细化 —— 已收口基线 8 的父目录链校验（日志根目录 + Job 子目录属主/
+  写位/符号链接拒绝）；采纳进程退出状态不可得（恢复后自然退出为 FAILED +
+  显式原因，pidfd 增强见 `POST-08`）记入残留风险；daemon 关闭 abandon 不发
+  信号（RULE-10）不扩大攻击面。
+- [ ] M7 发布前：全模型复查、残留风险清单定稿，本文件升级为 Active（含
+  root/systemd/双用户真机验收后的基线 6 root 收敛复核）。
 - [ ] root 环境补跑：`m2.security.process-demotion`（DEC-004 降权身份断言，
   非 root 环境显式 skip；补跑条件：root 下设置 `YORI_DEMOTION_TEST_UID`/
   `YORI_DEMOTION_TEST_GID` 后运行 `ctest -L multi-user`）。
