@@ -35,7 +35,7 @@ yori submit 提交 Job -> yorid 全局队列排队 -> Scheduler 匹配空闲 GPU
 `yori_<version>_<arch>.deb`，在服务器上安装：
 
 ```bash
-sudo apt install ./yori_0.1.2_amd64.deb
+sudo apt install ./yori_0.1.3_amd64.deb
 ```
 
 安装即完成：`yori`/`yorid` 进入 PATH、创建 `yori` 系统组、写入
@@ -84,6 +84,31 @@ yori cancel 1                                     # 取消（排队期或运行�
 提交选项：`--gpus N`（MVP 仅 1）、`--cwd DIR`、`--env K=V`、
 `--tensorboard-logdir DIR`；命令以 `--` 分隔。CLI 全局 `--socket` 或
 `YORI_SOCKET` 指定端点（默认 `/run/yori/yori.sock`）。
+
+### 训练环境（conda / venv）
+
+任务环境**不继承**提交会话（DEC-006：环境只来自 daemon 白名单 + 显式
+`--env`，保证可复现、不泄漏会话变量），`HOME`/`USER` 等身份变量由 daemon
+按提交用户注入。训练在特定 conda 环境运行时，任选其一（venv 同理）：
+
+```bash
+# A. 推荐：直接用环境的绝对路径解释器（python 按自身路径定位 site-packages）
+yori submit --cwd ~/train -- ~/miniconda3/envs/rl/bin/python train.py
+
+# B. 标准 conda 激活语义：经登录 shell 加载你自己的 conda init（bash -l 读
+#    ~/.profile -> ~/.bashrc）。LD_LIBRARY_PATH 等激活副作用在 Job 内自然
+#    生效（--env 不能传保留键 LD_LIBRARY_PATH，shell 内激活不受此限）。
+yori submit --cwd ~/train -- /bin/bash -lc 'conda activate rl && python train.py'
+
+# C. conda run（--no-capture-output 保证 logs -f 实时流式）
+yori submit --cwd ~/train -- ~/miniconda3/bin/conda run -n rl --no-capture-output \
+    python train.py
+```
+
+每个用户的 conda 装在自己家目录下也没关系：Job 以提交用户身份运行（含其
+supplementary groups），`HOME` 指向该用户家目录，方案 B 经各自的 shell 配置
+定位各自的 conda。也可用 `--env PATH=...`、`--env CONDA_DEFAULT_ENV=...`
+显式覆盖（用户 `--env` 最后合并，可覆盖 daemon 的 PATH）。
 
 ## 运维要点
 

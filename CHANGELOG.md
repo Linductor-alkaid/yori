@@ -3,6 +3,16 @@
 本文件记录 Yori 的版本化变更（工程规范第 10.5 节）。日期为 YYYY-MM-DD；
 条目按版本倒序排列。未发布条目置于 `## Unreleased`。
 
+## v0.1.3 - 2026-09-10
+
+### 修复
+
+- **CLI 连接错误区分权限拒绝**：`connect(2)` 的 EACCES/EPERM 此前与其他
+  连接失败同报 "connect failed"，误导排查（真机案例：用户已在 `yori` 组但
+  当前会话未重新登录，`usermod` 只对新登录生效）。现显式报
+  "permission denied (this session lacks the socket group; re-login or
+  newgrp yori ...)"。
+
 ## v0.1.2 - 2026-09-10
 
 ### 修复
