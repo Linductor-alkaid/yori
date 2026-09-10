@@ -78,15 +78,114 @@ struct Fixture final {
   FakeLogReader log_reader;
 };
 
+// 服务层测试的 JobControl 假实现（M7 起 submit/cancel 委派给守护承载）：执行
+// 与 JobManager 相同的 store/queue 变更语义（创建 + 准入 + 回滚 / QUEUED 取消），
+// 使本测试聚焦授权、脱敏与响应映射；完整承载语义由 JobManager 测试覆盖。
+class FakeJobControl final : public JobControl {
+ public:
+  explicit FakeJobControl(Fixture& fixture) : fixture_(fixture) {}
+
+  JobSubmitOutcome submit_job(const yori::job::JobSpec& spec) override {
+    const auto load = fixture_.store.load();
+    if (!load.ok()) {
+      return JobSubmitOutcome{JobSubmitOutcome::Code::kStoreFailed, 0,
+                              yori::store::to_string(load.code)};
+    }
+    std::uint64_t max_id = 0;
+    for (const auto& record : load.snapshot.jobs) {
+      max_id = std::max(max_id, record.id.value());
+    }
+    yori::store::StoredJob record;
+    record.id = JobId{max_id + 1};
+    record.spec = spec;
+    record.state = JobState::kQueued;
+    record.revision = 0;
+
+    yori::store::StateMutation mutation;
+    mutation.expected_revision = load.snapshot.revision;
+    mutation.create_jobs.push_back(record);
+    const auto write = fixture_.store.apply(mutation);
+    if (!write.ok()) {
+      return JobSubmitOutcome{JobSubmitOutcome::Code::kStoreFailed, 0,
+                              yori::store::to_string(write.code)};
+    }
+    const auto admission = fixture_.queue->admit(record);
+    if (!admission.ok()) {
+      yori::store::StoredJob cancelled = record;
+      cancelled.state = JobState::kCancelled;
+      cancelled.revision = 1;
+      yori::store::StateMutation rollback;
+      rollback.expected_revision = write.revision;
+      rollback.update_jobs.push_back(std::move(cancelled));
+      const auto rollback_write = fixture_.store.apply(rollback);
+      std::string detail = yori::queue::to_string(admission.code);
+      if (!rollback_write.ok()) {
+        detail += std::string("; rollback failed: ") + yori::store::to_string(rollback_write.code);
+      }
+      return JobSubmitOutcome{JobSubmitOutcome::Code::kQueueRejected, 0, detail};
+    }
+    return JobSubmitOutcome{JobSubmitOutcome::Code::kSubmitted, record.id.value(), {}};
+  }
+
+  JobCancelOutcome cancel_job(std::uint64_t job_id) override {
+    const auto load = fixture_.store.load();
+    if (!load.ok()) {
+      return JobCancelOutcome{JobCancelOutcome::Code::kStoreFailed, 0,
+                              yori::store::to_string(load.code)};
+    }
+    const yori::store::StoredJob* record = nullptr;
+    for (const auto& candidate : load.snapshot.jobs) {
+      if (candidate.id.value() == job_id) {
+        record = &candidate;
+        break;
+      }
+    }
+    if (record == nullptr) {
+      return JobCancelOutcome{JobCancelOutcome::Code::kNotFound, 0, "job not found"};
+    }
+    if (record->state == JobState::kCancelled) {
+      return JobCancelOutcome{
+          JobCancelOutcome::Code::kCancelled, static_cast<std::uint8_t>(JobState::kCancelled), {}};
+    }
+    if (record->state == JobState::kQueued) {
+      yori::store::StoredJob cancelled = *record;
+      cancelled.state = JobState::kCancelled;
+      cancelled.revision = record->revision + 1;
+      yori::store::StateMutation mutation;
+      mutation.expected_revision = load.snapshot.revision;
+      mutation.update_jobs.push_back(std::move(cancelled));
+      const auto write = fixture_.store.apply(mutation);
+      if (!write.ok()) {
+        return JobCancelOutcome{JobCancelOutcome::Code::kStoreFailed, 0,
+                                yori::store::to_string(write.code)};
+      }
+      static_cast<void>(fixture_.queue->remove(JobId{job_id}));
+      return JobCancelOutcome{
+          JobCancelOutcome::Code::kCancelled, static_cast<std::uint8_t>(JobState::kCancelled), {}};
+    }
+    if (record->state == JobState::kStarting || record->state == JobState::kRunning ||
+        record->state == JobState::kStopping) {
+      return JobCancelOutcome{
+          JobCancelOutcome::Code::kStopping, static_cast<std::uint8_t>(JobState::kStopping), {}};
+    }
+    return JobCancelOutcome{JobCancelOutcome::Code::kInvalidState,
+                            static_cast<std::uint8_t>(record->state),
+                            yori::job::to_string(record->state)};
+  }
+
+ private:
+  Fixture& fixture_;
+};
+
 IpcServiceConfig service_config() {
   IpcServiceConfig config;
   config.admin_gids = {kAdminGid};
   return config;
 }
 
-IpcService make_service(Fixture& fixture) {
-  return IpcService(service_config(), *fixture.queue, fixture.store, fixture.gpu_status,
-                    fixture.log_reader);
+IpcService make_service(Fixture& fixture, FakeJobControl& control) {
+  return IpcService(service_config(), fixture.store, fixture.gpu_status, fixture.log_reader,
+                    control);
 }
 
 IpcResponse submit(IpcService& service, std::uint32_t uid, std::uint32_t gid,
@@ -168,7 +267,8 @@ void seed_job(yori::testing::InMemoryStateStore& store, JobId id, std::uint32_t 
 
 void test_submit_basics() {
   Fixture fixture;
-  IpcService service = make_service(fixture);
+  FakeJobControl control(fixture);
+  IpcService service = make_service(fixture, control);
 
   const IpcResponse first = submit(service, kAliceUid, kAliceGid);
   YORI_CHECK(first.error == IpcError::kNone && first.job_id == 1);
@@ -209,7 +309,8 @@ void test_queue_capacity_rollback() {
   yori::queue::QueueConfig config;
   config.capacity = 1;
   fixture.queue = GlobalJobQueue::create(config, error);
-  IpcService service = make_service(fixture);
+  FakeJobControl control(fixture);
+  IpcService service = make_service(fixture, control);
 
   const IpcResponse first = submit(service, kAliceUid, kAliceGid);
   YORI_CHECK(first.error == IpcError::kNone && first.job_id == 1);
@@ -233,7 +334,8 @@ void test_queue_capacity_rollback() {
 
 void test_ps_masking_and_admin() {
   Fixture fixture;
-  IpcService service = make_service(fixture);
+  FakeJobControl control(fixture);
+  IpcService service = make_service(fixture, control);
   YORI_CHECK(submit(service, kAliceUid, kAliceGid).error == IpcError::kNone);
   YORI_CHECK(submit(service, kBobUid, kBobGid).error == IpcError::kNone);
 
@@ -257,8 +359,8 @@ void test_ps_masking_and_admin() {
   // admin_uids（补充组解析结果）同样生效。
   IpcServiceConfig with_admin_uid = service_config();
   with_admin_uid.admin_uids = {kBobUid};
-  IpcService uid_admin(with_admin_uid, *fixture.queue, fixture.store, fixture.gpu_status,
-                       fixture.log_reader);
+  IpcService uid_admin(with_admin_uid, fixture.store, fixture.gpu_status, fixture.log_reader,
+                       control);
   const IpcResponse uid_admin_view = call_ps(uid_admin, kBobUid, kBobGid);
   YORI_CHECK(!uid_admin_view.jobs[0].masked);
 }
@@ -267,7 +369,8 @@ void test_ps_limit() {
   Fixture fixture;
   IpcServiceConfig config = service_config();
   config.max_listed_jobs = 2;
-  IpcService service(config, *fixture.queue, fixture.store, fixture.gpu_status, fixture.log_reader);
+  FakeJobControl control(fixture);
+  IpcService service(config, fixture.store, fixture.gpu_status, fixture.log_reader, control);
   for (int i = 0; i < 3; ++i) {
     YORI_CHECK(submit(service, kAliceUid, kAliceGid).error == IpcError::kNone);
   }
@@ -277,7 +380,8 @@ void test_ps_limit() {
 
 void test_queue_listing() {
   Fixture fixture;
-  IpcService service = make_service(fixture);
+  FakeJobControl control(fixture);
+  IpcService service = make_service(fixture, control);
   YORI_CHECK(submit(service, kAliceUid, kAliceGid).error == IpcError::kNone);
   YORI_CHECK(submit(service, kBobUid, kBobGid).error == IpcError::kNone);
 
@@ -296,7 +400,8 @@ void test_queue_listing() {
 
 void test_gpu_view() {
   Fixture fixture;
-  IpcService service = make_service(fixture);
+  FakeJobControl control(fixture);
+  IpcService service = make_service(fixture, control);
 
   // 无观测：显式不可用。
   const IpcResponse unavailable = call_gpu(service);
@@ -356,7 +461,8 @@ void test_gpu_view() {
 
 void test_cancel_matrix() {
   Fixture fixture;
-  IpcService service = make_service(fixture);
+  FakeJobControl control(fixture);
+  IpcService service = make_service(fixture, control);
   YORI_CHECK(submit(service, kAliceUid, kAliceGid).error == IpcError::kNone);
 
   // 不存在。
@@ -392,8 +498,9 @@ void test_cancel_matrix() {
   YORI_CHECK(fixture.store.apply(finish).ok());
   YORI_CHECK(call_cancel(service, kAliceUid, 9).error == IpcError::kNone);
 
-  // RUNNING（恢复采纳的 Job）：M5 无进程守护，显式 kUnsupported。lease 不变量
-  // （STARTING 恰好一个 lease）在同一 mutation 内满足。
+  // RUNNING（恢复采纳的 Job）：活动态取消经 JobControl 委派（M7 守护总装），
+  // 假实现返回 kStopping；lease 不变量（STARTING 恰好一个 lease）在同一
+  // mutation 内满足。
   seed_job(fixture.store, JobId{10}, kAliceUid, JobState::kQueued);
   yori::store::StoredJob starting = fixture.store.load().snapshot.jobs.back();
   starting.state = JobState::kStarting;
@@ -404,13 +511,14 @@ void test_cancel_matrix() {
   to_starting.acquire_leases.push_back(yori::gpu::GpuLease{yori::gpu::GpuUuid{"GPU-c"}, JobId{10}});
   YORI_CHECK(fixture.store.apply(to_starting).ok());
   const IpcResponse running_cancel = call_cancel(service, kAliceUid, 10);
-  YORI_CHECK(running_cancel.error == IpcError::kUnsupported);
-  YORI_CHECK(static_cast<JobState>(running_cancel.state) == JobState::kStarting);
+  YORI_CHECK(running_cancel.error == IpcError::kNone);
+  YORI_CHECK(static_cast<JobState>(running_cancel.state) == JobState::kStopping);
 }
 
 void test_logs() {
   Fixture fixture;
-  IpcService service = make_service(fixture);
+  FakeJobControl control(fixture);
+  IpcService service = make_service(fixture, control);
 
   YORI_CHECK(submit(service, kAliceUid, kAliceGid).error == IpcError::kNone);
   // 未启动：QUEUED Job 无 log_path。
@@ -534,7 +642,8 @@ void seed_started_job(yori::testing::InMemoryStateStore& store, JobId id, std::u
 
 void test_logs_follow_validation() {
   Fixture fixture;
-  IpcService service = make_service(fixture);
+  FakeJobControl control(fixture);
+  IpcService service = make_service(fixture, control);
 
   auto follow_request = [](std::uint64_t job_id) {
     IpcRequest request;
@@ -580,7 +689,8 @@ void test_logs_follow_validation() {
 
 void test_tensorboard_query() {
   Fixture fixture;
-  IpcService service = make_service(fixture);
+  FakeJobControl control(fixture);
+  IpcService service = make_service(fixture, control);
 
   auto tensorboard_request = [](std::uint64_t job_id) {
     IpcRequest request;

@@ -255,6 +255,48 @@ yori_apply_warnings(unit_log_follow_test)
 add_test(NAME m6.unit.log-follow COMMAND unit_log_follow_test)
 set_tests_properties(m6.unit.log-follow PROPERTIES LABELS "unit;ipc" TIMEOUT 120)
 
+# ---- unit：ProcessSupervisor adopt/abandon（M7-01，恢复采纳与 RULE-10）-----
+add_executable(unit_process_supervisor_adopt_test unit_process_supervisor_adopt_test.cpp)
+target_link_libraries(unit_process_supervisor_adopt_test PRIVATE yori::yori_core yori::test_support)
+yori_apply_warnings(unit_process_supervisor_adopt_test)
+add_test(NAME m7.unit.supervisor-adopt COMMAND unit_process_supervisor_adopt_test)
+set_tests_properties(m7.unit.supervisor-adopt PROPERTIES LABELS "unit" TIMEOUT 60)
+
+# ---- unit：SerialStateStore 所有权串行化（M7-02）---------------------------
+add_executable(unit_serial_state_store_test unit_serial_state_store_test.cpp)
+target_link_libraries(unit_serial_state_store_test
+  PRIVATE yori::yori_core yori::runtime yori::test_support executor::executor)
+yori_apply_warnings(unit_serial_state_store_test)
+add_test(NAME m7.unit.serial-state-store COMMAND unit_serial_state_store_test)
+set_tests_properties(m7.unit.serial-state-store PROPERTIES LABELS "unit" TIMEOUT 60)
+
+# ---- unit：JobManager 守护承载（M7-03，六场景 + Yori 特有）------------------
+add_executable(unit_job_manager_test unit_job_manager_test.cpp)
+target_link_libraries(unit_job_manager_test
+  PRIVATE yori::yori_core yori::runtime yori::test_support executor::executor)
+yori_apply_warnings(unit_job_manager_test)
+add_test(NAME m7.unit.job-manager COMMAND unit_job_manager_test)
+set_tests_properties(m7.unit.job-manager PROPERTIES LABELS "unit;recovery" TIMEOUT 180)
+
+# ---- unit：ExitMonitor 采纳进程退出探测（M7-01，非子进程路径）--------------
+add_executable(unit_exit_monitor_adopted_test unit_exit_monitor_adopted_test.cpp)
+target_link_libraries(unit_exit_monitor_adopted_test
+  PRIVATE yori::yori_core yori::runtime yori::test_support executor::executor)
+yori_apply_warnings(unit_exit_monitor_adopted_test)
+add_test(NAME m7.unit.exit-monitor-adopted COMMAND unit_exit_monitor_adopted_test)
+set_tests_properties(m7.unit.exit-monitor-adopted PROPERTIES LABELS "unit" TIMEOUT 60)
+
+# ---- integration;recovery：守护总装收口 daemon 级闭环（M7-04）--------------
+# 提交->调度->spawn->退出->FINISHED；daemon 关闭不终止训练（RULE-10）；重启
+# 恢复采纳 RUNNING（RULE-06）与 QUEUED 重入队；采纳取消收敛与队首推进。
+add_executable(integration_supervision_closure_test integration_supervision_closure_test.cpp)
+target_link_libraries(integration_supervision_closure_test
+  PRIVATE yori::yori_core yori::sqlite yori::runtime yori::test_support executor::executor)
+yori_apply_warnings(integration_supervision_closure_test)
+add_test(NAME m7.integration.supervision-closure COMMAND integration_supervision_closure_test)
+set_tests_properties(m7.integration.supervision-closure PROPERTIES
+  LABELS "integration;recovery" TIMEOUT 180)
+
 # ---- integration;ipc：logs -f / tensorboard 全链路（M6-05）-------------------
 # 真实子进程产日志 -> LogPump 观察者 -> LogStreamer -> 会话 worker -> UDS ->
 # 真实 yori CLI；tensorboard 以 PATH 注入假二进制验证 CLI 契约。
