@@ -2,7 +2,7 @@
 
 > 状态：Draft（骨架版；完整 STRIDE 分析随 M5/M6 工作项完成，完成后升级为
 > Active）
-> 日期：2026-09-09
+> 日期：2026-09-10
 > 负责人：Linductor-alkaid
 > 依据：[设计文档](../design/yori-project-design.md)第 5、11.5、17 节、
 > [AGENTS.md](../../AGENTS.md) 安全条款、[DEC-004](../decisions/DEC-004-privileged-daemon-demotion.md)
@@ -56,7 +56,7 @@ yori CLI（用户会话） --> tensorboard 子进程（用户身份，默认 127
 | 7 | 查询/日志/取消/观察执行 owner/admin 授权 | 跨用户越权 | M5/M6（M5 已落地查询/日志快照/取消） | owner/admin/第三方授权矩阵与脱敏字段断言（`m5.unit.ipc-service`）；admin 组成员启动时解析、主 GID+补充组双路径（DEC-010）；M6 补流式观察 |
 | 8 | 日志路径、cwd、runtime 与持久化目录防符号链接攻击 | 路径逃逸/文件覆盖 | M2/M7（持久化文件 M4 已落地；日志读取 M5 已落地） | 日志 `O_NOFOLLOW` 断言（M2）；数据库文件为符号链接时拒绝打开、打开后收敛 `0600`（M4 已落地：`m4.unit.sqlite-state-store`）；logs 快照尾部读取 `O_NOFOLLOW`、非常规文件拒绝（M5 已落地：`m5.unit.ipc-service`）；父目录链属主校验留 M7 |
 | 9 | 特权 daemon 的 IPC parser 与 launch path 保持最小 | root 进程 RCE | M5（已落地） | parser 为纯字节解码、无分配前未验证计数、无解释执行；确定性 fuzz 集（种子化翻转/截断/超载变异）覆盖请求与响应两个方向（`m5.fuzz.ipc-parser`，sanitizer 下运行） |
-| 10 | 外部 GPU 进程只影响资源状态，不主动终止或接管 | 误杀用户进程 | M3 | `EXTERNAL_BUSY` 测试（M3 已落地：`m3.unit.nvml-gpu-provider` 外部占用仅改变观测状态、无信号/接管路径；适配器只读 NVML） |
+| 10 | 外部 GPU 进程只影响资源状态，不主动终止或接管 | 误杀用户进程 | M3 | `EXTERNAL_BUSY` 测试（M3 已落地：`m3.unit.nvml-gpu-provider` 外部占用仅改变观测状态、无信号/接管路径；适配器只读 NVML；2026-09-10 真实 RTX 4080 SUPER 补跑以临时 CUDA 进程验证 `EXTERNAL_BUSY -> FREE`，进程仅由测试 owner 自行清理） |
 | 11 | 长期拆分 privileged launcher（`yori-launch-helper`） | 缩小 TCB | `POST-09` | 非本 MVP |
 | 12 | Job 创建拒绝 root owner，并在 IPC 前以固定上限校验 argv/env/cwd/profile/logdir | root workload、内存耗尽、路径逃逸 | M1/M5（M5 已落地） | `JobSpec` 上限与 root/路径负向测试（M1）；IPC 入口：协议层帧/字符串/计数上限 + root owner 提交 `DENIED` + 非法 spec 映射 `INVALID_SPEC`（`m5.unit.ipc-protocol`/`m5.unit.ipc-service`） |
 | 13 | GPU snapshot 与 StateStore mutation 有固定条目上限；Job/lease 以 revision 原子提交 | 内存耗尽、状态篡改、部分写导致错误资源归属 | M1/M4（M4 已落地） | Provider 边界、revision 冲突、容量负向测试（M1）；SQLite 单事务回滚、目录只读/外部写锁/篡改行/篡改 lease 矩阵负向测试（M4 已落地：`m4.unit.sqlite-state-store`） |
@@ -66,7 +66,7 @@ yori CLI（用户会话） --> tensorboard 子进程（用户身份，默认 127
 | 17 | 子进程继承描述符经 `close_range` 收敛；exec 报告管道以 `FD_CLOEXEC` 在成功 exec 时自动关闭 | daemon 内部 fd（socket、DB、日志）泄漏进训练进程 | M2 | 引擎审查；`M2-02` 集成路径无 fd 泄漏断言 |
 | 18 | 环境保留键（身份块、`CUDA_VISIBLE_DEVICES`、`CUDA_DEVICE_ORDER`、`LD_PRELOAD`、`LD_LIBRARY_PATH`）在 JobSpec.env 中出现即拒绝启动计划 | 用户覆盖 GPU 隔离或以动态链接注入攻击 root daemon 路径 | M2 | `M2-01` 保留键负向测试 |
 | 19 | exec 前 `SIGPIPE` 置为忽略（DEC-008）；日志文件 `O_APPEND|O_NOFOLLOW` 打开，`0640` 与属主显式设置 | daemon 退出误杀训练（可用性）；符号链接替换日志文件（路径逃逸） | M2 | 管道断裂存活测试；`M2-05` 权限与打开方式断言 |
-| 20 | NVML 适配以 count-only 查询检测外部计算进程，不读取进程身份字段；NVML 库路径只接受管理员配置或测试注入，不接受用户输入；驱动返回数据按 SPI 校验（UUID 合法性、遥测边界、设备数上限），非法即整次观测失败 | 跨用户进程信息泄露；恶意/异常驱动数据污染调度事实；任意库注入 root daemon | M3 | 基线 10 `EXTERNAL_BUSY` 测试（`m3.unit.nvml-gpu-provider`）；身份零采集代码审查（`src/gpu/nvml_gpu_provider.cpp`）；非法快照不发布（`m3.unit.gpu-manager`）；真实 GPU 补跑项 |
+| 20 | NVML 适配以 count-only 查询检测外部计算进程，不读取进程身份字段；NVML 库路径只接受管理员配置或测试注入，不接受用户输入；驱动返回数据按 SPI 校验（UUID 合法性、遥测边界、设备数上限），非法即整次观测失败 | 跨用户进程信息泄露；恶意/异常驱动数据污染调度事实；任意库注入 root daemon | M3 | 基线 10 `EXTERNAL_BUSY` 测试（`m3.unit.nvml-gpu-provider`）；身份零采集代码审查（`src/gpu/nvml_gpu_provider.cpp`）；非法快照不发布（`m3.unit.gpu-manager`）；2026-09-10 真实 RTX 4080 SUPER/NVML 570.211.01 补跑覆盖设备发现、UUID、遥测和 v3 count-only 外部占用查询，证据见 M3 计划验证记录；v2-only 与错误注入由 stub 矩阵覆盖 |
 | 21 | 恢复绝不无条件重启数据库中的 RUNNING/STARTING Job：核验 PID/PGID/启动 ticks 三元组，进程消失、身份不符（PID reuse）或身份缺失一律 `LOST` 并释放 lease；`LOST` 残留进程由 `EXTERNAL_BUSY` 兜底而非接管/终止；SQLite 行数据篡改（非法状态、revision 矛盾、编码越界、lease 矩阵破坏）使 `load()` 显式失败；SQLite 库路径只接受管理员配置或测试注入 | PID reuse 错误接管（特权路径作用到无关进程）；崩溃窗口孤儿进程导致 GPU 双重分配；状态文件篡改注入非法调度事实 | M4 | 恢复决策矩阵与重入幂等（`m4.unit.job-recovery`）；PID reuse 防护与重启闭环（`m4.integration.recovery-restart`）；篡改/故障注入（`m4.unit.sqlite-state-store`） |
 | 22 | IPC 帧边界全部显式：负载 1 MiB、单字符串 64 KiB（禁 NUL）、请求计数 256、列表 1024、日志尾部每流 256 KiB；超限/截断/坏版本/坏 kind/值域非法均映射稳定错误码，帧界违规回 PROTOCOL 错误帧后断开；每连接请求总预算（默认 5s）到期断开；handler 异常映射 INTERNAL 响应；响应列表超限截断并置 LIMIT（不静默） | 内存耗尽与队头阻塞（超长帧、慢客户端）；解析器内存安全漏洞成为 root RCE 入口；异常吞噬掩盖故障 | M5 | 协议畸形矩阵（`m5.unit.ipc-protocol`）；超载帧/静默连接/半帧断开与 handler 异常路径（`m5.unit.ipc-server`）；确定性 fuzz 集（`m5.fuzz.ipc-parser`，`fuzz` 标签、sanitizer 常规运行） |
 | 23 | IPC 授权与脱敏仅在 daemon 侧判定：owner = `SO_PEERCRED` uid 相等；admin = 主 GID 匹配配置组或 UID 属于启动时解析的组成员集（客户端声明不可信）；非 owner 非 admin 的 `ps`/`queue` 仅见 JobId/状态/revision/owner_uid/退出状态，argv/cwd/tensorboard_logdir 不出现在响应；admin 组成员解析失败降级为仅主 GID 匹配 | 跨用户信息泄露（argv/日志路径/env 探测）；伪造 admin 身份绕过授权 | M5 | 授权矩阵（owner/admin/第三方 x ps/queue/gpu/cancel/logs）与脱敏字段断言（`m5.unit.ipc-service`）；协议无身份字段的结构性保证（基线 2/3）；真实多用户环境补跑见 M5 计划 |

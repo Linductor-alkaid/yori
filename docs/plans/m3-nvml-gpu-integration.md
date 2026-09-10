@@ -5,7 +5,7 @@
 > 所属计划：[Yori 实施总计划](yori-implementation-plan.md)
 > 前置：M2（[进程守护与启动适配](m2-process-supervision.md)）
 > 建议发布点：无
-> 更新日期：2026-09-08
+> 更新日期：2026-09-10
 
 ## 目标
 
@@ -213,3 +213,34 @@
   勾选完成，M3 里程碑标记 `Completed`。真实 NVML 驱动行为（`INSUFFICIENT_SIZE`
   计数语义、v3/v2 实际可用性、错误码组合）保持独立补跑项，由威胁模型基线 20
   与本计划限制条款跟踪，不阻塞 M3 范围。
+
+### 2026-09-10：真实 NVIDIA GPU 宿主补跑
+
+- 范围：`master` 提交 `1e36904`，在沙箱外以真实 NVIDIA GPU、宿主驱动和 NVML
+  补跑 M3 平台验证；未修改 `third_party/executor`，仅将 submodule 初始化到仓库
+  与 `dependencies.lock.json` 已锁定的 `e2dc8ca2243345e2e6cf35b395793a58796457b9`。
+- 环境：Linux x86_64，内核 `6.8.0-124-generic`，NVIDIA GeForce RTX 4080 SUPER，
+  驱动 `570.211.01`，驱动报告 CUDA `12.8`，CMake `4.4.0`，Ninja `1.10.1`，
+  GCC `11.4.0`。宿主 `libnvidia-ml.so.570.211.01` 同时导出
+  `nvmlDeviceGetComputeRunningProcesses_v2` 和 `_v3`，因此当前实现按优先级使用
+  真实 v3 count-only 查询；v2 回退继续由 stub 用例覆盖。
+- 构建与回归：执行
+  `cmake -S . -B build/gpu-host-release -G Ninja -DCMAKE_BUILD_TYPE=Release`
+  和 `cmake --build build/gpu-host-release -j2` 均成功；执行
+  `ctest --test-dir build/gpu-host-release --output-on-failure -j2`，37 个测试中
+  34 passed、3 skipped、0 failed。跳过项为 root-only 进程降权、多用户和性能
+  占位测试，与 GPU 验证无关；`m3.platform.gpu-nvml` 实际执行并通过，未 skip。
+- 空闲观测：执行 `ctest --test-dir build/gpu-host-release -L gpu -V`，真实 NVML
+  发现 1 个设备（UUID `GPU-3a36bc05-d471-92cb-b373-f77c00e36d7a`），快照校验
+  通过并报告 `FREE`，利用率采样为 22%；测试结果 1/1 passed。
+- 外部占用观测：启动一个临时 CUDA 进程并保留 256 MiB 用户分配，
+  `nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader`
+  确认进程 `python3` 被驱动登记且总占用为 502 MiB；此时直接运行
+  `build/gpu-host-release/tests/example_gpu_probe_test`，同一 UUID 被报告为
+  `EXTERNAL_BUSY` 且测试通过。终止该临时进程并确认计算进程列表为空后再次运行，
+  状态恢复为 `FREE`。临时进程已清理，没有接管或终止任何既有 GPU 进程。
+- 结论与限制：真实设备发现、稳定 UUID、遥测读取、v3 count-only 外部占用检测、
+  `EXTERNAL_BUSY -> FREE` 恢复和快照校验均通过。驱动错误码组合、GPU lost 和旧驱动
+  v2-only 回退无法在不破坏当前宿主状态的前提下安全注入，仍以
+  `m3.unit.nvml-gpu-provider` 的 stub 矩阵为证；本次不扩展到 root、多用户、性能或
+  真实训练任务端到端验证。
