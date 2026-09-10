@@ -8,12 +8,11 @@
 #include <string>
 #include <thread>
 #include <yori/gpu/gpu_provider.hpp>
+#include <yori/store/sqlite_state_store.hpp>
 
 #include "process_test_support.hpp"
 #include "runtime/daemon.hpp"
 #include "runtime/executor_runtime.hpp"
-#include <yori/store/sqlite_state_store.hpp>
-
 #include "testing/fake_gpu_provider.hpp"
 #include "yori_test.hpp"
 
@@ -49,8 +48,7 @@ bool wait_state(store::StateStore& store, std::uint64_t id, job::JobState state,
                 std::chrono::milliseconds timeout = 15s) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
   while (std::chrono::steady_clock::now() < deadline) {
-    if (const auto record = find_stored(store, id);
-        record.has_value() && record->state == state) {
+    if (const auto record = find_stored(store, id); record.has_value() && record->state == state) {
       return true;
     }
     std::this_thread::sleep_for(20ms);
@@ -117,7 +115,8 @@ int main() {
     config.ipc.socket_mode = 0600;
     config.job_manager.log_root = root + "/jobs";
     config.job_manager.cancel_grace = 400ms;
-    yori::runtime::Daemon daemon(runtime.executor(), provider, wrap_serial(std::move(store)), config);
+    yori::runtime::Daemon daemon(runtime.executor(), provider, wrap_serial(std::move(store)),
+                                 config);
     YORI_CHECK(daemon.start().ok());
 
     // Job 1：长驻训练（占用唯一 GPU）；Job 2：排队。经守护委派入口提交
@@ -144,7 +143,6 @@ int main() {
     YORI_CHECK(daemon.stop() == yori::runtime::DaemonStopCode::kStopped);
     YORI_CHECK(pre_stop.abandoned_at_stop == 0);  // 关闭动作前当然为 0
 
-
     YORI_CHECK(runtime.shutdown() == yori::runtime::ExecutorRuntimeShutdownResult::kCompleted);
   }
 
@@ -167,7 +165,8 @@ int main() {
     config.ipc.socket_mode = 0600;
     config.job_manager.log_root = root + "/jobs";
     config.job_manager.cancel_grace = 400ms;
-    yori::runtime::Daemon daemon(runtime.executor(), provider, wrap_serial(std::move(store)), config);
+    yori::runtime::Daemon daemon(runtime.executor(), provider, wrap_serial(std::move(store)),
+                                 config);
     YORI_CHECK(daemon.start().ok());
 
     // 恢复决策：Job 1 采纳为 RUNNING（同一进程身份，未重启）；Job 2 重新入队。

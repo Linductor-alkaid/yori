@@ -1,12 +1,11 @@
 #include <chrono>
 #include <cstdint>
+#include <executor/executor.hpp>
 #include <future>
 #include <memory>
 #include <vector>
 #include <yori/job/job.hpp>
 #include <yori/store/state_store.hpp>
-
-#include <executor/executor.hpp>
 
 #include "runtime/executor_runtime.hpp"
 #include "runtime/serial_state_store.hpp"

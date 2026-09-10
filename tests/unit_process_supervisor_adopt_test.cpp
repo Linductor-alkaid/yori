@@ -1,9 +1,9 @@
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
-#include <sys/wait.h>
 #include <yori/process/process_supervisor.hpp>
 
 #include "process_test_support.hpp"
@@ -92,8 +92,7 @@ int main() {
   }
 
   if (yori::testing::failure_count != 0) {
-    std::fprintf(stderr, "supervisor adopt/abandon: %d failure(s)\n",
-                 yori::testing::failure_count);
+    std::fprintf(stderr, "supervisor adopt/abandon: %d failure(s)\n", yori::testing::failure_count);
     return 1;
   }
   std::printf("supervisor adopt/abandon: all checks passed\n");

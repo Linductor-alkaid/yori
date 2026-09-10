@@ -40,8 +40,8 @@ process::ProcessIdentity spawn_detached() {
       ::_exit(0);
     }
     std::array<char, 8> pid_bytes{};
-    const int written = ::std::snprintf(pid_bytes.data(), pid_bytes.size(), "%lld",
-                                        static_cast<long long>(grand));
+    const int written =
+        ::std::snprintf(pid_bytes.data(), pid_bytes.size(), "%lld", static_cast<long long>(grand));
     YORI_CHECK(written > 0);
     YORI_CHECK(::write(report_pipe[1], pid_bytes.data(), static_cast<std::size_t>(written)) ==
                written);

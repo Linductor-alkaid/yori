@@ -3,7 +3,6 @@
 #include <unistd.h>
 
 #include <cerrno>
-
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -15,13 +14,13 @@
 #include <yori/queue/job_queue.hpp>
 #include <yori/recovery/job_recovery.hpp>
 
+#include "gpu_test_support.hpp"
 #include "process_test_support.hpp"
 #include "runtime/executor_runtime.hpp"
 #include "runtime/gpu_manager.hpp"
 #include "runtime/job_manager.hpp"
 #include "runtime/log_streamer.hpp"
 #include "runtime/serial_state_store.hpp"
-#include "gpu_test_support.hpp"
 #include "testing/fake_gpu_provider.hpp"
 #include "testing/in_memory_state_store.hpp"
 #include "yori_test.hpp"
@@ -169,9 +168,9 @@ class ManagerFixture final {
     manager_config.log_root = log_root;
     manager_config.cancel_grace = grace;
     manager_config.daemon_environment = {{"PATH", "/usr/bin:/bin"}};
-    manager = std::make_unique<runtime::JobManager>(
-        runtime.executor(), *store, *queue, *gpu_manager, streamer, resolver, adapter, gate,
-        manager_config);
+    manager =
+        std::make_unique<runtime::JobManager>(runtime.executor(), *store, *queue, *gpu_manager,
+                                              streamer, resolver, adapter, gate, manager_config);
     YORI_CHECK(manager->start().ok());
   }
 
@@ -188,8 +187,7 @@ class ManagerFixture final {
   runtime::ExecutorRuntime runtime;
   testing::FakeGpuProvider provider;
   std::unique_ptr<store::StateStore> store =
-      std::make_unique<runtime::SerialStateStore>(
-          std::make_unique<testing::InMemoryStateStore>());
+      std::make_unique<runtime::SerialStateStore>(std::make_unique<testing::InMemoryStateStore>());
   std::unique_ptr<GlobalJobQueue> queue;
   std::unique_ptr<runtime::GpuManager> gpu_manager;
   runtime::LogStreamer streamer;
@@ -219,8 +217,8 @@ int main() {
       YORI_CHECK(record->execution.identity.valid());
       YORI_CHECK(record->execution.exit && record->execution.exit->is_success());
       YORI_CHECK(record->execution.log_path &&
-                 *record->execution.log_path == fixture.log_root + "/" +
-                                                    std::to_string(submit.job_id));
+                 *record->execution.log_path ==
+                     fixture.log_root + "/" + std::to_string(submit.job_id));
       YORI_CHECK(snapshot.leases.empty());  // lease 已释放
     }
     // 日志落盘（两路）。
@@ -229,16 +227,15 @@ int main() {
     YORI_CHECK(wait_log(fixture.log_root, submit.job_id, "stderr.log", "jm-stderr\n") ==
                "jm-stderr\n");
     const auto stats = fixture.manager->stats();
-    YORI_CHECK(stats.jobs_submitted == 1 && stats.jobs_launched == 1 &&
-               stats.jobs_finished == 1 && stats.scheduler_scheduled == 1);
+    YORI_CHECK(stats.jobs_submitted == 1 && stats.jobs_launched == 1 && stats.jobs_finished == 1 &&
+               stats.scheduler_scheduled == 1);
   }
 
   // ---- 场景 B：任务异常（非零退出 -> FAILED + 原因记录 + lease 释放）------
   {
     ManagerFixture fixture;
     store::StateStore& store = *fixture.store;
-    const auto submit =
-        fixture.manager->submit_job(spec_for({"/bin/sh", "-c", "exit 3"}));
+    const auto submit = fixture.manager->submit_job(spec_for({"/bin/sh", "-c", "exit 3"}));
     YORI_CHECK(submit.ok());
     YORI_CHECK(wait_state(store, submit.job_id, job::JobState::kFailed));
     store::StateSnapshot snapshot;
@@ -380,8 +377,7 @@ int main() {
         std::make_unique<testing::InMemoryStateStore>());
     queue::QueueErrorCode queue_error = queue::QueueErrorCode::kNone;
     auto queue = GlobalJobQueue::create({}, queue_error);
-    runtime::GpuManager gpu_manager(runtime.executor(), provider,
-                                    runtime::GpuManagerConfig{100ms});
+    runtime::GpuManager gpu_manager(runtime.executor(), provider, runtime::GpuManagerConfig{100ms});
     YORI_CHECK(gpu_manager.start().ok());
     runtime::LogStreamer streamer;
     launch::PosixIdentityResolver resolver;
@@ -390,8 +386,8 @@ int main() {
     runtime::JobManagerConfig manager_config;
     manager_config.log_root = make_root();
     manager_config.daemon_environment = {{"PATH", "/usr/bin:/bin"}};
-    runtime::JobManager manager(runtime.executor(), *store, *queue, gpu_manager, streamer,
-                                resolver, adapter, gate, manager_config);
+    runtime::JobManager manager(runtime.executor(), *store, *queue, gpu_manager, streamer, resolver,
+                                adapter, gate, manager_config);
     static_cast<void>(gate.advance_to(runtime::kPhaseSchedulingOpen));
     YORI_CHECK(manager.start().ok());
 
@@ -417,8 +413,8 @@ int main() {
   {
     ManagerFixture fixture;
     store::StateStore& store = *fixture.store;
-    const auto submit = fixture.manager->submit_job(
-        spec_for({"/nonexistent-training-binary", "--epochs", "1"}));
+    const auto submit =
+        fixture.manager->submit_job(spec_for({"/nonexistent-training-binary", "--epochs", "1"}));
     YORI_CHECK(submit.ok());
     YORI_CHECK(wait_state(store, submit.job_id, job::JobState::kFailed));
     store::StateSnapshot snapshot;
@@ -513,8 +509,8 @@ int main() {
     runtime::JobManagerConfig manager_config;
     manager_config.log_root = make_root();
     manager_config.cancel_grace = 300ms;
-    runtime::JobManager manager(runtime.executor(), *store, *queue, gpu_manager, streamer,
-                                resolver, adapter, gate, manager_config);
+    runtime::JobManager manager(runtime.executor(), *store, *queue, gpu_manager, streamer, resolver,
+                                adapter, gate, manager_config);
     YORI_CHECK(manager.start(recovery_result).ok());
     {
       const auto stats = manager.stats();
@@ -608,8 +604,8 @@ int main() {
     runtime::JobManagerConfig manager_config;
     manager_config.log_root = make_root();
     manager_config.cancel_grace = 300ms;
-    runtime::JobManager manager(runtime.executor(), *store, *queue, gpu_manager, streamer,
-                                resolver, adapter, gate, manager_config);
+    runtime::JobManager manager(runtime.executor(), *store, *queue, gpu_manager, streamer, resolver,
+                                adapter, gate, manager_config);
     YORI_CHECK(manager.start(recovery_result).ok());
     {
       const auto stats = manager.stats();

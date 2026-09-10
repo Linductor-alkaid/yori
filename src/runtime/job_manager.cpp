@@ -13,6 +13,8 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <executor/blocking_io.hpp>
+#include <executor/executor.hpp>
 #include <future>
 #include <memory>
 #include <optional>
@@ -20,9 +22,6 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
-
-#include <executor/blocking_io.hpp>
-#include <executor/executor.hpp>
 
 namespace yori::runtime {
 namespace {
@@ -155,9 +154,7 @@ ipc::IpcExitStatus exit_wire(const process::ExitStatus& status) {
   return wire;
 }
 
-std::uint8_t state_wire(job::JobState state) noexcept {
-  return static_cast<std::uint8_t>(state);
-}
+std::uint8_t state_wire(job::JobState state) noexcept { return static_cast<std::uint8_t>(state); }
 
 // LogPump -> LogStreamer 桥（EXEC-04 数据面）：落盘接受后发布，丢弃发标记。
 // 与 M6 集成测试的桥同型；观察失败不影响落盘主路径（发布结果只计数）。
@@ -245,8 +242,7 @@ class ManagerWorker final : public executor::IBlockingIoWorker {
                 executor::comm::PhaseGate& startup_gate, store::StateStore& store,
                 queue::GlobalJobQueue& queue, GpuManager& gpu_manager, LogStreamer& log_streamer,
                 launch::IdentityResolver& identity_resolver, launch::LaunchAdapter& launch_adapter,
-                const JobManagerConfig& config, AtomicStats& stats,
-                std::atomic<bool>& stopping)
+                const JobManagerConfig& config, AtomicStats& stats, std::atomic<bool>& stopping)
       : wake_read_(wake_read),
         commands_(commands),
         startup_gate_(startup_gate),
@@ -307,8 +303,8 @@ class ManagerWorker final : public executor::IBlockingIoWorker {
           break;
         }
       }
-      job.supervisor = std::make_unique<process::ProcessSupervisor>(
-          process::CancelPolicy{config_.cancel_grace});
+      job.supervisor =
+          std::make_unique<process::ProcessSupervisor>(process::CancelPolicy{config_.cancel_grace});
       if (!job.supervisor->adopt(record->execution.identity).ok()) {
         continue;  // 进程在恢复后、采纳前消失：退出事件路径不可达，保持现状。
       }
@@ -444,13 +440,11 @@ class ManagerWorker final : public executor::IBlockingIoWorker {
     Command command;
     while (commands_.try_receive(command)) {
       if (command.kind == Command::Kind::kSubmit) {
-        command.submit_ack.set_value(
-            ipc::JobSubmitOutcome{ipc::JobSubmitOutcome::Code::kUnavailable, 0,
-                                  "job manager is stopping"});
+        command.submit_ack.set_value(ipc::JobSubmitOutcome{
+            ipc::JobSubmitOutcome::Code::kUnavailable, 0, "job manager is stopping"});
       } else if (command.kind == Command::Kind::kCancel) {
-        command.cancel_ack.set_value(
-            ipc::JobCancelOutcome{ipc::JobCancelOutcome::Code::kUnavailable, 0,
-                                  "job manager is stopping"});
+        command.cancel_ack.set_value(ipc::JobCancelOutcome{
+            ipc::JobCancelOutcome::Code::kUnavailable, 0, "job manager is stopping"});
       }
     }
   }
@@ -528,8 +522,8 @@ class ManagerWorker final : public executor::IBlockingIoWorker {
 
   void process_submit(job::JobSpec spec, std::promise<ipc::JobSubmitOutcome> ack) {
     const auto fail = [&ack](store::StateStoreErrorCode code) {
-      ack.set_value(
-          ipc::JobSubmitOutcome{ipc::JobSubmitOutcome::Code::kStoreFailed, 0, store::to_string(code)});
+      ack.set_value(ipc::JobSubmitOutcome{ipc::JobSubmitOutcome::Code::kStoreFailed, 0,
+                                          store::to_string(code)});
     };
     const store::StateStoreLoadResult load = store_.load();
     if (!load.ok()) {
@@ -577,8 +571,8 @@ class ManagerWorker final : public executor::IBlockingIoWorker {
     }
 
     stats_.jobs_submitted.fetch_add(1, std::memory_order_relaxed);
-    ack.set_value(ipc::JobSubmitOutcome{ipc::JobSubmitOutcome::Code::kSubmitted, record.id.value(),
-                                        {}});
+    ack.set_value(
+        ipc::JobSubmitOutcome{ipc::JobSubmitOutcome::Code::kSubmitted, record.id.value(), {}});
   }
 
   void process_cancel(std::uint64_t job_id, std::promise<ipc::JobCancelOutcome> ack) {
@@ -597,8 +591,7 @@ class ManagerWorker final : public executor::IBlockingIoWorker {
 
     if (record->state == job::JobState::kQueued) {
       const auto write = rewrite_job(job_id, [](const store::StoredJob& current,
-                                                store::StoredJob& updated,
-                                                store::StateMutation&) {
+                                                store::StoredJob& updated, store::StateMutation&) {
         updated.state = job::JobState::kCancelled;
         updated.revision = current.revision + 1;
       });
@@ -610,7 +603,8 @@ class ManagerWorker final : public executor::IBlockingIoWorker {
       const queue::QueueOperationResult removal = queue_.remove(job::JobId{job_id});
       std::string detail;
       if (!removal.ok() && removal.code != queue::QueueErrorCode::kJobNotFound) {
-        detail = std::string("cancelled but queue removal failed: ") + queue::to_string(removal.code);
+        detail =
+            std::string("cancelled but queue removal failed: ") + queue::to_string(removal.code);
       }
       stats_.jobs_cancelled.fetch_add(1, std::memory_order_relaxed);
       ack.set_value(ipc::JobCancelOutcome{ipc::JobCancelOutcome::Code::kCancelled,
@@ -620,8 +614,7 @@ class ManagerWorker final : public executor::IBlockingIoWorker {
 
     if (record->state == job::JobState::kStarting || record->state == job::JobState::kRunning) {
       const auto write = rewrite_job(job_id, [](const store::StoredJob& current,
-                                                store::StoredJob& updated,
-                                                store::StateMutation&) {
+                                                store::StoredJob& updated, store::StateMutation&) {
         updated.state = job::JobState::kStopping;
         updated.revision = current.revision + 1;
       });
@@ -631,29 +624,27 @@ class ManagerWorker final : public executor::IBlockingIoWorker {
         return;
       }
       begin_cancellation(job_id, false);
-      ack.set_value(ipc::JobCancelOutcome{ipc::JobCancelOutcome::Code::kStopping,
-                                          state_wire(job::JobState::kStopping), {}});
+      ack.set_value(ipc::JobCancelOutcome{
+          ipc::JobCancelOutcome::Code::kStopping, state_wire(job::JobState::kStopping), {}});
       return;
     }
 
     if (record->state == job::JobState::kStopping) {
       // 已在取消升级路径：重发 SIGTERM（幂等）并保持既有宽限。
       begin_cancellation(job_id, false);
-      ack.set_value(
-          ipc::JobCancelOutcome{ipc::JobCancelOutcome::Code::kStopping, state_wire(job::JobState::kStopping),
-                                {}});
+      ack.set_value(ipc::JobCancelOutcome{
+          ipc::JobCancelOutcome::Code::kStopping, state_wire(job::JobState::kStopping), {}});
       return;
     }
 
     if (record->state == job::JobState::kCancelled) {
-      ack.set_value(ipc::JobCancelOutcome{ipc::JobCancelOutcome::Code::kCancelled,
-                                          state_wire(job::JobState::kCancelled), {}});
+      ack.set_value(ipc::JobCancelOutcome{
+          ipc::JobCancelOutcome::Code::kCancelled, state_wire(job::JobState::kCancelled), {}});
       return;
     }
 
-    ack.set_value(ipc::JobCancelOutcome{
-        ipc::JobCancelOutcome::Code::kInvalidState, state_wire(record->state),
-        job::to_string(record->state)});
+    ack.set_value(ipc::JobCancelOutcome{ipc::JobCancelOutcome::Code::kInvalidState,
+                                        state_wire(record->state), job::to_string(record->state)});
   }
 
   // 活动态取消的进程侧动作：SIGTERM（进程组）+ 宽限升级定时（DEC-007）。
@@ -782,13 +773,14 @@ class ManagerWorker final : public executor::IBlockingIoWorker {
     }
 
     std::string register_error;
-    if (log_streamer_.register_job(job::JobId{job_id}, register_error) != LogRegisterCode::kRegistered) {
+    if (log_streamer_.register_job(job::JobId{job_id}, register_error) !=
+        LogRegisterCode::kRegistered) {
       fail_launch(job_id, uuid, "log streamer register failed: " + register_error);
       return;
     }
 
-    auto supervisor = std::make_unique<process::ProcessSupervisor>(
-        process::CancelPolicy{config_.cancel_grace});
+    auto supervisor =
+        std::make_unique<process::ProcessSupervisor>(process::CancelPolicy{config_.cancel_grace});
     process::SpawnResult spawned = supervisor->spawn(plan.plan);
     if (!spawned.ok()) {
       static_cast<void>(log_streamer_.unregister_job(job::JobId{job_id}));
@@ -800,15 +792,15 @@ class ManagerWorker final : public executor::IBlockingIoWorker {
 
     // STARTING -> RUNNING：身份、起始时间与日志路径在同一 mutation 落盘
     // （崩溃窗口语义见设计 6.2：STARTING 无身份 -> LOST；有身份 -> 提升）。
-    const auto write = rewrite_job(job_id, [&spawned, &directory](const store::StoredJob& current,
-                                                                 store::StoredJob& updated,
-                                                                 store::StateMutation&) {
-      updated.state = job::JobState::kRunning;
-      updated.revision = current.revision + 1;
-      updated.execution.identity = spawned.identity;
-      updated.execution.start_time = std::chrono::system_clock::now();
-      updated.execution.log_path = directory;
-    });
+    const auto write = rewrite_job(
+        job_id, [&spawned, &directory](const store::StoredJob& current, store::StoredJob& updated,
+                                       store::StateMutation&) {
+          updated.state = job::JobState::kRunning;
+          updated.revision = current.revision + 1;
+          updated.execution.identity = spawned.identity;
+          updated.execution.start_time = std::chrono::system_clock::now();
+          updated.execution.log_path = directory;
+        });
     if (!write.ok()) {
       // 进程已启动但状态未持久化：终止进程（supervisor 析构 SIGKILL + 有界
       // 回收），尽力终态化，失败显式计数（恢复路径兜底 LOST + lease 释放）。
@@ -856,24 +848,25 @@ class ManagerWorker final : public executor::IBlockingIoWorker {
   // 观察面以 EOF 收尾；失败计数不吞掉。
   void fail_launch(std::uint64_t job_id, const gpu::GpuUuid& uuid, const std::string& reason) {
     stats_.launch_failures.fetch_add(1, std::memory_order_relaxed);
-    const auto write = rewrite_job(job_id, [&uuid, &reason](const store::StoredJob& current,
-                                                            store::StoredJob& updated,
-                                                            store::StateMutation& mutation) {
-      if (job::is_terminal(current.state)) {
-        updated = current;  // 已终态（迟到失败）：保持幂等，不复活。
-        return;
-      }
-      updated.state = job::JobState::kFailed;
-      updated.revision = current.revision + 1;
-      updated.execution.failure_reason = reason.substr(0, store::JobExecutionLimits::kMaxFailureReasonBytes);
-      updated.execution.end_time = std::chrono::system_clock::now();
-      mutation.release_leases.push_back(uuid);
-    });
+    const auto write = rewrite_job(
+        job_id, [&uuid, &reason](const store::StoredJob& current, store::StoredJob& updated,
+                                 store::StateMutation& mutation) {
+          if (job::is_terminal(current.state)) {
+            updated = current;  // 已终态（迟到失败）：保持幂等，不复活。
+            return;
+          }
+          updated.state = job::JobState::kFailed;
+          updated.revision = current.revision + 1;
+          updated.execution.failure_reason =
+              reason.substr(0, store::JobExecutionLimits::kMaxFailureReasonBytes);
+          updated.execution.end_time = std::chrono::system_clock::now();
+          mutation.release_leases.push_back(uuid);
+        });
     if (!write.ok()) {
       stats_.store_write_failures.fetch_add(1, std::memory_order_relaxed);
     }
-    const auto finish = log_streamer_.finish_job(job::JobId{job_id}, state_wire(job::JobState::kFailed),
-                                                 std::nullopt);
+    const auto finish = log_streamer_.finish_job(job::JobId{job_id},
+                                                 state_wire(job::JobState::kFailed), std::nullopt);
     static_cast<void>(finish);
     stats_.jobs_failed.fetch_add(1, std::memory_order_relaxed);
   }
@@ -927,10 +920,10 @@ class ManagerWorker final : public executor::IBlockingIoWorker {
                    : "terminated by signal " + std::to_string(event.status.signal_number);
     }
 
-    const auto write = rewrite_job(
-        job_id, [terminal, &reason, &event, &uuid](const store::StoredJob& current,
-                                                   store::StoredJob& updated,
-                                                   store::StateMutation& mutation) {
+    const auto write =
+        rewrite_job(job_id, [terminal, &reason, &event, &uuid](const store::StoredJob& current,
+                                                               store::StoredJob& updated,
+                                                               store::StateMutation& mutation) {
           if (job::is_terminal(current.state)) {
             updated = current;  // 终态幂等（RULE-04）：迟到退出不复活。
             return;
@@ -966,7 +959,8 @@ class ManagerWorker final : public executor::IBlockingIoWorker {
     const std::optional<ipc::IpcExitStatus> exit_info =
         event.identity_verified ? std::optional{exit_wire(event.status)} : std::nullopt;
     if (iter->second.adopted || iter->second.pump_done) {
-      const auto finish = log_streamer_.finish_job(job::JobId{job_id}, state_wire(terminal), exit_info);
+      const auto finish =
+          log_streamer_.finish_job(job::JobId{job_id}, state_wire(terminal), exit_info);
       static_cast<void>(finish);
       supervised_.erase(iter);
       stats_.active_supervised.fetch_sub(1, std::memory_order_relaxed);
@@ -1292,7 +1286,8 @@ ProcessExitMonitor& JobManager::exit_monitor() { return impl_->exit_monitor; }
 
 LogPump& JobManager::log_pump() { return impl_->log_pump; }
 
-JobManagerStats JobManager::stats() const {  JobManagerStats result;
+JobManagerStats JobManager::stats() const {
+  JobManagerStats result;
   const auto& stats = impl_->stats;
   result.commands_processed = stats.commands_processed.load(std::memory_order_relaxed);
   result.jobs_submitted = stats.jobs_submitted.load(std::memory_order_relaxed);
