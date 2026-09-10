@@ -1,7 +1,9 @@
 #include "runtime/gpu_manager.hpp"
 
 #include <executor/executor.hpp>
+#include <functional>
 #include <map>
+#include <mutex>
 #include <thread>
 #include <utility>
 
@@ -178,12 +180,16 @@ class GpuManager::Impl final : public std::enable_shared_from_this<Impl> {
   executor::comm::MpscChannel<GpuManagerEvent> events;
   executor::TimerHandle timer;
 
+  std::mutex listener_mutex;
+  std::function<void()> event_listener;
+
  private:
   gpu::GpuProviderErrorCode last_error() const noexcept {
     return last_error_.load(std::memory_order_relaxed);
   }
 
-  // 发送事件；背压失败显式计数并置补投标记。
+  // 发送事件；背压失败显式计数并置补投标记。成功入队后触发变更监听（M7
+  // 守护总装的调度承载唤醒；监听为空时零开销）。
   bool send_event(GpuManagerEvent&& event) {
     if (dropped_events_pending.load(std::memory_order_acquire)) {
       event.dropped_earlier_events = true;
@@ -194,7 +200,21 @@ class GpuManager::Impl final : public std::enable_shared_from_this<Impl> {
       return false;
     }
     dropped_events_pending.store(false, std::memory_order_release);
+    notify_listener();
     return true;
+  }
+
+  void notify_listener() noexcept {
+    // 监听在并发使用前设置一次、stop 后可能被清空；快照读取保证无数据竞争，
+    // 调用期间的异常由监听实现方（守护承载）保证不抛出。
+    std::function<void()> listener;
+    {
+      std::lock_guard<std::mutex> lock(listener_mutex);
+      listener = event_listener;
+    }
+    if (listener) {
+      listener();
+    }
   }
 
   void record_failure(gpu::GpuProviderErrorCode error) {
@@ -339,6 +359,11 @@ bool GpuManager::try_receive_event(GpuManagerEvent& out) { return impl_->try_rec
 
 bool GpuManager::receive_event_for(GpuManagerEvent& out, std::chrono::milliseconds timeout) {
   return impl_->receive_event_for(out, timeout);
+}
+
+void GpuManager::set_event_listener(std::function<void()> listener) {
+  std::lock_guard<std::mutex> lock(impl_->listener_mutex);
+  impl_->event_listener = std::move(listener);
 }
 
 GpuManagerStats GpuManager::stats() const { return impl_->stats(); }
