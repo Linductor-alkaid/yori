@@ -1,11 +1,11 @@
 # M1：核心域契约与进程内调度闭环
 
-> 状态：In Progress
+> 状态：Completed（2026-09-10 随 M7 守护总装收口）
 > 负责人：Linductor-alkaid
 > 所属计划：[Yori 实施总计划](yori-implementation-plan.md)
 > 前置：M0（[工程骨架与基线](m0-engineering-baseline.md)）
 > 建议发布点：无
-> 更新日期：2026-09-04
+> 更新日期：2026-09-10
 
 ## 目标
 
@@ -232,3 +232,15 @@ Core 接口（伪 GPU 与内存 StateStore 实现）。本里程碑同时把 pin
 - 结论：`M1-01`～`M1-05` 的实现、文档与适用门禁证据完整，工作项勾选完成。
   `M1-06`、`M1-07` 未实现且保持未勾选；按 2026-09-04 的范围决定，本次不继续
   推进后续 M1 工作，M1 里程碑整体仍为 `In Progress`。
+
+2026-09-10：M1 随 M7 守护总装收口（状态 In Progress -> Completed）。
+
+- 范围：`M1-06`/`M1-07` 按 2026-09-04 的范围决定不再独立交付。其中被 M7
+  承接的部分：EXEC-09 启动 `PhaseGate` 已落地（`Daemon` 持有、`JobManager`
+  消费，`m7.unit.job-manager`）；六场景进程内闭环集成测试（正常完成、任务
+  异常、提交拒绝、执行中取消、超时升级、shutdown）由
+  `m7.unit.job-manager` 覆盖。未承接部分：调度触发的独立 Executor comm
+  合并层（`M1-06` 的其余内容）——M7 以 JobManager blocking worker 的命令
+  通道承载触发汇聚，不建独立合并组件，属实现形态差异而非能力缺口。
+- 依据：[M7 验证记录](m7-packaging-acceptance.md)、总计划第 1/4/5 节。
+- 状态：M1 关闭；后续演进按 `POST` 项立项。
