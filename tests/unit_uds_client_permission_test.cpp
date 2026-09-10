@@ -40,8 +40,7 @@ int main() {
   address.sun_family = AF_UNIX;
   path.copy(address.sun_path, path.size());
   address.sun_path[path.size()] = '\0';
-  YORI_CHECK(::bind(listen_fd, reinterpret_cast<const sockaddr*>(&address),
-                    sizeof(address)) == 0);
+  YORI_CHECK(::bind(listen_fd, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0);
   YORI_CHECK(::listen(listen_fd, 4) == 0);
   YORI_CHECK(::chmod(path.c_str(), 0600) == 0);
 
@@ -72,8 +71,7 @@ int main() {
   static_cast<void>(::unlink(path.c_str()));
 
   if (yori::testing::failure_count != 0) {
-    std::fprintf(stderr, "uds client permission: %d failure(s)\n",
-                 yori::testing::failure_count);
+    std::fprintf(stderr, "uds client permission: %d failure(s)\n", yori::testing::failure_count);
     return 1;
   }
   std::printf("uds client permission: all checks passed\n");
