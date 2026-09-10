@@ -1,6 +1,6 @@
 # M6：观察面
 
-> 状态：In Progress
+> 状态：Completed
 > 负责人：Linductor-alkaid
 > 所属计划：[Yori 实施总计划](yori-implementation-plan.md)
 > 前置：M5（[IPC 与 CLI](m5-ipc-cli.md)）
@@ -122,17 +122,17 @@ Executor 承载（`EXEC-03`/`EXEC-04`）、观察上限配置定稿，以及
 
 ## 工作项
 
-- [ ] `M6-01` 协议 v1 扩展：`LOGS_FOLLOW`/`TENSORBOARD` 请求与响应体、
+- [x] `M6-01` 协议 v1 扩展：`LOGS_FOLLOW`/`TENSORBOARD` 请求与响应体、
   流式帧族编解码、边界校验与 golden vector；协议单测与 fuzz 集扩展。
-- [ ] `M6-02` `LogStreamer`：每 Job `Topic<LogChunk>`、内存回看窗口与 GAP、
+- [x] `M6-02` `LogStreamer`：每 Job `Topic<LogChunk>`、内存回看窗口与 GAP、
   `finish_job` 的 EOF 语义、会话准入计数；单测覆盖窗口淘汰与迟到订阅。
-- [ ] `M6-03` 数据面与验证面：`LogPump` 观察者钩子（接受块 offset 发布、
+- [x] `M6-03` 数据面与验证面：`LogPump` 观察者钩子（接受块 offset 发布、
   丢弃标记 chunk）；`IpcService::validate_logs_follow` 与 `TENSORBOARD`
   查询（授权矩阵、脱敏）；配套单测。
-- [ ] `M6-04` 会话承载与总装：`UdsIpcServer` 流式委派、`LogFollowService`
+- [x] `M6-04` 会话承载与总装：`UdsIpcServer` 流式委派、`LogFollowService`
   blocking worker（回放/排空/BACKPRESSURE/EOF/停止）、`Daemon` 装配与
   EXEC-10 ①②③ 停止序；六场景 + 慢客户端负向单测。
-- [ ] `M6-05` CLI 与 E2E：`yori logs -f`（续传/GAP/BACKPRESSURE/EOF 退出码）、
+- [x] `M6-05` CLI 与 E2E：`yori logs -f`（续传/GAP/BACKPRESSURE/EOF 退出码）、
   `yori tensorboard`（解析优先级、信号转发、默认回环监听）；进程内 daemon
   + 真实 CLI + 真实子进程的全链路集成测试；文档同步与五预设 + PR CI。
 
@@ -152,28 +152,28 @@ Executor 承载（`EXEC-03`/`EXEC-04`）、观察上限配置定稿，以及
 
 ## 测试与退出条件
 
-- [ ] 协议单测通过（`m5.unit.ipc-protocol` 扩展）：新 kind roundtrip、
+- [x] 协议单测通过（`m5.unit.ipc-protocol` 扩展）：新 kind roundtrip、
   流式帧 roundtrip 与畸形矩阵（坏 kind/坏流标识/超限数据/截断/尾部字节）、
   golden vector 字节级断言。
-- [ ] fuzz 集通过（`m5.fuzz.ipc-parser` 扩展）：流式帧解码纳入变异集，
+- [x] fuzz 集通过（`m5.fuzz.ipc-parser` 扩展）：流式帧解码纳入变异集，
   无 crash、错误稳定、完整解析可再编码 roundtrip。
-- [ ] streamer 单测通过（`m6.unit.log-streamer`）：发布/订阅/回看窗口
+- [x] streamer 单测通过（`m6.unit.log-streamer`）：发布/订阅/回看窗口
   淘汰 -> GAP、准入上限（每 Job/全局）、`finish_job` -> EOF 与迟到订阅
   回放、标记 chunk 不前进 offset。
-- [ ] 泵钩子单测通过（`m2.unit.log-pump` 扩展）：接受块 offset 与数据
+- [x] 泵钩子单测通过（`m2.unit.log-pump` 扩展）：接受块 offset 与数据
   正确发布；注入写失败后标记 chunk 发布。
-- [ ] 会话单测通过（`m6.unit.log-follow`）：正常完成 EOF；对端异常断开
+- [x] 会话单测通过（`m6.unit.log-follow`）：正常完成 EOF；对端异常断开
   回收；准入拒绝回 LIMIT；执行中取消（客户端关闭）；写超时会话有界回收；
   服务 shutdown 全会话断开；慢客户端（不读 + 小缓冲）最终收到
   BACKPRESSURE 帧；`--since-*` 回放与 GAP 跳变。
-- [ ] 服务单测通过（`m5.unit.ipc-service` 扩展）：`validate_logs_follow`
+- [x] 服务单测通过（`m5.unit.ipc-service` 扩展）：`validate_logs_follow`
   授权矩阵与状态判定；`TENSORBOARD` owner/admin 查询、第三方 DENIED、
   非自有字段不泄漏。
-- [ ] 集成 E2E 通过（`m6.integration.logs-follow-e2e`）：真实子进程产日志
+- [x] 集成 E2E 通过（`m6.integration.logs-follow-e2e`）：真实子进程产日志
   -> LogPump -> streamer -> UDS -> 真实 CLI `logs -f` 收到数据帧与 EOF、
   退出码对齐；`--since-*` 续传去重；tensorboard 假二进制参数与 URL 契约。
-- [ ] `debug`/`release`/`asan`/`ubsan`/`tsan` 预设全部通过；PR CI 全绿。
-- [ ] 设计（11.3/11.4/11.6/13 节）、DEC-008 复核记录、威胁模型、总计划
+- [x] `debug`/`release`/`asan`/`ubsan`/`tsan` 预设全部通过；PR CI 全绿。
+- [x] 设计（11.3/11.4/11.6/13 节）、DEC-008 复核记录、威胁模型、总计划
   （第 1/5/6/11 节）与本计划同步更新。
 
 ## 验证记录
@@ -246,3 +246,20 @@ Executor 承载（`EXEC-03`/`EXEC-04`）、观察上限配置定稿，以及
   能力缺口（`Topic` 的 RejectNewest + per-subscriber 有界队列与
   blocking worker 模式完全覆盖会话承载；溢出检出由订阅者侧 offset 间断
   承担，属应用语义）。
+
+### 2026-09-10：M6-01～M6-05 PR CI 收尾
+
+- 范围：PR [#8](https://github.com/Linductor-alkaid/yori/pull/8)，提交
+  `9b8ad69`～`6822e91`（文档与计划、协议扩展、观察面实现、CLI、测试，
+  一次性全绿，无返工提交）。
+- 最终代码提交（`6822e91`）的 CI run
+  [34400184509](https://github.com/Linductor-alkaid/yori/actions/runs/34400184509)
+  8/8 全绿：clang-format 18、clang-tidy 18（15m28s，含流式帧解码与全部
+  M6 新源文件）、GCC 13/Clang 18 的 Debug/Release
+  configure/build/test/install/consumer、ASAN/UBSAN/TSAN 与依赖 pin 门禁
+  全部通过。CI 环境每套 ctest 为 33 passed、4 个环境占位用例显式 skipped
+  （GPU、multi-user 两个、performance；M6 新增 3 个用例全 passed）。
+- 结论：`M6-01`～`M6-05` 的实现、文档与门禁证据完整，工作项与退出条件
+  勾选完成，M6 里程碑标记 `Completed`。root 环境补跑项（socket `root:yori`
+  收敛、多用户连接准入）与真实 TensorBoard 二进制契约保持未勾选语义，
+  由 M7 打包验收执行（DEC-010/DEC-003）。

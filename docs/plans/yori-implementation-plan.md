@@ -48,9 +48,16 @@
   `yori` 六命令、IPC fuzz 起步落地；PR [#7](https://github.com/Linductor-alkaid/yori/pull/7)
   最终 CI [全绿](https://github.com/Linductor-alkaid/yori/actions/runs/34374222682)
   （证据见 [M5 验证记录](m5-ipc-cli.md)）。
-- 当前里程碑：M6（观察面）进行中，计划见
-  [M6 观察面](m6-observability.md)（`logs -f` 流式帧、回看窗口与 GAP、
-  跟随会话承载、`yori tensorboard`）。
+- M6（观察面）已完成：`logs -f` 流式跟随（协议 v1 新 kind `LOGS_FOLLOW`
+  与 `LOG_DATA`/`LOG_GAP`/`LOG_BACKPRESSURE`/`LOG_EOF` 帧族、每 Job
+  `Topic<LogChunk>` 与内存回看窗口、`LogFollowService` 会话承载
+  （EXEC-03/04）、慢客户端 BACKPRESSURE 显式断开）、`yori tensorboard`
+  （DEC-003 CLI 拉起 + daemon 只读解析）、日志与跟随上限冻结落地；PR
+  [#8](https://github.com/Linductor-alkaid/yori/pull/8) 最终 CI
+  [全绿](https://github.com/Linductor-alkaid/yori/actions/runs/34400184509)
+  （证据见 [M6 验证记录](m6-observability.md)）。
+- 当前里程碑：无（M6 已完成；M7 打包与 MVP 端到端验收可依序启动，含
+  守护总装收口前置项，见第 5 节）。
 - MVP 端到端验收以设计文档第 19 节判据为准，由 M7 执行并记录证据（见第 10 节）。
 - 里程碑文档在各自启动时创建（工程规范第 2 节）；当前实体文件：M0、M1、M2、
   M3、M4、M5、M6。
@@ -133,7 +140,7 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | M3 | NVML 真实 GPU 集成 | M2 | `GpuProvider` NVML 适配：发现、UUID 身份、遥测、外部占用检测（`EXTERNAL_BUSY`）；`GpuManager` 周期采样（`EXEC-05`/`EXEC-09` GPU 快照） | 无 | Completed |
 | M4 | 持久化与恢复 | M2 | SQLite StateStore、daemon 重启恢复、PID reuse 核验、`LOST` 语义 | 无 | Completed |
 | M5 | IPC 与 CLI | M3、M4 | UDS 传输、`SO_PEERCRED` 鉴权、请求/响应协议与 owner/admin 授权、`submit`/`ps`/`queue`/`gpu`/`cancel`/`logs` 快照、IPC fuzz 起步 | 无 | Completed |
-| M6 | 观察面 | M5 | `logs -f` 流式帧（offset 续传、`GAP`/`EOF`/`BACKPRESSURE`）、日志轮转、`yori tensorboard` | 无 | In Progress |
+| M6 | 观察面 | M5 | `logs -f` 流式帧（offset 续传、`GAP`/`EOF`/`BACKPRESSURE`）、日志轮转、`yori tensorboard` | 无 | Completed |
 | M7 | 打包与 MVP 端到端验收 | M6 | systemd unit、安装打包、设计 §19 判据逐项验收 | `v0.1.0`（MVP） | Planned |
 
 - M3 与 M4 在 M2 完成后可并行推进。
