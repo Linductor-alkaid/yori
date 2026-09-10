@@ -3,6 +3,18 @@
 本文件记录 Yori 的版本化变更（工程规范第 10.5 节）。日期为 YYYY-MM-DD；
 条目按版本倒序排列。未发布条目置于 `## Unreleased`。
 
+## v0.1.1 - 2026-09-10
+
+### 修复
+
+- **deb 包不再推荐安装 `nvidia-driver`**（v0.1.0 已知问题）：apt 默认安装
+  Recommends，会拉入最新系列驱动组件并与已安装的版本化驱动栈
+  （如 `nvidia-driver-570`）冲突，导致 apt 计划**卸载既有驱动**。Yori 的
+  NVML 为运行期 `dlopen`，GPU 服务器必然已有驱动，deb 不应携带任何 NVIDIA
+  依赖——现仅 `Depends: libsqlite3-0`，并在打包脚本中加入防回归自检
+  （control 的 Depends/Recommends/Suggests 不得引用 nvidia 包）。
+  v0.1.0 release 上的问题安装包已移除，请使用 v0.1.1。
+
 ## v0.1.0 - 2026-09-10
 
 首个 MVP 版本（M0-M7 全部完成）：单节点多用户 GPU 训练任务排队、调度与
