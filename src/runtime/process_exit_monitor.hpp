@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <executor/comm/channel.hpp>
+#include <functional>
 #include <memory>
 #include <yori/process/process_supervisor.hpp>
 
@@ -97,6 +98,12 @@ class ProcessExitMonitor final {
   // 事件消费（单消费者）。stop 之后缓冲事件仍可读取，析构前应排空。
   [[nodiscard]] bool try_receive_exit(ExitEvent& out);
   [[nodiscard]] bool receive_exit_for(ExitEvent& out, std::chrono::milliseconds timeout);
+
+  // 变更通知（M7 守护总装）：事件成功投递进通道后回调，供守护承载
+  // （JobManager）的唤醒管道触发（MpscChannel 无 fd 可 poll）。必须在并发
+  // 使用前设置一次；回调自身必须非阻塞、不抛出、可从 worker 线程调用；
+  // 清空以解除挂钩。
+  void set_event_listener(std::function<void()> listener);
 
   [[nodiscard]] std::size_t registered_count() const noexcept;
   [[nodiscard]] std::uint64_t delivery_retry_count() const noexcept;

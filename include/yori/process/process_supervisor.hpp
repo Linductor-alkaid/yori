@@ -118,6 +118,28 @@ enum class SpawnErrorCode {
   kIdentityReadFailed,
 };
 
+enum class AdoptErrorCode {
+  kNone,
+  kAlreadyRunning,
+  kInvalidIdentity,
+  kIdentityVerifyFailed,
+};
+
+[[nodiscard]] const char* to_string(AdoptErrorCode code) noexcept;
+
+struct AdoptResult final {
+  AdoptErrorCode code{AdoptErrorCode::kInvalidIdentity};
+  std::string message;
+
+  [[nodiscard]] bool ok() const noexcept { return code == AdoptErrorCode::kNone; }
+  explicit operator bool() const noexcept { return ok(); }
+};
+
+enum class AbandonCode {
+  kAbandoned,
+  kNotRunning,
+};
+
 [[nodiscard]] const char* to_string(SpawnErrorCode code) noexcept;
 
 struct SpawnResult final {
@@ -214,6 +236,16 @@ class ProcessSupervisor final {
   // SIGPIPE=SIG_IGN（DEC-008）并完成 setgroups -> setgid -> setuid 降权（DEC-004）。
   // 仅在 kIdle/kExited 阶段可调用。
   [[nodiscard]] SpawnResult spawn(const launch::LaunchPlan& plan);
+
+  // 采纳一个已通过身份核验的既有进程（RULE-06 恢复路径，M7）：不 fork、不建立
+  // 管道（DEC-008：重启窗口输出不可恢复）；进入 kRunning 后 request_cancel/
+  // escalate 的进程组信号语义与 spawn 的进程一致。采纳者不是该进程的父进程，
+  // waitpid 不可用，退出状态由外部观察者（ProcessExitMonitor）提供。
+  [[nodiscard]] AdoptResult adopt(const ProcessIdentity& identity) noexcept;
+
+  // 忘记当前进程且不发送任何信号（RULE-10：daemon 关闭不终止训练进程）。
+  // 进程的后续生命周期由恢复路径或系统 init 负责；abandon 后回到 kIdle。
+  [[nodiscard]] AbandonCode abandon() noexcept;
 
   // 对整个进程组发送 SIGTERM 并记录宽限截止时刻（DEC-007）。
   [[nodiscard]] CancelResult request_cancel() noexcept;
