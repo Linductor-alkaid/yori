@@ -22,9 +22,18 @@ VERSION=${3:-$(sed -n 's/^  VERSION \(.*\)$/\1/p' "${SOURCE_DIR}/CMakeLists.txt"
 ARCH=$(dpkg --print-architecture)
 DEB_NAME="yori_${VERSION}_${ARCH}.deb"
 
-for tool in cmake ninja dpkg-deb; do
+for tool in cmake ninja dpkg-deb objdump; do
   command -v "${tool}" >/dev/null || { echo "build-deb: missing tool: ${tool}" >&2; exit 1; }
 done
+
+# 发布兼容性红线（v0.1.2 起）：产物必须能在 Ubuntu 22.04（glibc 2.35、
+# GLIBCXX 3.4.30）及更新发行版上运行。二进制引用的符号版本由构建环境的
+# glibc/libstdc++ 决定——在更新的发行版（如 24.04：GLIBC_2.38 /
+# __isoc23_*）上构建出的包无法在 22.04 加载（真机安装反馈的
+# "GLIBCXX_3.4.31 / GLIBC_2.38 not found"）。因此发布包必须在最老的支持
+# 目标（ubuntu-22.04 工具链）上构建；以下自检在打包时拦截错误平台产物。
+MAX_GLIBC=2.35
+MAX_GLIBCXX=3.4.30
 
 # 独立构建树：deb 前缀 /usr（unit 的 ExecStart 随此前缀固化）。
 cmake -S "${SOURCE_DIR}" -B "${BUILD_DIR}" -G Ninja -DCMAKE_BUILD_TYPE=Release \
@@ -56,7 +65,7 @@ Version: ${VERSION}
 Section: admin
 Priority: optional
 Architecture: ${ARCH}
-Depends: libsqlite3-0
+Depends: libsqlite3-0, libc6 (>= 2.35), libstdc++6 (>= 12)
 Maintainer: Linductor-alkaid <linductor-alkaid@users.noreply.github.com>
 Description: single-node multi-user GPU training job queue, scheduler and supervisor
  Yori queues, schedules and supervises GPU training jobs submitted by multiple
@@ -125,6 +134,22 @@ chmod 0755 "${STAGE}/DEBIAN/postinst" "${STAGE}/DEBIAN/prerm" "${STAGE}/DEBIAN/p
 
 dpkg-deb --build "${STAGE}" "${OUT_DIR}/${DEB_NAME}" >/dev/null
 echo "build-deb: ${OUT_DIR}/${DEB_NAME}"
+
+# 符号版本上限自检：每个二进制的最高 GLIBC/GLIBCXX 需求不得超过红线，
+# 超限说明构建环境新于最老支持目标（应在 ubuntu-22.04 上构建）。
+for bin in "${STAGE}/usr/bin/yori" "${STAGE}/usr/bin/yorid"; do
+  bin_name=$(basename "${bin}")
+  req_glibc=$(objdump -T "${bin}" | grep -oE 'GLIBC_[0-9.]+' | sed 's/^GLIBC_//' | sort -uV | tail -n1)
+  req_glibcxx=$(objdump -T "${bin}" | grep -oE 'GLIBCXX_[0-9.]+' | sed 's/^GLIBCXX_//' | sort -uV | tail -n1)
+  top_glibc=$(printf '%s\n' "${MAX_GLIBC}" "${req_glibc}" | sort -V | tail -n1)
+  top_glibcxx=$(printf '%s\n' "${MAX_GLIBCXX}" "${req_glibcxx}" | sort -V | tail -n1)
+  if [ "${top_glibc}" != "${MAX_GLIBC}" ] || [ "${top_glibcxx}" != "${MAX_GLIBCXX}" ]; then
+    echo "build-deb: ${bin_name} requires GLIBC_${req_glibc:-none}/GLIBCXX_${req_glibcxx:-none}," \
+      "exceeding ${MAX_GLIBC}/${MAX_GLIBCXX} -- build on ubuntu-22.04 (oldest supported target)" >&2
+    exit 1
+  fi
+  echo "build-deb: ${bin_name} symbol ceiling ok (GLIBC_${req_glibc:-none}, GLIBCXX_${req_glibcxx:-none})"
+done
 
 # 自检：control 可解析、关键文件在位（contents 先落变量，避免 grep -q 的
 # 早退 SIGPIPE 噪声）。
