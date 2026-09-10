@@ -24,6 +24,8 @@ const char* to_string(DaemonStartCode code) noexcept {
       return "recovery failed";
     case DaemonStartCode::kGpuFailed:
       return "gpu observation failed";
+    case DaemonStartCode::kJobManagerFailed:
+      return "job manager failed";
     case DaemonStartCode::kIpcFailed:
       return "ipc server failed";
   }
@@ -43,8 +45,13 @@ const char* to_string(DaemonStopCode code) noexcept {
 }
 
 Daemon::Daemon(executor::Executor& executor, gpu::GpuProvider& gpu_provider,
-               store::StateStore& store, DaemonConfig config)
-    : executor_(executor), gpu_provider_(gpu_provider), store_(store), config_(std::move(config)) {}
+               std::unique_ptr<store::StateStore> store, DaemonConfig config)
+    : executor_(executor),
+      gpu_provider_(gpu_provider),
+      store_(std::move(store)),
+      config_(std::move(config)) {
+  launch_adapter_.set_daemon_environment(config_.job_manager.daemon_environment);
+}
 
 Daemon::~Daemon() { static_cast<void>(stop()); }
 
@@ -56,6 +63,10 @@ LogStreamer& Daemon::log_streamer() noexcept { return *log_streamer_; }
 
 LogFollowStatistics Daemon::log_follow_statistics() const {
   return log_follow_ != nullptr ? log_follow_->statistics() : LogFollowStatistics{};
+}
+
+JobManagerStats Daemon::job_manager_stats() const {
+  return job_manager_ != nullptr ? job_manager_->stats() : JobManagerStats{};
 }
 
 DaemonStartResult Daemon::start() {
@@ -72,15 +83,23 @@ DaemonStartResult Daemon::start() {
   if (!config_.ipc.valid(ipc_validation_error)) {
     return start_failure(DaemonStartCode::kInvalidConfig, ipc_validation_error);
   }
+  std::string job_manager_validation_error;
+  if (!config_.job_manager.valid(job_manager_validation_error)) {
+    return start_failure(DaemonStartCode::kInvalidConfig,
+                         "invalid job manager config: " + job_manager_validation_error);
+  }
+  if (store_ == nullptr) {
+    return start_failure(DaemonStartCode::kInvalidConfig, "state store is required");
+  }
 
-  // 1) 恢复：RULE-06，绝不无条件重启活动 Job；失败则拒绝启动。
+  // 1) 恢复（gate 阶段 kPhaseRecovery 之前完成，RULE-06）。
   queue::QueueErrorCode queue_error = queue::QueueErrorCode::kNone;
   queue_ = queue::GlobalJobQueue::create(config_.queue, queue_error);
   if (queue_ == nullptr) {
     return start_failure(DaemonStartCode::kInvalidConfig,
                          std::string("queue creation failed: ") + queue::to_string(queue_error));
   }
-  recovery::JobRecovery recovery(store_, *queue_);
+  recovery::JobRecovery recovery(*store_, *queue_);
   recovery::RecoveryResult recovery_result = recovery.recover();
   last_recovery_ = recovery_result;
   if (!recovery_result.ok()) {
@@ -90,6 +109,7 @@ DaemonStartResult Daemon::start() {
         std::string("recovery failed: ") + recovery::to_string(recovery_result.code),
         recovery_result};
   }
+  static_cast<void>(startup_gate_.advance_to(kPhaseRecovery));
 
   // 2) GPU 观察：初始观测同步完成，失败则拒绝启动（`yori gpu` 数据源）。
   gpu_manager_ = std::make_unique<GpuManager>(executor_, gpu_provider_, config_.gpu);
@@ -101,6 +121,7 @@ DaemonStartResult Daemon::start() {
                          std::string("gpu manager start failed: ") + to_string(gpu_start.code) +
                              (gpu_start.message.empty() ? "" : ": " + gpu_start.message));
   }
+  static_cast<void>(startup_gate_.advance_to(kPhaseGpuObserved));
   gpu_status_ = std::make_unique<ManagerGpuStatusSource>(*gpu_manager_);
 
   // 3) 观察面（M6）：LogStreamer（Topic/回看窗口/准入）先于会话 worker，
@@ -116,9 +137,29 @@ DaemonStartResult Daemon::start() {
   }
   log_streamer_ = std::make_unique<LogStreamer>(config_.log_streamer);
 
+  // 4) 守护承载（M7）：调度开启前启动（gate 阶段 kPhaseSchedulingOpen 的
+  //     消费者）；恢复采纳在 worker 启动前完成。
+  job_manager_ = std::make_unique<JobManager>(executor_, *store_, *queue_, *gpu_manager_,
+                                              *log_streamer_, identity_resolver_, launch_adapter_,
+                                              startup_gate_, config_.job_manager);
+  static_cast<void>(startup_gate_.advance_to(kPhaseSchedulingOpen));
+  const JobManagerStartResult job_manager_start = job_manager_->start(recovery_result);
+  if (!job_manager_start.ok()) {
+    job_manager_.reset();
+    log_streamer_.reset();
+    gpu_status_.reset();
+    static_cast<void>(gpu_manager_->stop());
+    gpu_manager_.reset();
+    queue_.reset();
+    return start_failure(
+        DaemonStartCode::kJobManagerFailed,
+        std::string("job manager start failed: ") + to_string(job_manager_start.code) +
+            (job_manager_start.message.empty() ? "" : ": " + job_manager_start.message));
+  }
+
   log_reader_ = ipc::file_log_snapshot_reader();
-  service_ = std::make_unique<ipc::IpcService>(config_.service, *queue_, store_, *gpu_status_,
-                                               *log_reader_);
+  service_ = std::make_unique<ipc::IpcService>(config_.service, *store_, *gpu_status_, *log_reader_,
+                                               *job_manager_);
   log_follow_ =
       std::make_unique<LogFollowService>(executor_, *service_, *log_streamer_, config_.log_follow);
   // Topic 无 fd 可 poll：发布/终态经变更监听显式唤醒会话 worker（EXEC-03/04）。
@@ -128,6 +169,8 @@ DaemonStartResult Daemon::start() {
     log_follow_.reset();
     service_.reset();
     log_reader_.reset();
+    static_cast<void>(job_manager_->stop());
+    job_manager_.reset();
     log_streamer_.reset();
     gpu_status_.reset();
     static_cast<void>(gpu_manager_->stop());
@@ -139,7 +182,7 @@ DaemonStartResult Daemon::start() {
                              (follow_start.message.empty() ? "" : ": " + follow_start.message));
   }
 
-  // 4) IPC 服务（EXEC-02）；LOGS_FOLLOW 委派给观察面（EXEC-03）。
+  // 5) IPC 服务（EXEC-02）；LOGS_FOLLOW 委派给观察面（EXEC-03）。
   ipc_server_ =
       std::make_unique<UdsIpcServer>(executor_, *service_, config_.ipc, log_follow_.get());
   const ipc::IpcTransportStartResult ipc_start = ipc_server_->start();
@@ -148,6 +191,8 @@ DaemonStartResult Daemon::start() {
     log_follow_.reset();
     service_.reset();
     log_reader_.reset();
+    static_cast<void>(job_manager_->stop());
+    job_manager_.reset();
     log_streamer_.reset();
     gpu_status_.reset();
     static_cast<void>(gpu_manager_->stop());
@@ -171,17 +216,18 @@ DaemonStopCode Daemon::stop() {
     return DaemonStopCode::kNotRunning;
   }
 
-  // EXEC-10 适用子集：① 停止 IPC（新连接与请求生产者）-> ② 断开全部
-  // logs -f 跟随会话 -> ③ 停止 GPU 周期任务。M6 无调度生产者与在飞守护
-  // 任务；store 写路径在 IPC worker 内同步完成，IPC join 后无未落盘写入。
+  // EXEC-10 完整顺序：① IPC -> ② 跟随会话 -> ③ GPU 周期任务 -> ④ 守护承载
+  // （abandon 运行中训练进程，RULE-10；JobManager 内部含 ⑤ 退出监视/日志泵
+  // 回收与 ⑦ 终态落盘排空）。
   ipc_server_->stop();
   ipc_server_.reset();
   log_streamer_->set_change_listener(nullptr);  // 先解除回调，再回收 worker。
   log_follow_.reset();
   service_.reset();
   log_reader_.reset();
-  log_streamer_.reset();
   static_cast<void>(gpu_manager_->stop());
+  static_cast<void>(job_manager_->stop());
+  job_manager_.reset();
   gpu_status_.reset();
   gpu_manager_.reset();
   queue_.reset();

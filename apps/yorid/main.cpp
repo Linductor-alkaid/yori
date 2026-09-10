@@ -10,7 +10,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 #include <yori/gpu/nvml_gpu_provider.hpp>
 #include <yori/store/sqlite_state_store.hpp>
@@ -18,11 +21,13 @@
 #include "runtime/daemon.hpp"
 #include "runtime/executor_runtime.hpp"
 #include "runtime/ipc_server.hpp"
+#include "runtime/serial_state_store.hpp"
 
 namespace {
 
 constexpr const char* kDefaultSocketPath = "/run/yori/yori.sock";
 constexpr const char* kDefaultStateDb = "/var/lib/yori/state.db";
+constexpr const char* kDefaultLogRoot = "/var/lib/yori/jobs";
 constexpr const char* kDefaultGpuLibrary = "libnvidia-ml.so.1";
 constexpr const char* kDefaultSqliteLibrary = "libsqlite3.so.0";
 
@@ -35,6 +40,7 @@ struct DaemonArguments final {
   std::uint32_t socket_group{0};
   std::vector<std::uint32_t> admin_gids;
   std::string state_db{kDefaultStateDb};
+  std::string log_root{kDefaultLogRoot};
   std::string gpu_library{kDefaultGpuLibrary};
   std::string sqlite_library{kDefaultSqliteLibrary};
 };
@@ -50,10 +56,12 @@ void print_usage() {
                "  --admin-gid GID        admin group; members may view and cancel any\n"
                "                         job (repeatable)\n"
                "  --state-db PATH        SQLite state database (default %s)\n"
+               "  --log-root PATH        job log root (default %s)\n"
                "  --gpu-library PATH     NVML library (default %s)\n"
                "  --sqlite-library PATH  SQLite library (default %s)\n"
                "  --version              print version and exit\n",
-               kDefaultSocketPath, kDefaultStateDb, kDefaultGpuLibrary, kDefaultSqliteLibrary);
+               kDefaultSocketPath, kDefaultStateDb, kDefaultLogRoot, kDefaultGpuLibrary,
+               kDefaultSqliteLibrary);
 }
 
 bool parse_u32(const char* text, int base, std::uint32_t& out) {
@@ -147,6 +155,12 @@ int parse_arguments(int argc, char* argv[], DaemonArguments& args, bool& valid) 
       }
       continue;
     }
+    if (flag == "--log-root") {
+      if (!take_value("--log-root", args.log_root)) {
+        valid = false;
+      }
+      continue;
+    }
     if (flag == "--gpu-library") {
       if (!take_value("--gpu-library", args.gpu_library)) {
         valid = false;
@@ -214,15 +228,17 @@ int main(int argc, char* argv[]) {
     return 1;
   };
 
-  // StateStore（SQLite，DEC-009）。
+  // StateStore（SQLite，DEC-009）；运行期读（IPC worker）与写（JobManager，
+  // EXEC-08）经 SerialStateStore 的所有权互斥串行化（M7 守护总装）。
   yori::store::SqliteStateStoreConfig store_config;
   store_config.library_path = args.sqlite_library;
   store_config.database_path = args.state_db;
-  yori::store::SqliteStateStore store(store_config);
-  const yori::store::SqliteStoreOpenResult store_open = store.open();
+  auto store = std::make_unique<yori::store::SqliteStateStore>(store_config);
+  const yori::store::SqliteStoreOpenResult store_open = store->open();
   if (!store_open.ok()) {
     return fail("state store open", yori::store::to_string(store_open.code), store_open.detail);
   }
+  auto serialized_store = std::make_unique<yori::runtime::SerialStateStore>(std::move(store));
 
   // GpuProvider（NVML 适配，管理员配置的库路径，基线 20）。
   yori::gpu::NvmlGpuProviderConfig gpu_config;
@@ -253,8 +269,20 @@ int main(int argc, char* argv[]) {
   daemon_config.ipc = ipc_config;
   daemon_config.service.admin_gids = args.admin_gids;
   resolve_admin_members(args.admin_gids, daemon_config.service.admin_uids);
+  daemon_config.job_manager.log_root = args.log_root;
+  // DEC-006：daemon 环境快照（白名单继承源）。
+  for (char* const* entry = ::environ; entry != nullptr && *entry != nullptr; ++entry) {
+    const std::string_view text{*entry};
+    const auto separator = text.find('=');
+    if (separator == std::string_view::npos || separator == 0) {
+      continue;
+    }
+    daemon_config.job_manager.daemon_environment.emplace_back(
+        std::string{text.substr(0, separator)}, std::string{text.substr(separator + 1)});
+  }
 
-  yori::runtime::Daemon daemon(executor_runtime.executor(), gpu_provider, store, daemon_config);
+  yori::runtime::Daemon daemon(executor_runtime.executor(), gpu_provider,
+                               std::move(serialized_store), daemon_config);
   const yori::runtime::DaemonStartResult daemon_start = daemon.start();
   if (!daemon_start.ok()) {
     return fail("daemon start", yori::runtime::to_string(daemon_start.code), daemon_start.message);

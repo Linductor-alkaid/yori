@@ -106,14 +106,14 @@ std::unique_ptr<LogSnapshotReader> file_log_snapshot_reader() {
   return std::make_unique<FileLogSnapshotReader>();
 }
 
-IpcService::IpcService(IpcServiceConfig config, queue::GlobalJobQueue& queue,
-                       store::StateStore& store, GpuStatusSource& gpu_source,
-                       LogSnapshotReader& log_reader)
+IpcService::IpcService(IpcServiceConfig config, store::StateStore& store,
+                       GpuStatusSource& gpu_source, LogSnapshotReader& log_reader,
+                       JobControl& job_control)
     : config_(std::move(config)),
-      queue_(queue),
       store_(store),
       gpu_source_(gpu_source),
-      log_reader_(log_reader) {}
+      log_reader_(log_reader),
+      job_control_(job_control) {}
 
 bool IpcService::is_admin(const PeerCredentials& peer) const noexcept {
   for (const std::uint32_t gid : config_.admin_gids) {
@@ -186,58 +186,24 @@ IpcResponse IpcService::handle_submit(const PeerCredentials& peer,
                           job::to_string(validation.code));
   }
 
-  const store::StateStoreLoadResult load = store_.load();
-  if (!load.ok()) {
-    return error_response(IpcRequestKind::kSubmit, IpcError::kStoreFailed,
-                          store::to_string(load.code));
-  }
-
-  // JobId 服务器级单调分配：终态 id 不复用（快照最大值 + 1）。
-  std::uint64_t max_id = 0;
-  for (const auto& record : load.snapshot.jobs) {
-    max_id = std::max(max_id, record.id.value());
-  }
-
-  store::StoredJob record;
-  record.id = job::JobId{max_id + 1};
-  record.spec = std::move(spec);
-  record.state = job::JobState::kQueued;
-  record.revision = 0;
-
-  store::StateMutation mutation;
-  mutation.expected_revision = load.snapshot.revision;
-  mutation.create_jobs.push_back(record);
-
-  const store::StateStoreWriteResult write = store_.apply(mutation);
-  if (!write.ok()) {
-    return error_response(IpcRequestKind::kSubmit, IpcError::kStoreFailed,
-                          store::to_string(write.code));
-  }
-
-  const queue::QueueOperationResult admission = queue_.admit(record);
-  if (!admission.ok()) {
-    // 容量拒绝显式回滚：持久化 CANCELLED 保留审计事实（revision 递增，
-    // QUEUED -> CANCELLED 合法转换；spec 原样）。回滚本身失败时并入 detail，
-    // 不静默吞掉不一致。
-    store::StoredJob cancelled = record;
-    cancelled.state = job::JobState::kCancelled;
-    cancelled.revision = 1;
-    store::StateMutation rollback;
-    rollback.expected_revision = write.revision;
-    rollback.update_jobs.push_back(std::move(cancelled));
-    const store::StateStoreWriteResult rollback_write = store_.apply(rollback);
-
-    std::string detail = queue::to_string(admission.code);
-    if (!rollback_write.ok()) {
-      detail += std::string("; rollback failed: ") + store::to_string(rollback_write.code);
-    }
-    return error_response(IpcRequestKind::kSubmit, IpcError::kQueueRejected, std::move(detail));
+  // 状态变更（JobId 分配、store 创建、队列准入）委派给唯一写者（M7 守护
+  // 总装：JobManager worker 经 JobControl）。
+  const JobSubmitOutcome outcome = job_control_.submit_job(spec);
+  switch (outcome.code) {
+    case JobSubmitOutcome::Code::kSubmitted:
+      break;
+    case JobSubmitOutcome::Code::kStoreFailed:
+      return error_response(IpcRequestKind::kSubmit, IpcError::kStoreFailed, outcome.detail);
+    case JobSubmitOutcome::Code::kQueueRejected:
+      return error_response(IpcRequestKind::kSubmit, IpcError::kQueueRejected, outcome.detail);
+    case JobSubmitOutcome::Code::kUnavailable:
+      return error_response(IpcRequestKind::kSubmit, IpcError::kNotAvailable, outcome.detail);
   }
 
   IpcResponse response;
   response.kind = IpcRequestKind::kSubmit;
   response.error = IpcError::kNone;
-  response.job_id = record.id.value();
+  response.job_id = outcome.job_id;
   return response;
 }
 
@@ -296,8 +262,24 @@ IpcResponse IpcService::handle_queue(const PeerCredentials& peer) {
                           store::to_string(load.code));
   }
 
-  const auto& entries = queue_.entries();
-  const bool truncate = entries.size() > config_.max_listed_jobs;
+  // 队列视图由 store 快照派生（M7）：QUEUED Job 按 (submit_time, JobId) 升序，
+  // 与 GlobalJobQueue 的派生索引一致；索引本身是 JobManager 私有。
+  std::vector<const store::StoredJob*> queued;
+  queued.reserve(load.snapshot.jobs.size());
+  for (const auto& record : load.snapshot.jobs) {
+    if (record.state == job::JobState::kQueued) {
+      queued.push_back(&record);
+    }
+  }
+  std::sort(queued.begin(), queued.end(),
+            [](const store::StoredJob* lhs, const store::StoredJob* rhs) {
+              if (lhs->spec.submit_time != rhs->spec.submit_time) {
+                return lhs->spec.submit_time < rhs->spec.submit_time;
+              }
+              return lhs->id < rhs->id;
+            });
+
+  const bool truncate = queued.size() > config_.max_listed_jobs;
 
   IpcResponse response;
   response.kind = IpcRequestKind::kQueue;
@@ -307,15 +289,15 @@ IpcResponse IpcService::handle_queue(const PeerCredentials& peer) {
   }
 
   const std::size_t listed =
-      std::min(entries.size(), static_cast<std::size_t>(config_.max_listed_jobs));
+      std::min(queued.size(), static_cast<std::size_t>(config_.max_listed_jobs));
   response.queue.reserve(listed);
   for (std::size_t i = 0; i < listed; ++i) {
-    const store::StoredJob* record = find_job(load.snapshot, entries[i].job_id.value());
+    const store::StoredJob* record = queued[i];
     IpcQueueEntry entry;
-    entry.job_id = entries[i].job_id.value();
-    entry.owner_uid = record != nullptr ? record->spec.owner_uid : 0;
-    entry.submit_time_unix_ns = unix_ns(entries[i].submit_time);
-    entry.state = job_state_wire(record != nullptr ? record->state : job::JobState::kQueued);
+    entry.job_id = record->id.value();
+    entry.owner_uid = record->spec.owner_uid;
+    entry.submit_time_unix_ns = unix_ns(record->spec.submit_time);
+    entry.state = job_state_wire(record->state);
     response.queue.push_back(entry);
   }
   return response;
@@ -400,48 +382,33 @@ IpcResponse IpcService::handle_cancel(const PeerCredentials& peer, std::uint64_t
     context_state(response, current);
     return response;
   }
-  if (current != job::JobState::kQueued) {
-    // STARTING/RUNNING/STOPPING 的取消需要进程组信号路径（SIGTERM -> grace ->
-    // SIGKILL），随守护总装收口接入（M7 前）；当前显式拒绝而非假装支持。
-    IpcResponse response =
-        error_response(IpcRequestKind::kCancel, IpcError::kUnsupported,
-                       "cancel of running jobs requires process supervision (not in this build)");
-    context_state(response, current);
-    return response;
+
+  // QUEUED 与活动态（STARTING/RUNNING/STOPPING）的取消都委派给唯一写者
+  // （M7 守护总装）：QUEUED 终态化并移出队列；活动态进入 SIGTERM -> grace ->
+  // SIGKILL 的取消升级路径（DEC-007），结果状态 STOPPING。
+  const JobCancelOutcome outcome = job_control_.cancel_job(job_id);
+  switch (outcome.code) {
+    case JobCancelOutcome::Code::kCancelled:
+    case JobCancelOutcome::Code::kStopping: {
+      IpcResponse response;
+      response.kind = IpcRequestKind::kCancel;
+      response.state = outcome.state;
+      return response;
+    }
+    case JobCancelOutcome::Code::kNotFound:
+      return error_response(IpcRequestKind::kCancel, IpcError::kNotFound, "job not found");
+    case JobCancelOutcome::Code::kInvalidState: {
+      IpcResponse response =
+          error_response(IpcRequestKind::kCancel, IpcError::kInvalidState, outcome.detail);
+      response.state = outcome.state;
+      return response;
+    }
+    case JobCancelOutcome::Code::kStoreFailed:
+      return error_response(IpcRequestKind::kCancel, IpcError::kStoreFailed, outcome.detail);
+    case JobCancelOutcome::Code::kUnavailable:
+      return error_response(IpcRequestKind::kCancel, IpcError::kNotAvailable, outcome.detail);
   }
-
-  // 先持久化 CANCELLED（revision + 1），再移除队列条目；队列已无该条目视为
-  // 幂等成功。
-  store::StoredJob cancelled = *record;
-  cancelled.state = job::JobState::kCancelled;
-  cancelled.revision = record->revision + 1;
-
-  store::StateMutation mutation;
-  mutation.expected_revision = load.snapshot.revision;
-  mutation.update_jobs.push_back(std::move(cancelled));
-
-  const store::StateStoreWriteResult write = store_.apply(mutation);
-  if (!write.ok()) {
-    IpcResponse response = error_response(IpcRequestKind::kCancel, IpcError::kStoreFailed,
-                                          store::to_string(write.code));
-    context_state(response, current);
-    return response;
-  }
-
-  const queue::QueueOperationResult removal = queue_.remove(job::JobId{job_id});
-  if (!removal.ok() && removal.code != queue::QueueErrorCode::kJobNotFound) {
-    // 状态已终态化，队列移除异常仅并入 detail（持久化事实优先）。
-    IpcResponse response = error_response(
-        IpcRequestKind::kCancel, IpcError::kInternal,
-        std::string("cancelled but queue removal failed: ") + queue::to_string(removal.code));
-    context_state(response, job::JobState::kCancelled);
-    return response;
-  }
-
-  IpcResponse response;
-  response.kind = IpcRequestKind::kCancel;
-  response.state = job_state_wire(job::JobState::kCancelled);
-  return response;
+  return error_response(IpcRequestKind::kCancel, IpcError::kInternal, "unhandled cancel outcome");
 }
 
 IpcResponse IpcService::handle_logs(const PeerCredentials& peer, const IpcLogsRequest& request) {
