@@ -156,8 +156,13 @@ jobs:
             -DYORI_FETCH_DEPENDENCIES=OFF
 
   deb:
-    name: deb 打包冒烟（packaging/deb）
-    runs-on: ubuntu-24.04
+    # 与 release 一致的 22.04 工具链（符号版本红线）：冒烟在 22.04 runner
+    # 上真实运行二进制，每个 PR 验证最老支持目标的可运行性。
+    name: deb 打包冒烟（ubuntu-22.04 / gcc-12，符号版本红线）
+    runs-on: ubuntu-22.04
+    env:
+      CC: gcc-12
+      CXX: g++-12
     steps:
       - uses: actions/checkout@v4
         with:
@@ -165,7 +170,7 @@ jobs:
       - name: 安装工具链
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ninja-build g++ libsqlite3-dev
+          sudo apt-get install -y -qq ninja-build g++-12 libsqlite3-dev
       - name: 打包 deb 并自检（脚本自建 /usr 前缀构建树）
         run: |
           packaging/deb/build-deb.sh dist

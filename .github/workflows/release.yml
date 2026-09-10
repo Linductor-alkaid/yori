@@ -13,8 +13,14 @@ permissions:
 
 jobs:
   release:
-    name: 构建 deb 并发布 release（ubuntu-24.04 / gcc）
-    runs-on: ubuntu-24.04
+    # v0.1.2 起：发布包在最老的支持目标 ubuntu-22.04 上构建（glibc 2.35 /
+    # GLIBCXX 3.4.30 符号上限），产物向后兼容 22.04 及更新发行版；在 24.04
+    # 上构建会产生 GLIBC_2.38/GLIBCXX_3.4.31 引用，22.04 无法加载。
+    name: 构建 deb 并发布 release（ubuntu-22.04 / gcc-12）
+    runs-on: ubuntu-22.04
+    env:
+      CC: gcc-12
+      CXX: g++-12
     steps:
       - uses: actions/checkout@v4
         with:
@@ -22,7 +28,7 @@ jobs:
       - name: 安装工具链
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ninja-build g++ libsqlite3-dev
+          sudo apt-get install -y -qq ninja-build g++-12 libsqlite3-dev
       - name: configure + build + test（release 预设）
         run: |
           cmake --preset release -DYORI_FETCH_DEPENDENCIES=OFF
