@@ -1,7 +1,7 @@
 # Yori 实施总计划
 
 > 状态：Active
-> 版本：1.9
+> 版本：1.10
 > 更新日期：2026-09-10
 > 负责人：Linductor-alkaid
 > 设计依据：[Yori 项目设计文档](../design/yori-project-design.md)（v0.5）
@@ -56,16 +56,19 @@
   [#8](https://github.com/Linductor-alkaid/yori/pull/8) 最终 CI
   [全绿](https://github.com/Linductor-alkaid/yori/actions/runs/34400184509)
   （证据见 [M6 验证记录](m6-observability.md)）。
-- M7（打包与 MVP 端到端验收）进行中（含守护总装收口前置项）：守护总装
-  （`JobManager` 调度触发联动与进程守护、恢复采纳与 STOPPING 重取消、
-  `SerialStateStore` 所有权串行化、`StoreTaskRunner` 写路径接入、启动
-  `PhaseGate`、EXEC-10 完整停止序与 RULE-10 abandon）、systemd unit 与安装
-  打包已落地；CI/验收证据收口中。
+- M7（打包与 MVP 端到端验收）已完成：守护总装收口（`JobManager` 调度
+  触发联动与进程守护、恢复采纳与 STOPPING 重取消、`SerialStateStore`
+  所有权串行化、`StoreTaskRunner` 写路径接入、启动 `PhaseGate`、EXEC-10
+  完整停止序与 RULE-10 abandon）、systemd unit 与安装打包、MVP §19 验收
+  矩阵（CI 项附证据）全部落地；PR [#11](https://github.com/Linductor-alkaid/yori/pull/11)
+  最终 CI [全绿](https://github.com/Linductor-alkaid/yori/actions/runs/34446034703)
+  （证据见 [M7 验证记录](m7-packaging-acceptance.md)）。
 - M1 收口（2026-09-10）：`M1-06`/`M1-07` 按 2026-09-04 范围决定不再独立
   交付；其中 EXEC-09 启动 `PhaseGate` 与六场景闭环集成测试已由 M7 守护总装
   承接（`m7.unit.job-manager`），触发合并未建独立 comm 层（由 JobManager
   命令通道承载）。M1 里程碑随 M7 关闭（见 M1 文档 2026-09-10 收口记录）。
-- 当前里程碑：M7（守护总装与打包已落地，验收记录收口中）。
+- 当前里程碑：无（M0-M7 全部完成；`v0.1.0` tag 与 LICENSE 选定为负责人
+  授权的发布动作，真机验收补跑条件见 M7 验收矩阵）。
 - MVP 端到端验收以设计文档第 19 节判据为准，由 M7 执行并记录证据（见第 10 节）。
 - 里程碑文档在各自启动时创建（工程规范第 2 节）；当前实体文件：M0、M1、M2、
   M3、M4、M5、M6。
@@ -149,7 +152,7 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | M4 | 持久化与恢复 | M2 | SQLite StateStore、daemon 重启恢复、PID reuse 核验、`LOST` 语义 | 无 | Completed |
 | M5 | IPC 与 CLI | M3、M4 | UDS 传输、`SO_PEERCRED` 鉴权、请求/响应协议与 owner/admin 授权、`submit`/`ps`/`queue`/`gpu`/`cancel`/`logs` 快照、IPC fuzz 起步 | 无 | Completed |
 | M6 | 观察面 | M5 | `logs -f` 流式帧（offset 续传、`GAP`/`EOF`/`BACKPRESSURE`）、日志轮转、`yori tensorboard` | 无 | Completed |
-| M7 | 打包与 MVP 端到端验收 | M6 | systemd unit、安装打包、设计 §19 判据逐项验收；前置：守护总装收口 | `v0.1.0`（MVP；tag/发布需负责人授权） | In Progress |
+| M7 | 打包与 MVP 端到端验收 | M6 | systemd unit、安装打包、设计 §19 判据逐项验收；前置：守护总装收口 | `v0.1.0`（MVP；tag/发布需负责人授权） | Completed |
 
 - M3 与 M4 在 M2 完成后可并行推进。
 - 里程碑文件命名 `m<N>-<scope>.md`，在该里程碑启动时创建；当前实体文件：

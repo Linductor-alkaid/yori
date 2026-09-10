@@ -1,6 +1,6 @@
 # M7：打包与 MVP 端到端验收（含守护总装收口）
 
-> 状态：In Progress
+> 状态：Completed
 > 负责人：Linductor-alkaid
 > 所属计划：[Yori 实施总计划](yori-implementation-plan.md)
 > 前置：M6（观察面，PR [#8](https://github.com/Linductor-alkaid/yori/pull/8)）
@@ -103,7 +103,7 @@
 - [x] `M7-05` 打包：`packaging/systemd/yori.service`（设计 §10.1 + 加固
   项）、CMake 安装规则与部署 README（目录、权限、admin 组、NVML/SQLite
   库路径）；CI install 步骤验证 unit 随安装部署。
-- [ ] `M7-06` MVP 验收与文档：设计 §19 判据逐项记录（CI 项附证据，真机项
+- [x] `M7-06` MVP 验收与文档：设计 §19 判据逐项记录（CI 项附证据，真机项
   记录补跑条件）；同步设计、EXEC 表、威胁模型（基线 6/8）、总计划与
   本文档。
 
@@ -133,8 +133,11 @@
   STOPPING 重取消见 `m7.unit.job-manager` 场景"Yori 特有 5"。
 - [x] `ipc`：E2E（真实 CLI + UDS）在新总装下全绿（`m5.integration.ipc-e2e`
   更新为真实 spawn 闭环）；`m6.integration.logs-follow-e2e` 在新总装下全绿。
-- [ ] 五预设构建与 CI 全绿（clang-format/clang-tidy/gcc/clang/sanitizers）：
-  本地 debug 构建与 42/42 测试通过；CI 与 sanitizer 预设证据随 PR 收口。
+- [x] 五预设构建与 CI 全绿（clang-format/clang-tidy/gcc/clang/sanitizers）：
+  本地五预设 42/42、clang-format `--Werror` 与 clang-tidy（18.1.3，
+  WarningsAsErrors 类别）零告警；PR [#11](https://github.com/Linductor-alkaid/yori/pull/11)
+  最终 CI [全绿](https://github.com/Linductor-alkaid/yori/actions/runs/34446034703)
+  （8/8：format/tidy/gcc-13 与 clang-18 的 debug+release/sanitizers/依赖锁定）。
 - [x] 设计 §19 判据逐项记录：见下方"MVP §19 验收矩阵"；CI 可判定项全部
   通过；真机项未勾选且有补跑条件、负责人与目标环境。
 - [x] 文档同步矩阵（工程规范第 8 节）核对完毕（设计 v0.11、EXEC 表、威胁
