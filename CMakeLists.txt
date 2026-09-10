@@ -39,6 +39,15 @@ include(cmake/CompilerWarnings.cmake)
 add_subdirectory(src)
 add_subdirectory(apps)
 
+# ---- 打包（M7）：systemd unit 随安装部署 ----------------------------------
+# 设计 10.1 + DEC-004/RULE-10：Type=simple、RuntimeDirectory=yori；守护语义
+# （daemon 停止不终止训练）要求不以 control-group 方式回收后代。部署前置
+# （yori 组、--socket-group、状态目录）见 packaging/systemd/README.md。
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  install(FILES packaging/systemd/yori.service
+          DESTINATION ${CMAKE_INSTALL_LIBDIR}/systemd/system)
+endif()
+
 if(YORI_BUILD_TESTS AND PROJECT_IS_TOP_LEVEL)
   enable_testing()
   add_subdirectory(tests)

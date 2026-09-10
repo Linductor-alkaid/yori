@@ -86,6 +86,10 @@ jobs:
             -L 'gpu|multi-user|ipc|recovery|fuzz|performance' -V
       - name: install
         run: cmake --install build/${{ matrix.preset }} --prefix build/${{ matrix.preset }}/install
+      - name: 安装后 systemd unit 断言（M7-05）
+        run: |
+          test -f "build/${{ matrix.preset }}/install/lib/systemd/system/yori.service"
+          grep -q "RuntimeDirectory=yori" "build/${{ matrix.preset }}/install/lib/systemd/system/yori.service"
       - name: 安装后最小 consumer 编译与运行（M0-05）
         run: |
           cmake -S tests/consumer -B build/consumer -G Ninja \
