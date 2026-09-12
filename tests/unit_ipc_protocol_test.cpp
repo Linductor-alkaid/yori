@@ -118,10 +118,19 @@ void test_response_roundtrips() {
   YORI_CHECK(decoded.job_id == 99 && decoded.error == IpcError::kNone);
 
   response.kind = IpcRequestKind::kPs;
+  response.jobs.push_back(IpcJobSummary{1,
+                                        0,
+                                        1000,
+                                        3,
+                                        false,
+                                        {"python", "train.py"},
+                                        "/srv",
+                                        std::string("runs/x"),
+                                        std::nullopt,
+                                        2,
+                                        std::string("GPU-target")});
   response.jobs.push_back(IpcJobSummary{
-      1, 0, 1000, 3, false, {"python", "train.py"}, "/srv", std::string("runs/x"), std::nullopt});
-  response.jobs.push_back(
-      IpcJobSummary{2, 5, 1001, 2, true, {}, "", std::nullopt, IpcExitStatus{false, 9}});
+      2, 5, 1001, 2, true, {}, "", std::nullopt, IpcExitStatus{false, 9}, 0, std::nullopt});
   YORI_CHECK(roundtrip_response(response, decoded));
   YORI_CHECK(decoded.jobs.size() == 2);
   YORI_CHECK(!decoded.jobs[0].masked && decoded.jobs[0].argv.size() == 2 &&
@@ -129,13 +138,17 @@ void test_response_roundtrips() {
   YORI_CHECK(decoded.jobs[1].masked && decoded.jobs[1].argv.empty());
   const auto& second_exit = decoded.jobs[1].exit;
   YORI_CHECK(second_exit.has_value() && !second_exit->exited_normally && second_exit->code == 9);
+  YORI_CHECK(decoded.jobs[0].wait_reason == 2 &&
+             decoded.jobs[0].wait_detail == std::string("GPU-target"));
+  YORI_CHECK(decoded.jobs[1].wait_reason == 0 && decoded.jobs[1].wait_detail == std::nullopt);
 
   response = IpcResponse{};
   response.kind = IpcRequestKind::kQueue;
-  response.queue.push_back(IpcQueueEntry{5, 1000, 1725900000123456789ULL, 0});
+  response.queue.push_back(IpcQueueEntry{5, 1000, 1725900000123456789ULL, 0, 4, std::nullopt});
   YORI_CHECK(roundtrip_response(response, decoded));
   YORI_CHECK(decoded.queue.size() == 1 && decoded.queue[0].job_id == 5 &&
              decoded.queue[0].submit_time_unix_ns == 1725900000123456789ULL);
+  YORI_CHECK(decoded.queue[0].wait_reason == 4 && decoded.queue[0].wait_detail == std::nullopt);
 
   response = IpcResponse{};
   response.kind = IpcRequestKind::kGpu;
@@ -186,8 +199,8 @@ void test_malformed_requests() {
   result = decode_request_payload(only_version, 1);
   YORI_CHECK(result.error == IpcDecodeError::kTruncated);
 
-  // 坏版本（v2 起接受 1/2，3 仍非法）。
-  const std::uint8_t bad_version[2] = {3, static_cast<std::uint8_t>(IpcRequestKind::kPs)};
+  // 坏版本（v3 起接受 1/2/3，4 仍非法）。
+  const std::uint8_t bad_version[2] = {4, static_cast<std::uint8_t>(IpcRequestKind::kPs)};
   result = decode_request_payload(bad_version, sizeof(bad_version));
   YORI_CHECK(result.error == IpcDecodeError::kBadVersion);
 
@@ -877,13 +890,141 @@ void test_m8_golden_vectors() {
   YORI_CHECK(append_request_frame(request, buffer));
   const std::vector<std::uint8_t> expected_inspect = {
       0x0a, 0x00, 0x00, 0x00,                          // 长度 10（2 头 + 8）
-      0x02, 0x09,                                      // version 2, INSPECT
+      0x03, 0x09,                                      // version 3（缺省）, INSPECT
       0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // job 5
   };
   YORI_CHECK(buffer == expected_inspect);
 }
 
 }  // namespace
+
+void test_m9_protocol_v3() {
+  // SUBMIT v3：gpu_spec（placement 输入）roundtrip。
+  IpcRequest request;
+  request.kind = IpcRequestKind::kSubmit;
+  request.submit = sample_submit();
+  request.submit.gpu_spec = std::string("2");
+  IpcRequest decoded;
+  YORI_CHECK(roundtrip_request(request, decoded));
+  YORI_CHECK(decoded.submit.gpu_spec == std::string("2"));
+
+  request.submit.gpu_spec = std::string("GPU-f3c1aa88-...");
+  YORI_CHECK(roundtrip_request(request, decoded));
+  YORI_CHECK(decoded.submit.gpu_spec == std::string("GPU-f3c1aa88-..."));
+
+  // v3 无 placement：字段缺省合法。
+  request.submit.gpu_spec.reset();
+  YORI_CHECK(roundtrip_request(request, decoded));
+  YORI_CHECK(!decoded.submit.gpu_spec.has_value());
+
+  // v2 SUBMIT：编码不含 gpu_spec，解码按无亲和处理。
+  request.version = 2;
+  std::vector<std::uint8_t> frame;
+  YORI_CHECK(append_request_frame(request, frame));
+  const IpcRequestDecodeResult v2_result =
+      decode_request_payload(frame.data() + 4, frame.size() - 4);
+  YORI_CHECK(v2_result.ok());
+  YORI_CHECK(!v2_result.value.submit.gpu_spec.has_value());
+  YORI_CHECK(v2_result.value.version == 2);
+
+  // v2 帧携带 gpu_spec：编码拒绝（版本与字段一致性）。
+  IpcRequest inconsistent;
+  inconsistent.kind = IpcRequestKind::kSubmit;
+  inconsistent.version = 2;
+  inconsistent.submit = sample_submit();
+  inconsistent.submit.gpu_spec = std::string("1");
+  std::vector<std::uint8_t> rejected;
+  YORI_CHECK(!append_request_frame(inconsistent, rejected));
+
+  // PS 响应 v3：wait_reason/detail 随条目往返；v2 响应不含该字段（缺省 0）。
+  IpcResponse response;
+  response.kind = IpcRequestKind::kPs;
+  IpcJobSummary summary;
+  summary.job_id = 9;
+  summary.state = 0;
+  summary.owner_uid = 1000;
+  summary.revision = 0;
+  summary.argv = {"train"};
+  summary.cwd = "/srv";
+  summary.wait_reason = 4;
+  summary.wait_detail = std::string("GPU-target");
+  response.jobs.push_back(summary);
+  IpcResponse decoded_response;
+  YORI_CHECK(roundtrip_response(response, decoded_response));
+  YORI_CHECK(decoded_response.jobs.size() == 1);
+  YORI_CHECK(decoded_response.jobs[0].wait_reason == 4);
+  YORI_CHECK(decoded_response.jobs[0].wait_detail == std::string("GPU-target"));
+
+  response.version = 2;  // v2 客户端：服务端回显版本，不写 v3 字段
+  YORI_CHECK(roundtrip_response(response, decoded_response));
+  YORI_CHECK(decoded_response.jobs[0].wait_reason == 0);
+  YORI_CHECK(!decoded_response.jobs[0].wait_detail.has_value());
+
+  // QUEUE 响应 v3：同型。
+  response = IpcResponse{};
+  response.kind = IpcRequestKind::kQueue;
+  IpcQueueEntry entry;
+  entry.job_id = 9;
+  entry.owner_uid = 1000;
+  entry.submit_time_unix_ns = 1725900000123456789ULL;
+  entry.state = 0;
+  entry.wait_reason = 2;
+  response.queue.push_back(entry);
+  YORI_CHECK(roundtrip_response(response, decoded_response));
+  YORI_CHECK(decoded_response.queue[0].wait_reason == 2);
+  YORI_CHECK(!decoded_response.queue[0].wait_detail.has_value());
+
+  // wait_reason 值域：编码拒绝非法值；手工帧（wait_reason=5）解码报
+  // kInvalidValue（编码器无法产出非法帧，值域检查以手工字节验证）。
+  response.queue[0].wait_reason = 5;
+  std::vector<std::uint8_t> bad_frame;
+  YORI_CHECK(!append_response_frame(response, bad_frame));
+
+  const std::vector<std::uint8_t> hand_crafted = {
+      0x03, 0x03,                                      // version 3, QUEUE
+      0x00,                                            // error kNone
+      0x00, 0x00, 0x00, 0x00,                          // detail ""
+      0x01, 0x00, 0x00, 0x00,                          // count 1
+      0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // job 1
+      0xe8, 0x03, 0x00, 0x00,                          // owner 1000
+      0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // submit_ns 1
+      0x00,                                            // state QUEUED
+      0x05,                                            // wait_reason 5（非法）
+      0x00,                                            // wait_detail 无
+  };
+  const IpcResponseDecodeResult bad_result =
+      decode_response_payload(hand_crafted.data(), hand_crafted.size());
+  YORI_CHECK(bad_result.error == IpcDecodeError::kInvalidValue);
+
+  // INSPECT v3：placement 往返。
+  response = IpcResponse{};
+  response.kind = IpcRequestKind::kInspect;
+  response.inspect.job_id = 9;
+  response.inspect.state = 0;
+  response.inspect.owner_uid = 1000;
+  response.inspect.cwd = "/srv";
+  response.inspect.argv = {"train"};
+  response.inspect.gpu_placement_mode = 1;
+  response.inspect.gpu_placement_device = std::string("GPU-target");
+  YORI_CHECK(roundtrip_response(response, decoded_response));
+  YORI_CHECK(decoded_response.inspect.gpu_placement_mode == 1);
+  YORI_CHECK(decoded_response.inspect.gpu_placement_device == std::string("GPU-target"));
+
+  // v2 INSPECT 响应：不含 placement（缺省 kAny）。
+  response.version = 2;
+  YORI_CHECK(roundtrip_response(response, decoded_response));
+  YORI_CHECK(decoded_response.inspect.gpu_placement_mode == 0);
+  YORI_CHECK(!decoded_response.inspect.gpu_placement_device.has_value());
+
+  // wait reason 命名稳定。
+  YORI_CHECK(std::string(to_string(IpcWaitReason::kNoFreeGpu)) == "NO_FREE_GPU");
+  YORI_CHECK(std::string(to_string(IpcWaitReason::kAffinityGpuAllocated)) ==
+             "AFFINITY_GPU_ALLOCATED");
+  YORI_CHECK(std::string(to_string(IpcWaitReason::kAffinityGpuExternal)) ==
+             "AFFINITY_GPU_EXTERNAL");
+  YORI_CHECK(std::string(to_string(IpcWaitReason::kAffinityGpuState)) == "AFFINITY_GPU_STATE");
+  YORI_CHECK(std::string(to_string(IpcWaitReason::kNone)) == "NONE");
+}
 
 int main() {
   test_request_roundtrips();
@@ -900,6 +1041,7 @@ int main() {
   test_m8_submit_v2_roundtrip();
   test_m8_inspect_roundtrip();
   test_m8_golden_vectors();
+  test_m9_protocol_v3();
   if (yori::testing::failure_count != 0) {
     std::fprintf(stderr, "ipc protocol: %d failure(s)\n", yori::testing::failure_count);
     return 1;
