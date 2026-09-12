@@ -27,8 +27,6 @@
 #include <yori/job/job.hpp>
 #include <yori/launch/environment_capture.hpp>
 
-extern "C" char** environ;
-
 namespace {
 
 constexpr const char* kDefaultSocketPath = "/run/yori/yori.sock";
@@ -280,8 +278,7 @@ int command_submit(const std::string& socket_path, std::vector<std::string> argu
       yori::launch::capture_environment(source, policy);
   if (!captured) {
     std::fprintf(stderr, "yori: captured environment rejected: %s (%s)%s\n",
-                 yori::launch::to_string(captured.code),
-                 captured.offending_name.c_str(),
+                 yori::launch::to_string(captured.code), captured.offending_name.c_str(),
                  inherit_env ? "; --inherit-env collects the full environment, unset what is"
                                " not needed"
                              : "");
@@ -296,9 +293,9 @@ int command_submit(const std::string& socket_path, std::vector<std::string> argu
   const yori::launch::ExecutableResolveResult resolved =
       yori::launch::resolve_executable(submit.argv.front(), submit.cwd, submit.env);
   if (!resolved) {
-    std::fprintf(stderr, "yori: cannot resolve command '%s': %s%s%s\n",
-                 submit.argv.front().c_str(), yori::launch::to_string(resolved.code),
-                 resolved.message.empty() ? "" : ": ", resolved.message.c_str());
+    std::fprintf(stderr, "yori: cannot resolve command '%s': %s%s%s\n", submit.argv.front().c_str(),
+                 yori::launch::to_string(resolved.code), resolved.message.empty() ? "" : ": ",
+                 resolved.message.c_str());
     return kExitUsage;
   }
   submit.executable = resolved.executable;

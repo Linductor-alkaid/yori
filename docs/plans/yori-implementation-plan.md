@@ -81,7 +81,9 @@
   包（`packaging/deb/build-deb.sh`，安装即启用服务）与 Release 流水线
   （`.github/workflows/release.yml`：`v*` tag 构建 deb 并发布）。真机验收
   补跑条件见 M7 验收矩阵。
-- 当前里程碑：M8（In Progress，执行上下文）；M9（Planned，GPU placement）排队。
+- 当前里程碑：M8（Implemented，执行上下文——代码与本地验证完成于
+  2026-09-12，分支 `feat/m8-execution-context`，GitHub CI 随 MR 收口后
+  关闭）；M9（Planned，GPU placement）排队。
 - MVP 端到端验收以设计文档第 19 节判据为准，由 M7 执行并记录证据（见第 10 节）。
 - 里程碑文档在各自启动时创建（工程规范第 2 节）；当前实体文件：M0-M7
   （M8/M9 文件在各自启动时创建）。
@@ -173,7 +175,7 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | M5 | IPC 与 CLI | M3、M4 | UDS 传输、`SO_PEERCRED` 鉴权、请求/响应协议与 owner/admin 授权、`submit`/`ps`/`queue`/`gpu`/`cancel`/`logs` 快照、IPC fuzz 起步 | 无 | Completed |
 | M6 | 观察面 | M5 | `logs -f` 流式帧（offset 续传、`GAP`/`EOF`/`BACKPRESSURE`）、日志轮转、`yori tensorboard` | 无 | Completed |
 | M7 | 打包与 MVP 端到端验收 | M6 | systemd unit、安装打包、设计 §19 判据逐项验收；前置：守护总装收口 | `v0.1.0`（MVP；tag/发布需负责人授权） | Completed |
-| M8 | 提交时执行上下文 | M7 | 环境捕获（白名单/`--env`/`--inherit-env`）、executable 提交时解析、环境合并 v2 与保留键修订、`yori inspect`（owner/admin + 脱敏）、IPC 协议 v2、schema v2 迁移；Conda/venv 语义一致性验证 | `v0.2.0` | In Progress（2026-09-12 启动；DEC-011 Accepted） |
+| M8 | 提交时执行上下文 | M7 | 环境捕获（白名单/`--env`/`--inherit-env`）、executable 提交时解析、环境合并 v2 与保留键修订、`yori inspect`（owner/admin + 脱敏）、IPC 协议 v2、schema v2 迁移；Conda/venv 语义一致性验证 | `v0.2.0` | Implemented（2026-09-12 实现完成、本地五预设全绿；CI 随 MR 收口） |
 | M9 | GPU placement 亲和调度 | M7（与 M8 无代码依赖，建议随后执行以共享迁移框架） | `GpuPlacement` Core 类型与校验、daemon 侧 `--gpu` 解析、Scheduler 候选集过滤与 FIFO 有界跳过、`wait_reason`、schema v3 与恢复一致性；issue #10 12 场景矩阵 | `v0.3.0` | Planned（DEC-012 Proposed，冻结于 M9 启动） |
 
 - M3 与 M4 在 M2 完成后可并行推进。

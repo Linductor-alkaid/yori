@@ -507,7 +507,8 @@ IpcResponse IpcService::validate_logs_follow(const PeerCredentials& peer,
   return response;
 }
 
-IpcResponse IpcService::handle_tensorboard(const PeerCredentials& peer, std::uint64_t job_id) {  const store::StateStoreLoadResult load = store_.load();
+IpcResponse IpcService::handle_tensorboard(const PeerCredentials& peer, std::uint64_t job_id) {
+  const store::StateStoreLoadResult load = store_.load();
   if (!load.ok()) {
     return error_response(IpcRequestKind::kTensorboard, IpcError::kStoreFailed,
                           store::to_string(load.code));
@@ -568,9 +569,9 @@ IpcResponse IpcService::handle_inspect(const PeerCredentials& peer, std::uint64_
   inspect.executable = record->spec.executable;
   inspect.argv = record->spec.argv;
   if (record->spec.env_metadata) {
-    inspect.env_metadata = IpcEnvMetadata{
-        static_cast<std::uint8_t>(record->spec.env_metadata->source),
-        record->spec.env_metadata->python_version};
+    inspect.env_metadata =
+        IpcEnvMetadata{static_cast<std::uint8_t>(record->spec.env_metadata->source),
+                       record->spec.env_metadata->python_version};
   }
 
   // env：变量名全部可见；命中敏感名模式的值在 daemon 侧替换为固定掩码

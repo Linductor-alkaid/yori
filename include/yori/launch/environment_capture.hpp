@@ -37,10 +37,10 @@ struct EnvironmentCapturePolicy final {
 
 enum class EnvironmentCaptureErrorCode {
   kNone,
-  kInvalidName,      // 环境源中存在无法成为合法变量名的条目（含 '=' 或 NUL）
-  kTooManyVariables, // 超出 JobSpecLimits::kMaxEnvironmentVariables
-  kValueTooLong,     // 单值超出 kMaxEnvironmentValueBytes
-  kTooLarge,         // 总量超出 kMaxEnvironmentBytes
+  kInvalidName,       // 环境源中存在无法成为合法变量名的条目（含 '=' 或 NUL）
+  kTooManyVariables,  // 超出 JobSpecLimits::kMaxEnvironmentVariables
+  kValueTooLong,      // 单值超出 kMaxEnvironmentValueBytes
+  kTooLarge,          // 总量超出 kMaxEnvironmentBytes
 };
 
 [[nodiscard]] const char* to_string(EnvironmentCaptureErrorCode code) noexcept;
@@ -52,9 +52,7 @@ struct EnvironmentCaptureResult final {
   // 捕获结果（按键序）；失败时不再使用，调用方以 code 判定。
   std::map<std::string, std::string> env;
 
-  [[nodiscard]] bool ok() const noexcept {
-    return code == EnvironmentCaptureErrorCode::kNone;
-  }
+  [[nodiscard]] bool ok() const noexcept { return code == EnvironmentCaptureErrorCode::kNone; }
   explicit operator bool() const noexcept { return ok(); }
 };
 
@@ -70,10 +68,10 @@ struct EnvironmentCaptureResult final {
 enum class ExecutableResolveErrorCode {
   kNone,
   kEmptyName,
-  kInvalidName,        // 含 NUL 或超长
-  kRelativeWithoutCwd, // 相对 argv[0] 但未提供绝对 cwd
-  kNotFound,           // 裸名不在 PATH 任何段，或绝对/相对路径不存在
-  kNotExecutable,      // 存在但不可执行（EACCES）
+  kInvalidName,         // 含 NUL 或超长
+  kRelativeWithoutCwd,  // 相对 argv[0] 但未提供绝对 cwd
+  kNotFound,            // 裸名不在 PATH 任何段，或绝对/相对路径不存在
+  kNotExecutable,       // 存在但不可执行（EACCES）
 };
 
 [[nodiscard]] const char* to_string(ExecutableResolveErrorCode code) noexcept;

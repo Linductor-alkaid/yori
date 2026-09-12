@@ -3,6 +3,34 @@
 本文件记录 Yori 的版本化变更（工程规范第 10.5 节）。日期为 YYYY-MM-DD；
 条目按版本倒序排列。未发布条目置于 `## Unreleased`。
 
+## Unreleased
+
+### 变更（M8：提交时执行上下文，DEC-011）
+
+- **提交时执行上下文捕获与恢复**：`yori submit` 默认按白名单捕获当前终端
+  环境的关键变量（`PATH`/`PYTHONPATH`/`LD_LIBRARY_PATH`、
+  `CONDA_PREFIX`/`CONDA_DEFAULT_ENV`/`VIRTUAL_ENV`、`CUDA_HOME`/`CUDA_PATH`、
+  `OMP/MKL_NUM_THREADS`、代理三键含小写形式），支持 `--env K=V` 追加、
+  `--inherit-env` 显式全量（仍过滤保留键、受 env 总量上限约束、超限显式
+  失败）与 `--capture-env KEY` 白名单扩展。已激活 Conda/venv 环境下
+  "排队执行与直接执行语义一致"。
+- **executable 提交时解析（fail-fast）**：CLI 以捕获后的 `PATH` 在提交时解析
+  `argv[0]` 绝对路径并持久化，解析失败或不可执行即拒绝提交；daemon 启动时
+  直接 `execve(executable)`，`argv[0]` 保持用户输入形式。"解释器选错"类
+  失败从排队数小时后提前到提交瞬间。
+- **环境合并 v2 与保留键修订**：四层合并（身份块不可覆盖 -> daemon 白名单 ->
+  捕获环境 -> Yori 资源块最后写入，新增 `YORI_JOB_ID` 与 `YORI_GPU_UUID`）；
+  `LD_LIBRARY_PATH` 从保留键转入捕获白名单（安全性依赖降权先于 exec 的既有
+  不变量，回归锁定）；`YORI_*` 前缀变量出现即拒绝。
+- **`yori inspect`**：新增 IPC kind `INSPECT`（owner/admin），展示执行上下文
+  （cwd/executable/argv/环境类型/python 版本）、分配结果与 provenance；env
+  变量名全可见，命中敏感名模式（`TOKEN`/`KEY`/`SECRET`/`PASSWORD`，可配置）
+  的值由 daemon 掩码后进协议，原值不出现在 IPC 面，daemon 日志不打印 env 值。
+- **协议 v2 与 schema v2**：SUBMIT 以 v2 增量扩展可选字段，daemon 同时接受
+  v1 SUBMIT（响应回显请求版本）；流式帧族维持 v1。SQLite schema 1 -> 2
+  单事务增量迁移（新增 `executable`/`environment_type`/`python_version`
+  可空列），v1 库兼容读、更高版本显式拒绝。
+
 ## v0.1.3 - 2026-09-10
 
 ### 修复

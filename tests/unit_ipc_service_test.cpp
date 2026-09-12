@@ -1,8 +1,8 @@
 #include <chrono>
-#include <map>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <map>
 #include <yori/ipc/ipc_service.hpp>
 
 #include "testing/in_memory_state_store.hpp"
@@ -724,7 +724,6 @@ void test_tensorboard_query() {
              IpcError::kNotFound);
 }
 
-
 // ---------------------------------------------------------------------------
 // M8（DEC-011）：v2 SUBMIT 字段映射与 INSPECT 授权/脱敏。
 // ---------------------------------------------------------------------------
@@ -744,7 +743,8 @@ void test_submit_v2_fields() {
 
   // v2 捕获字段进入 JobSpec（owner 身份仍只来自 peer）。
   IpcSubmitRequest request = valid_submit();
-  request.env = {{"PATH", "/opt/conda/bin"}, {"HF_TOKEN", "secret-value"},
+  request.env = {{"PATH", "/opt/conda/bin"},
+                 {"HF_TOKEN", "secret-value"},
                  {"LD_LIBRARY_PATH", "/opt/conda/lib"}};
   request.executable = std::string("/opt/conda/bin/python");
   request.env_metadata = IpcEnvMetadata{1, std::string("3.11.5")};
@@ -778,9 +778,12 @@ void test_inspect() {
 
   // 提交一个带捕获的 Job（含敏感名与非敏感名）。
   IpcSubmitRequest request = valid_submit();
-  request.env = {{"PATH", "/opt/conda/bin"}, {"HF_TOKEN", "secret-value"},
-                 {"AWS_SECRET_ACCESS_KEY", "k=value"}, {"MY_API_KEY", "abc"},
-                 {"PASSWORD", "pw"}, {"http_proxy", "http://p:1"}};
+  request.env = {{"PATH", "/opt/conda/bin"},
+                 {"HF_TOKEN", "secret-value"},
+                 {"AWS_SECRET_ACCESS_KEY", "k=value"},
+                 {"MY_API_KEY", "abc"},
+                 {"PASSWORD", "pw"},
+                 {"http_proxy", "http://p:1"}};
   request.executable = std::string("/opt/conda/bin/python");
   request.env_metadata = IpcEnvMetadata{1, std::string("3.11.5")};
   const std::map<std::string, std::string> expected_env = request.env;
@@ -868,8 +871,7 @@ void test_inspect_allocation_view() {
   YORI_CHECK(view.inspect.gpu_uuid == std::string("GPU-abcdef"));
   YORI_CHECK(view.inspect.gpu_index == std::uint32_t{3});
   YORI_CHECK(view.inspect.log_path == std::string("/var/lib/yori/jobs/1"));
-  YORI_CHECK(view.inspect.state ==
-             static_cast<std::uint8_t>(JobState::kStarting));
+  YORI_CHECK(view.inspect.state == static_cast<std::uint8_t>(JobState::kStarting));
 
   // 无 GPU 观测时仍有 lease uuid，无索引。
   fixture.gpu_status.has_snapshot = false;

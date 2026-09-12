@@ -317,13 +317,7 @@ bool EnvironmentPolicy::accepts(const std::string& name) const {
 
 bool is_reserved_environment_key(const std::string& name) {
   static constexpr std::array<std::string_view, 7> kReserved{
-      "CUDA_DEVICE_ORDER",
-      "CUDA_VISIBLE_DEVICES",
-      "HOME",
-      "LD_PRELOAD",
-      "LOGNAME",
-      "SHELL",
-      "USER",
+      "CUDA_DEVICE_ORDER", "CUDA_VISIBLE_DEVICES", "HOME", "LD_PRELOAD", "LOGNAME", "SHELL", "USER",
   };
   if (std::find(kReserved.begin(), kReserved.end(), name) != kReserved.end()) {
     return true;

@@ -196,8 +196,8 @@ int main() {
   // ---- prepare：无捕获（v1 语义）executable 为空、JobId 无效拒绝 --------------
   {
     DefaultLaunchAdapter adapter;
-    const auto result =
-        adapter.prepare(kJobId, valid_spec(), valid_assignment(), LaunchProfile{}, valid_identity());
+    const auto result = adapter.prepare(kJobId, valid_spec(), valid_assignment(), LaunchProfile{},
+                                        valid_identity());
     YORI_CHECK(result);
     if (result) {
       YORI_CHECK(result.plan.executable.empty());
@@ -276,8 +276,8 @@ int main() {
     policy.exact_keys = {"PATH"};
     DefaultLaunchAdapter adapter(std::move(policy));
     adapter.set_daemon_environment({{"PATH", "/usr/bin"}, {"TERM", "xterm"}});
-    const auto result =
-        adapter.prepare(kJobId, valid_spec(), valid_assignment(), LaunchProfile{}, valid_identity());
+    const auto result = adapter.prepare(kJobId, valid_spec(), valid_assignment(), LaunchProfile{},
+                                        valid_identity());
     YORI_CHECK(result);
     if (result) {
       YORI_CHECK(find_entry(result.plan, "PATH") != nullptr);

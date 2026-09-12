@@ -134,9 +134,9 @@ int main() {
   {
     ProcessSupervisor supervisor;
     // executable 为绝对路径，argv[0] 为裸名：不做 PATH 搜索，$0 与直接执行一致。
-    const auto result = supervisor.spawn(yori::testing::self_plan(
-        {"sh", "-c", "test \"$0\" = sh && echo direct-exec-ok"}, {{"PATH", "/nonexistent"}},
-        "", "/bin/sh"));
+    const auto result = supervisor.spawn(
+        yori::testing::self_plan({"sh", "-c", "test \"$0\" = sh && echo direct-exec-ok"},
+                                 {{"PATH", "/nonexistent"}}, "", "/bin/sh"));
     YORI_CHECK(result);
     if (result) {
       const std::string out = read_all(result.stdout_read, std::chrono::milliseconds{3000});

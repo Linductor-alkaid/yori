@@ -692,7 +692,6 @@ void test_m6_golden_vectors() {
   YORI_CHECK(buffer == expected_eof);
 }
 
-
 // ---------------------------------------------------------------------------
 // M8：协议 v2（DEC-011）——SUBMIT 扩展字段、INSPECT、版本协商。
 // ---------------------------------------------------------------------------
@@ -703,8 +702,7 @@ void test_m8_submit_v2_roundtrip() {
   request.kind = IpcRequestKind::kSubmit;
   request.submit = sample_submit();
   request.submit.executable = std::string("/opt/conda/envs/train/bin/python");
-  request.submit.env_metadata =
-      IpcEnvMetadata{1, std::string("3.11.5")};  // conda
+  request.submit.env_metadata = IpcEnvMetadata{1, std::string("3.11.5")};  // conda
   IpcRequest decoded;
   YORI_CHECK(roundtrip_request(request, decoded));
   YORI_CHECK(decoded.submit.executable == request.submit.executable);
@@ -748,8 +746,7 @@ void test_m8_submit_v2_roundtrip() {
   frame.clear();
   YORI_CHECK(append_request_frame(request, frame));
   for (std::size_t cut = 4; cut < frame.size(); ++cut) {
-    const IpcRequestDecodeResult cut_result =
-        decode_request_payload(frame.data() + 4, cut - 4);
+    const IpcRequestDecodeResult cut_result = decode_request_payload(frame.data() + 4, cut - 4);
     YORI_CHECK(cut_result.error == IpcDecodeError::kTruncated ||
                cut_result.error == IpcDecodeError::kNone);
   }
@@ -856,19 +853,19 @@ void test_m8_golden_vectors() {
   std::vector<std::uint8_t> buffer;
   YORI_CHECK(append_request_frame(request, buffer));
   const std::vector<std::uint8_t> expected = {
-      0x2f, 0x00, 0x00, 0x00,                          // 长度 47
-      0x02, 0x01,                                      // version 2, SUBMIT
-      0x01, 0x00, 0x00, 0x00,                          // argv count 1
-      0x04, 0x00, 0x00, 0x00, 't', 'r', 'u', 'e',      // "true"
-      0x04, 0x00, 0x00, 0x00, '/', 't', 'm', 'p',      // cwd "/tmp"
-      0x00, 0x00, 0x00, 0x00,                          // env count 0
-      0x01, 0x00, 0x00, 0x00,                          // gpu_request 1
-      0x00,                                            // launch_profile 无
-      0x00,                                            // tensorboard_logdir 无
-      0x01,                                            // executable 有
-      0x09, 0x00, 0x00, 0x00,                          // 长度 9
-      '/', 'b', 'i', 'n', '/', 't', 'r', 'u', 'e',
-      0x00,                                            // env_metadata 无
+      0x2f, 0x00, 0x00, 0x00,                      // 长度 47
+      0x02, 0x01,                                  // version 2, SUBMIT
+      0x01, 0x00, 0x00, 0x00,                      // argv count 1
+      0x04, 0x00, 0x00, 0x00, 't', 'r', 'u', 'e',  // "true"
+      0x04, 0x00, 0x00, 0x00, '/', 't', 'm', 'p',  // cwd "/tmp"
+      0x00, 0x00, 0x00, 0x00,                      // env count 0
+      0x01, 0x00, 0x00, 0x00,                      // gpu_request 1
+      0x00,                                        // launch_profile 无
+      0x00,                                        // tensorboard_logdir 无
+      0x01,                                        // executable 有
+      0x09, 0x00, 0x00, 0x00,                      // 长度 9
+      '/',  'b',  'i',  'n',  '/', 't', 'r', 'u', 'e',
+      0x00,  // env_metadata 无
   };
   YORI_CHECK(buffer == expected);
 

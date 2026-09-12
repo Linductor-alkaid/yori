@@ -1,9 +1,9 @@
 # Yori 项目设计文档
 
 > **定位**：单节点多用户 GPU 训练任务排队、调度与进程守护系统\
-> **状态**：设计草案 v0.12（MVP 后演进立项：M8 执行上下文捕获
+> **状态**：设计草案 v0.13（M8 执行上下文捕获已实现
 > [DEC-011](../decisions/DEC-011-execution-context-capture.md)、M9 GPU placement
-> [DEC-012](../decisions/DEC-012-gpu-placement-policy.md)）\
+> 立项 [DEC-012](../decisions/DEC-012-gpu-placement-policy.md)）\
 > **日期**：2026-09-12
 
 ## 1. 项目摘要
@@ -486,10 +486,13 @@ M2 冻结的公开契约位于 `include/yori/launch/launch_adapter.hpp`：
   `getgrouplist`）在 fork 前解析；子进程内只执行 `setgroups -> setgid -> setuid`
   三个 syscall 封装，保持 fork-exec 窗口的 async-signal-safe 纪律。
 
-### 8.2 执行上下文捕获与恢复（M8，DEC-011）
+### 8.2 执行上下文捕获与恢复（M8，DEC-011；已实现）
 
 MVP 后第一批增强（M8）将任务提交模型从 `command + resource request` 扩展为
-`command + execution context + resource request`。目标是让以下两种方式具备
+`command + execution context + resource request`，2026-09-12 已随 M8 落地
+（契约 `include/yori/job/job.hpp`、捕获与解析
+`include/yori/launch/environment_capture.hpp`；验证记录见
+[M8 计划](../plans/m8-execution-context.md)）。目标是让以下两种方式具备
 一致的执行语义：
 
 ``` bash
@@ -870,6 +873,11 @@ MVP 即提供 `-f`。实现路径：
 -   普通用户默认不能查看其他用户 Job 的日志、`tensorboard_logdir` 等敏感字段；
     `ps`/`queue`/`gpu` 展示的非自有 Job 信息默认脱敏（仅 JobId、状态、资源占用，
     不含 argv、cwd、日志内容）。
+-   `yori inspect`（M8，DEC-011）：执行上下文属敏感面，非 owner 非 admin 直接
+    拒绝（无脱敏视图，同 TENSORBOARD）；owner/admin 可见 env 变量名与值，但
+    命中敏感名模式（`*TOKEN*`/`*KEY*`/`*SECRET*`/`*PASSWORD*`，daemon 配置可
+    扩展）的值由 daemon 侧替换为固定掩码后再进协议——原值不出现在 IPC 面，
+    daemon 日志也不打印 env 值。
 -   授权判定在 daemon 侧基于 `SO_PEERCRED` 身份执行，客户端声明不可信。
 
 ### 11.6 TensorBoard 观察接口
@@ -1082,11 +1090,12 @@ yori submit --priority high ...
 yori submit --gpus 2 ...
 ```
 
-MVP 后第一批增强（M8/M9，已立项）：
+MVP 后第一批增强（M8 已交付 / M9 已立项）：
 
 ``` bash
-yori submit [--env K=V]... [--inherit-env] -- CMD   # M8：执行上下文捕获（DEC-011）
-yori inspect <job-id>                                # M8：执行上下文与 provenance
+yori submit [--env K=V]... [--inherit-env] [--capture-env KEY]... -- CMD
+                                                     # M8 已交付：执行上下文捕获（DEC-011）
+yori inspect <job-id>                                # M8 已交付：执行上下文与 provenance
 yori submit --gpu 2 -- CMD                           # M9：REQUIRED 硬亲和（DEC-012）
 ```
 
@@ -1121,11 +1130,13 @@ M5 落地请求/响应族协议 v1，公开契约位于 `include/yori/ipc/`：
     演进"风险项的落地形态）。
     请求结构不携带任何身份字段——Job owner 只来自 `SO_PEERCRED`（第 5 节、
     DEC-010），客户端无从声明目标 UID。
--   **协议 v2（M8/M9 计划，DEC-011/DEC-012）**：`SUBMIT` 以 v2 增量扩展可选
-    字段（捕获的 env、`executable`、env 元数据、placement 的 index/UUID 输入），
-    daemon 同时接受 v1 `SUBMIT`（缺省字段按无捕获/`kAny` 处理）；新增请求
-    kind `INSPECT`（=9，owner/admin 的执行上下文与 provenance 查询）。v2 与
-    v1 客户端在发布包内同版本交付，帧格式与全部边界纪律不变。
+-   **协议 v2（M8 已交付，DEC-011；placement 输入属 M9）**：`SUBMIT` 以 v2
+    在 body 尾部增量扩展可选字段（`executable`、env 元数据），daemon 同时接受
+    v1 `SUBMIT`（缺省字段按无捕获处理；v1 帧携带 v2 字段在编码侧拒绝）；
+    响应回显请求版本（v1 客户端在 v2 daemon 上保持可用）；新增请求 kind
+    `INSPECT`（=9，仅 v2，owner/admin 的执行上下文与 provenance 查询，响应
+    含 per-entry 掩码标记的 env、分配结果与 provenance）。流式帧族冻结于
+    version=1，不随请求/响应 v2 变化。帧格式与全部边界纪律不变。
 -   **响应**：统一错误码（NONE/PROTOCOL/UNSUPPORTED/DENIED/INVALID_SPEC/
     QUEUE_REJECTED/STORE_FAILED/NOT_FOUND/INVALID_STATE/NOT_AVAILABLE/LIMIT/
     INTERNAL）+ detail + 按 kind 的结果体；错误响应携带可用上下文（如

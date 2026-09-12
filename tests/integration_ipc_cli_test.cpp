@@ -71,7 +71,6 @@ int run_cli(const std::string& directory, const std::string& socket_path,
   return code == -1 ? -1 : WEXITSTATUS(code);
 }
 
-
 // 以指定环境前缀运行真实 CLI（env -i 起步，模拟"已激活环境"的提交终端）。
 int run_cli_env(const std::string& directory, const std::string& socket_path,
                 const std::string& env_prefix, const std::string& arguments,
@@ -95,16 +94,16 @@ std::string write_fake_conda_env(const std::string& directory) {
   const std::string script = bin + "/fake-python";
   FILE* file = std::fopen(script.c_str(), "w");
   YORI_CHECK(file != nullptr);
-  static_cast<void>(std::fputs(
-      "#!/bin/sh\n"
-      "echo \"argv0=$0\"\n"
-      "echo \"conda=$CONDA_PREFIX\"\n"
-      "echo \"ldp=$LD_LIBRARY_PATH\"\n"
-      "echo \"job=$YORI_JOB_ID\"\n"
-      "echo \"gpu=$YORI_GPU_UUID\"\n"
-      "echo \"token=$M8_TOKEN\"\n"
-      "sleep 3\n",
-      file));
+  static_cast<void>(
+      std::fputs("#!/bin/sh\n"
+                 "echo \"argv0=$0\"\n"
+                 "echo \"conda=$CONDA_PREFIX\"\n"
+                 "echo \"ldp=$LD_LIBRARY_PATH\"\n"
+                 "echo \"job=$YORI_JOB_ID\"\n"
+                 "echo \"gpu=$YORI_GPU_UUID\"\n"
+                 "echo \"token=$M8_TOKEN\"\n"
+                 "sleep 3\n",
+                 file));
   static_cast<void>(std::fclose(file));
   YORI_CHECK(::chmod(script.c_str(), 0755) == 0);
   return root;
@@ -307,12 +306,12 @@ int main() {
     code = run_cli(directory, socket_path, "submit --env YORI_JOB_ID=9 -- /bin/true", out, err);
     YORI_CHECK(code == 2);
     YORI_CHECK(contains(err, "reserved key"));
-    code = run_cli(directory, socket_path,
-                   "submit --env CUDA_VISIBLE_DEVICES=0 -- /bin/true", out, err);
+    code = run_cli(directory, socket_path, "submit --env CUDA_VISIBLE_DEVICES=0 -- /bin/true", out,
+                   err);
     YORI_CHECK(code == 2);
     YORI_CHECK(contains(err, "reserved key"));
-    code = run_cli(directory, socket_path, "submit --env LD_PRELOAD=/tmp/x.so -- /bin/true",
-                   out, err);
+    code =
+        run_cli(directory, socket_path, "submit --env LD_PRELOAD=/tmp/x.so -- /bin/true", out, err);
     YORI_CHECK(code == 2);
     YORI_CHECK(contains(err, "reserved key"));
 
@@ -325,18 +324,18 @@ int main() {
         static_cast<void>(std::fputc('x', file));
       }
       static_cast<void>(std::fclose(file));
-      code = run_cli_env(directory, socket_path,
-                         "env -i PATH=/usr/bin:/bin BIGVAR=$(cat " + big + ")",
-                         "submit --inherit-env -- /bin/true", out, err);
+      code =
+          run_cli_env(directory, socket_path, "env -i PATH=/usr/bin:/bin BIGVAR=$(cat " + big + ")",
+                      "submit --inherit-env -- /bin/true", out, err);
       YORI_CHECK(code == 2);
       YORI_CHECK(contains(err, "captured environment rejected"));
       YORI_CHECK(contains(err, "BIGVAR"));
     }
 
     // --capture-env 扩展键：非白名单变量经扩展捕获并进入训练环境。
-    code = run_cli_env(directory, socket_path, "env -i PATH=/usr/bin:/bin M8_EXTRA=via-capture",
-                       "submit --capture-env M8_EXTRA -- /bin/sh -c 'echo extra=$M8_EXTRA'",
-                       out, err);
+    code =
+        run_cli_env(directory, socket_path, "env -i PATH=/usr/bin:/bin M8_EXTRA=via-capture",
+                    "submit --capture-env M8_EXTRA -- /bin/sh -c 'echo extra=$M8_EXTRA'", out, err);
     YORI_CHECK(code == 0);
     YORI_CHECK(contains(out, "Submitted job 4"));
     YORI_CHECK(wait_for_state(4, "FINISHED"));

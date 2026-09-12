@@ -1,13 +1,13 @@
 # M8：提交时执行上下文捕获与训练环境恢复
 
-> 状态：In Progress
+> 状态：Implemented（待 MR 合并与 CI 收口）
 > 负责人：Linductor-alkaid
 > 所属计划：[Yori 实施总计划](yori-implementation-plan.md)
 > 前置：M7（打包与 MVP 端到端验收，PR [#11](https://github.com/Linductor-alkaid/yori/pull/11)）
 > 决策依据：[DEC-011](../decisions/DEC-011-execution-context-capture.md)（Accepted，2026-09-12 随 M8 启动冻结）
 > 需求来源：[Issue #16](https://github.com/Linductor-alkaid/yori/issues/16)
 > 建议发布点：`v0.2.0`（tag 与发布动作需负责人明确授权后执行）
-> 更新日期：2026-09-12
+> 更新日期：2026-09-12（实现完成，本地五预设验证）
 
 ## 目标
 
@@ -81,37 +81,37 @@
 
 ## 工作项
 
-- [ ] `M8-01` Core 契约与环境合并 v2：`JobSpec` 新增 `executable`/`env_metadata`
+- [x] `M8-01` Core 契约与环境合并 v2：`JobSpec` 新增 `executable`/`env_metadata`
   与校验（绝对路径/字节上限/枚举值域）；保留键集修订（`LD_LIBRARY_PATH`
   出保留集、`YORI_*` 前缀拒绝）；`DefaultLaunchAdapter::prepare` 四层合并
   （接收 JobId，资源块最后写入 `YORI_JOB_ID`/`YORI_GPU_UUID`）；
   `LaunchPlan.executable` 与 `ProcessSupervisor` 直接 `execve` 路径
   （`argv[0]` 保持用户输入）；单测覆盖合并次序与保留键负向。
-- [ ] `M8-02` 捕获与解析组件（Core，CLI 复用）：`EnvironmentCapturePolicy`
+- [x] `M8-02` 捕获与解析组件（Core，CLI 复用）：`EnvironmentCapturePolicy`
   （默认白名单 + 可扩展键 + `--inherit-env` 全量模式；保留键/GPU 管理键/
   `YORI_*` 不捕获；总量上限预检）；`resolve_executable`（相对 cwd/PATH 逐段/
   可执行校验/失败结构化报错）；`detect_env_metadata`（CONDA_PREFIX/
   VIRTUAL_ENV 判定 environment_type、python 版本 best-effort 探测）；单测
   覆盖白名单边界、超限、代理小写、解析失败。
-- [ ] `M8-03` IPC 协议 v2：版本协商（接受 v1/v2，响应回显请求版本）；
+- [x] `M8-03` IPC 协议 v2：版本协商（接受 v1/v2，响应回显请求版本）；
   SUBMIT v2 尾部追加可选 executable/env 元数据（v1 帧按无捕获解码）；
   新 kind `INSPECT`（请求 job_id；响应 cwd/executable/argv/环境类型/
   python 版本/env 名全可见 + 值掩码标记/placement 与分配结果/provenance）；
   协议单测（v1/v2 矩阵、畸形、golden vector）与 fuzz 语料扩展。
-- [ ] `M8-04` daemon 侧：`IpcService::handle_submit` 映射新字段（v1 缺省）；
+- [x] `M8-04` daemon 侧：`IpcService::handle_submit` 映射新字段（v1 缺省）；
   `handle_inspect`（owner/admin 授权、敏感名模式默认
   `TOKEN`/`KEY`/`SECRET`/`PASSWORD` 可配置、掩码在 daemon 侧完成、daemon
   日志不打印 env 值）；`JobManager` 调度落地链路把 JobId 传入 prepare 并
   使用 `LaunchPlan.executable`；单测覆盖授权矩阵与脱敏断言。
-- [ ] `M8-05` 持久化 schema v2：`yori_jobs` 新增 `executable`（TEXT NULL）、
+- [x] `M8-05` 持久化 schema v2：`yori_jobs` 新增 `executable`（TEXT NULL）、
   `environment_type`（INTEGER NULL）、`python_version`（TEXT NULL）；打开时
   schema_version 1 -> 2 单事务增量迁移（ALTER TABLE ADD COLUMN）；v1 库
   迁移后按缺省补全读取；round-trip 与迁移/篡改负向单测。
-- [ ] `M8-06` CLI：`submit` 接入捕获策略（默认白名单、`--env`、`--inherit-env`、
+- [x] `M8-06` CLI：`submit` 接入捕获策略（默认白名单、`--env`、`--inherit-env`、
   `--capture-env KEY` 白名单运行时扩展点）、executable 解析 fail-fast 与
   本地保留键预检；新增 `yori inspect <job-id>` 展示；用法文本与退出码契约
   维持（本地拒绝 = 用法错误 2）。
-- [ ] `M8-07` 集成测试与文档：Conda/venv 语义一致性（模拟激活环境提交 ->
+- [x] `M8-07` 集成测试与文档：Conda/venv 语义一致性（模拟激活环境提交 ->
   解释器/cwd/关键变量与直接执行一致）、executable 解析失败提交即拒、
   `YORI_JOB_ID`/`YORI_GPU_UUID` 注入断言、`--inherit-env` 超限、inspect
   授权与脱敏 E2E、降权顺序回归（基线 4/16/27 复核）；同步设计文档
@@ -137,7 +137,7 @@
 
 ## 测试与退出条件
 
-- [ ] `unit`：JobSpec 新字段校验（`m1.unit.job-spec` 扩展）；四层合并次序、
+- [x] `unit`：JobSpec 新字段校验（`m1.unit.job-spec` 扩展）；四层合并次序、
   保留键修订负向（`LD_PRELOAD` 仍拒、`YORI_*` 拒绝、`LD_LIBRARY_PATH`
   放行、资源块永远胜出）（`m2.unit.launch-adapter` 扩展）；捕获白名单/
   `--inherit-env` 超限/解析失败矩阵（新增 `m8.unit.environment-capture`）；
@@ -145,19 +145,63 @@
   矩阵与 INSPECT 编解码（`m5.unit.ipc-protocol` 扩展）；submit 新字段映射
   与 inspect 授权/脱敏（`m5.unit.ipc-service` 扩展）；schema v1->v2 迁移、
   v1 兼容读与 round-trip（`m4.unit.sqlite-state-store` 扩展）。
-- [ ] `integration`：已激活环境语义一致性（模拟 Conda/venv：PATH 注入假
+- [x] `integration`：已激活环境语义一致性（模拟 Conda/venv：PATH 注入假
   解释器 + CONDA_PREFIX/VIRTUAL_ENV 提交 -> 运行时解释器、cwd、关键变量
   与直接执行一致；`YORI_JOB_ID`/`YORI_GPU_UUID` 注入断言）；executable
   解析失败提交即拒（CLI 本地拒绝路径）；`--inherit-env` 超限显式失败；
   inspect E2E（owner 可见 + 敏感值掩码；非 owner DENIED）。
-- [ ] 降权顺序回归：`m2.security.process-demotion` 维持通过（基线 4/16/27
+- [x] 降权顺序回归：`m2.security.process-demotion` 维持通过（基线 4/16/27
   复核；root 补跑条件沿用 M2 记录）。
-- [ ] fuzz：`m5.fuzz.ipc-parser` 语料纳入 v2 SUBMIT 与 INSPECT 帧（三方向）。
-- [ ] 五预设构建与 CI 全绿（format/tidy/gcc/clang/sanitizers/依赖锁定）。
-- [ ] 文档同步矩阵（工程规范第 8 节）核对：设计文档（§6.1/§8.2/§13，
+- [x] fuzz：`m5.fuzz.ipc-parser` 语料纳入 v2 SUBMIT 与 INSPECT 帧（三方向）。
+- [ ] 五预设构建与 CI 全绿（本地五预设已全绿：debug/release/asan/ubsan/tsan 各 44/44；GitHub CI 随 MR 收口）（format/tidy/gcc/clang/sanitizers/依赖锁定）。
+- [x] 文档同步矩阵（工程规范第 8 节）核对：设计文档（§6.1/§8.2/§13，
   版本号递增）、DEC-006 修订标注、威胁模型基线 26-27 落地状态与证据、
   总计划（§1/§5/§6/§11）、本文档验证记录、CHANGELOG（`## Unreleased`）。
 
 ## 验证记录
 
-（实施中随轮次补记。）
+2026-09-12：M8 实现完成（本地验证，Linux x86_64，GCC 13，分支
+`feat/m8-execution-context`，6 个实现 commit）。
+
+- 实现：`JobSpec` `executable`/`env_metadata` 与校验；保留键修订
+  （`LD_LIBRARY_PATH` 出保留集、`YORI_*` 前缀拒绝）；四层合并 v2
+  （`YORI_JOB_ID`/`YORI_GPU_UUID` 资源块最后写入，`prepare` 接收 JobId）；
+  `LaunchPlan.executable` 直 exec 路径；`EnvironmentCapturePolicy`/
+  `capture_environment`/`resolve_executable`/`detect_environment_source`/
+  `probe_python_version`（Core 组件 `launch/environment_capture`）；IPC 协议
+  v2（SUBMIT 尾部可选字段 + `INSPECT`=9 + 版本协商，流式帧族维持 v1）；
+  `IpcService` submit 新字段映射与 `handle_inspect`（敏感名模式 daemon 侧
+  掩码，默认 `TOKEN/KEY/SECRET/PASSWORD` 可配置）；`JobManager` 启动链路传
+  JobId 并使用 executable；SQLite schema v2（v1 单事务增量迁移、更高版本
+  显式拒绝、`environment_type` 值域与 python_version 依附性校验）；
+  `mutation_core::same_spec` 纳入新字段（spec 变更检测缺口）；CLI submit
+  捕获/解析/`--env`/`--inherit-env`/`--capture-env` 与 `yori inspect`。
+- 测试：`ctest --test-dir build/debug` -> **44/44 通过**（43 项既有 + 1 项
+  新增 `m8.unit.environment-capture`；既有测试扩展：`m1.unit.job-spec`、
+  `m2.unit.launch-adapter`、`m2.unit.process-supervisor`、
+  `m5.unit.ipc-protocol`、`m5.unit.ipc-service`、`m4.unit.sqlite-state-store`、
+  `m5.fuzz.ipc-parser`、`m5.integration.ipc-e2e`）。4 项环境依赖用例按既有
+  约定显式 skip（root 降权、真实 NVML、multi-user、performance）。
+- E2E M8 段：假 conda 环境提交（`env -i` 注入 `CONDA_PREFIX`/
+  `LD_LIBRARY_PATH`/自定义 PATH 的 `fake-python`）-> 训练进程读到捕获值、
+  `YORI_JOB_ID=3`、`YORI_GPU_UUID=GPU-e2e-a`、`--env` 值原样到达；运行中
+  `inspect`（conda 判定、executable 绝对路径、`M8_TOKEN=***` 掩码且原值
+  `secret-e2e` 不出现在输出、`assigned: GPU-e2e-a`）；executable 解析失败
+  提交即拒（exit 2）；保留键 `YORI_*`/`CUDA_VISIBLE_DEVICES`/`LD_PRELOAD`
+  本地拒绝；`--inherit-env` 单值超限显式失败（`BIGVAR` 具名报错）；
+  `--capture-env` 扩展键进入训练环境。
+- 全预设：debug/release/asan/ubsan 各 **44/44**；TSAN 以
+  `setarch -R ctest --test-dir build/tsan`（关闭 ASLR，本机限制）**44/44**。
+  E2E 并行稳定性：修复 `probe_python_version` 期限误用 `std::clock()`（CPU
+  时间，read 阻塞时几乎不走，负载下事实无限等待）为墙钟
+  `steady_clock`（3s 击杀界），修复后 `-j 8` 连续 8 轮全绿。
+- 静态检查：clang-format 18 `--Werror` 通过；clang-tidy 18
+  WarningsAsErrors 类别（bugprone/clang-analyzer/performance/portability）
+  零告警（readability/misc 类别告警与主干既有水平一致）。
+- 白名单"daemon 配置可扩展"落地形态：`EnvironmentCapturePolicy.extra_keys`
+  + CLI `--capture-env KEY`（运行时扩展点）；yorid 当前无配置文件机制，集中
+  配置随未来配置统一工作收敛（见本文档风险节，已按配置级变更处理）。
+- 限制：GitHub CI（GCC/Clang 双编译器矩阵与远端门禁）随 MR 收口；真实
+  Conda/venv 环境与真机 NVML 组合按 M7 补跑条件沿用（CI 以假环境注入
+  近似覆盖语义一致性矩阵）。
+

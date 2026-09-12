@@ -108,7 +108,8 @@ class RawSql final {
     close_ = reinterpret_cast<decltype(&::sqlite3_close_v2)>(::dlsym(library_, "sqlite3_close_v2"));
     exec_ = reinterpret_cast<decltype(&::sqlite3_exec)>(::dlsym(library_, "sqlite3_exec"));
     YORI_CHECK(open_ != nullptr && close_ != nullptr && exec_ != nullptr);
-    YORI_CHECK(open_(path.c_str(), &db_, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr) == SQLITE_OK);
+    YORI_CHECK(open_(path.c_str(), &db_, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr) ==
+               SQLITE_OK);
   }
 
   ~RawSql() {
@@ -142,7 +143,6 @@ SqliteStateStoreConfig config_for(const std::string& path) {
   config.max_leases = 2;
   return config;
 }
-
 
 // ---------------------------------------------------------------------------
 // M8（DEC-011）：schema v2 执行上下文列、v1 -> v2 增量迁移与兼容读。
@@ -514,7 +514,6 @@ int main() {
     }
   }
 
-
   // ---- M8：v2 执行上下文列 roundtrip ----------------------------------------
   {
     const std::string path = directory + "/v2-fields.db";
@@ -523,8 +522,7 @@ int main() {
       YORI_CHECK(store.open().ok());
       auto captured = queued(1);
       captured.spec.executable = "/opt/conda/envs/train/bin/python";
-      captured.spec.env_metadata =
-          yori::job::EnvMetadata{yori::job::EnvSource::kConda, "3.11.5"};
+      captured.spec.env_metadata = yori::job::EnvMetadata{yori::job::EnvSource::kConda, "3.11.5"};
       StateMutation create;
       create.create_jobs.push_back(std::move(captured));
       YORI_CHECK(store.apply(create).ok());
@@ -556,8 +554,7 @@ int main() {
       YORI_CHECK(load.snapshot.jobs.size() == 1);
       const auto& record = require_job(load.snapshot, 1);
       YORI_CHECK(record.state == JobState::kQueued);
-      YORI_CHECK(record.spec.argv ==
-                 std::vector<std::string>({"/usr/bin/python3", "train.py"}));
+      YORI_CHECK(record.spec.argv == std::vector<std::string>({"/usr/bin/python3", "train.py"}));
       YORI_CHECK(record.spec.cwd == "/srv");
       YORI_CHECK(!record.spec.executable.has_value());
       YORI_CHECK(!record.spec.env_metadata.has_value());

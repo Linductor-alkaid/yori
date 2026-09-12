@@ -722,13 +722,11 @@ bool SqliteStateStore::Impl::write_job_row(const StoredJob& record) {
       !bind_nullable_text(24, record.execution.failure_reason) ||
       !bind_nullable_text(25, record.execution.log_path) ||
       !bind_nullable_text(26, record.spec.executable) ||
-      !bind_nullable_text(27, record.spec.env_metadata
-                                        ? std::optional<std::string>{
-                                              job::to_string(record.spec.env_metadata->source)}
-                                        : std::nullopt) ||
-      !bind_nullable_text(28, record.spec.env_metadata
-                                        ? record.spec.env_metadata->python_version
-                                        : std::nullopt)) {
+      !bind_nullable_text(27, record.spec.env_metadata ? std::optional<std::string>{job::to_string(
+                                                             record.spec.env_metadata->source)}
+                                                       : std::nullopt) ||
+      !bind_nullable_text(
+          28, record.spec.env_metadata ? record.spec.env_metadata->python_version : std::nullopt)) {
     return false;
   }
 

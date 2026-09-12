@@ -63,10 +63,21 @@ bool EnvironmentCapturePolicy::captures(const std::string& name) const {
     return true;
   }
   static constexpr std::array<std::string_view, 15> kDefaultKeys{
-      "CONDA_DEFAULT_ENV", "CONDA_PREFIX",   "CUDA_HOME",       "CUDA_PATH",
-      "HTTP_PROXY",        "HTTPS_PROXY",    "LD_LIBRARY_PATH", "MKL_NUM_THREADS",
-      "NO_PROXY",          "OMP_NUM_THREADS", "PATH",           "PYTHONPATH",
-      "VIRTUAL_ENV",       "http_proxy",     "https_proxy",
+      "CONDA_DEFAULT_ENV",
+      "CONDA_PREFIX",
+      "CUDA_HOME",
+      "CUDA_PATH",
+      "HTTP_PROXY",
+      "HTTPS_PROXY",
+      "LD_LIBRARY_PATH",
+      "MKL_NUM_THREADS",
+      "NO_PROXY",
+      "OMP_NUM_THREADS",
+      "PATH",
+      "PYTHONPATH",
+      "VIRTUAL_ENV",
+      "http_proxy",
+      "https_proxy",
   };
   // 注意：no_proxy（小写）显式列入。
   if (name == "no_proxy") {
@@ -151,7 +162,7 @@ const char* to_string(ExecutableResolveErrorCode code) noexcept {
 }
 
 ExecutableResolveResult resolve_executable(const std::string& argv0, const std::string& cwd,
-                                          const std::map<std::string, std::string>& captured_env) {
+                                           const std::map<std::string, std::string>& captured_env) {
   if (argv0.empty()) {
     return {ExecutableResolveErrorCode::kEmptyName, {}, "argv[0] is empty"};
   }
@@ -163,8 +174,7 @@ ExecutableResolveResult resolve_executable(const std::string& argv0, const std::
     if (argv0.front() == '/') {
       const auto probed = probe_candidate(argv0);
       return {probed, probed == ExecutableResolveErrorCode::kNone ? argv0 : std::string{},
-              probed == ExecutableResolveErrorCode::kNone ? std::string{}
-                                                          : to_string(probed)};
+              probed == ExecutableResolveErrorCode::kNone ? std::string{} : to_string(probed)};
     }
     if (cwd.empty() || cwd.front() != '/') {
       return {ExecutableResolveErrorCode::kRelativeWithoutCwd, {}, "cwd must be absolute"};
@@ -279,8 +289,8 @@ std::optional<std::string> probe_python_version(const std::string& executable) {
     static_cast<void>(::dup2(pipe_fds[1], STDOUT_FILENO));
     static_cast<void>(::dup2(pipe_fds[1], STDERR_FILENO));
     static_cast<void>(::close(pipe_fds[1]));
-    std::array<char*, 3> argv{const_cast<char*>(executable.c_str()),
-                              const_cast<char*>("--version"), nullptr};
+    std::array<char*, 3> argv{const_cast<char*>(executable.c_str()), const_cast<char*>("--version"),
+                              nullptr};
     std::array<char*, 2> envp{nullptr};
     ::execve(executable.c_str(), argv.data(), envp.data());
     ::_exit(127);
@@ -320,7 +330,9 @@ std::optional<std::string> probe_python_version(const std::string& executable) {
     if (reaped < 0 && errno != EINTR) {
       return std::nullopt;
     }
-    struct timespec pause {0, 2 * 1000 * 1000};
+    struct timespec pause {
+      0, 2 * 1000 * 1000
+    };
     ::nanosleep(&pause, nullptr);
   }
   if (!exited) {

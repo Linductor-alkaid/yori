@@ -43,7 +43,7 @@ struct JobSpecLimits final {
 };
 
 // 提交环境的来源判定（DEC-011：由捕获到的 CONDA_PREFIX/VIRTUAL_ENV 推导，
-  // 不作为调度或执行输入，仅用于展示与审计）。
+// 不作为调度或执行输入，仅用于展示与审计）。
 enum class EnvSource : std::uint8_t {
   kNone = 0,
   kConda = 1,

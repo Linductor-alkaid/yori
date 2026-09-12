@@ -46,8 +46,8 @@ const std::vector<EnvironmentEntry>& activated_conda_source() {
 int main() {
   // ---- 默认白名单：只捕获列出的键，保留键与 GPU 管理键排除 ------------------
   {
-    const auto result = capture_environment(activated_conda_source(),
-                                            EnvironmentCapturePolicy::defaults());
+    const auto result =
+        capture_environment(activated_conda_source(), EnvironmentCapturePolicy::defaults());
     YORI_CHECK(result);
     if (result) {
       const auto has = [&result](const char* name) {
@@ -119,8 +119,7 @@ int main() {
   // ---- 容量上限：变量数、单值、总量显式失败 --------------------------------
   {
     std::vector<EnvironmentEntry> many;
-    for (std::size_t i = 0;
-         i <= yori::job::JobSpecLimits::kMaxEnvironmentVariables + 1; ++i) {
+    for (std::size_t i = 0; i <= yori::job::JobSpecLimits::kMaxEnvironmentVariables + 1; ++i) {
       many.push_back({"VAR_" + std::to_string(i), "v"});
     }
     EnvironmentCapturePolicy policy;
@@ -128,9 +127,8 @@ int main() {
     const auto result = capture_environment(many, policy);
     YORI_CHECK(!result);
     YORI_CHECK(result.code == EnvironmentCaptureErrorCode::kTooManyVariables);
-    YORI_CHECK(result.offending_name == "VAR_" +
-                                           std::to_string(
-                                               yori::job::JobSpecLimits::kMaxEnvironmentVariables));
+    YORI_CHECK(result.offending_name ==
+               "VAR_" + std::to_string(yori::job::JobSpecLimits::kMaxEnvironmentVariables));
   }
   {
     EnvironmentCapturePolicy policy;
@@ -162,11 +160,9 @@ int main() {
     // 畸形名条目被跳过，不失败捕获（GOOD_VAR 经扩展键接纳）。
     EnvironmentCapturePolicy policy;
     policy.extra_keys = {"GOOD_VAR"};
-    const auto result = capture_environment({{"BAD NAME", "x"},
-                                             {"ALSO=BAD", "y"},
-                                             {"GOOD_VAR", "z"},
-                                             {std::string("NUL\0X", 5), "w"}},
-                                            policy);
+    const auto result = capture_environment(
+        {{"BAD NAME", "x"}, {"ALSO=BAD", "y"}, {"GOOD_VAR", "z"}, {std::string("NUL\0X", 5), "w"}},
+        policy);
     YORI_CHECK(result);
     YORI_CHECK(result.env.size() == 1);
     YORI_CHECK(result.env.contains("GOOD_VAR"));
@@ -180,8 +176,7 @@ int main() {
     YORI_CHECK(result.executable == "/bin/sh");
 
     // 裸名按捕获后的 PATH 解析：假目录在前也不影响命中真段。
-    const auto resolved = resolve_executable(
-        "sh", "/tmp", {{"PATH", "/nonexistent-dir:/bin"}});
+    const auto resolved = resolve_executable("sh", "/tmp", {{"PATH", "/nonexistent-dir:/bin"}});
     YORI_CHECK(resolved);
     YORI_CHECK(resolved.executable == "/bin/sh");
 
@@ -227,9 +222,9 @@ int main() {
     YORI_CHECK(detect_environment_source({{"VIRTUAL_ENV", "/venv"}}) ==
                yori::job::EnvSource::kVenv);
     // 同时存在取 conda。
-    YORI_CHECK(detect_environment_source(
-                   {{"CONDA_PREFIX", "/opt/conda"}, {"VIRTUAL_ENV", "/venv"}}) ==
-               yori::job::EnvSource::kConda);
+    YORI_CHECK(
+        detect_environment_source({{"CONDA_PREFIX", "/opt/conda"}, {"VIRTUAL_ENV", "/venv"}}) ==
+        yori::job::EnvSource::kConda);
     YORI_CHECK(detect_environment_source({{"PATH", "/bin"}}) == yori::job::EnvSource::kNone);
   }
 
