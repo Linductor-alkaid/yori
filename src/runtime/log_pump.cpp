@@ -8,7 +8,9 @@
 #include <atomic>
 #include <cerrno>
 #include <executor/executor.hpp>
+#include <functional>
 #include <future>
+#include <mutex>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -34,14 +36,23 @@ struct Command final {
   DetachCommand detach_command;
 };
 
+// 完成监听槽：owner 线程设置、pump worker 线程读取，mutex 保护（与
+// ProcessExitMonitor 的 listener 同型）。
+struct DoneListenerSlot final {
+  std::mutex mutex;
+  std::function<void()> listener;
+};
+
 class PumpWorker final : public executor::IBlockingIoWorker {
  public:
   PumpWorker(int wake_read, executor::comm::MpscChannel<Command>& commands,
-             executor::comm::MpscChannel<LogPumpDone>& done_events, std::atomic<bool>& stopping)
+             executor::comm::MpscChannel<LogPumpDone>& done_events, std::atomic<bool>& stopping,
+             std::shared_ptr<DoneListenerSlot> done_listener)
       : wake_read_(wake_read),
         commands_(commands),
         done_events_(done_events),
-        stopping_(stopping) {}
+        stopping_(stopping),
+        done_listener_(std::move(done_listener)) {}
 
   void run(executor::StopToken stop_token) override {
     while (!stop_token.stop_requested() && !stopping_.load(std::memory_order_relaxed)) {
@@ -264,6 +275,17 @@ class PumpWorker final : public executor::IBlockingIoWorker {
     while (!stopping_.load(std::memory_order_relaxed)) {
       LogPumpDone attempt = done;
       if (done_events_.send_for(std::move(attempt), std::chrono::seconds{5}).ok) {
+        // 投递成功即唤醒消费方：done 通道无 fd 可 poll，缺这一步则 EOF 发布
+        // 汇合（退出事件 + 泵完成）会滞留到下一个无关唤醒（M7 遗留缺陷，
+        // 跟随会话因此可无限悬挂）。
+        std::function<void()> listener;
+        {
+          const std::lock_guard<std::mutex> lock(done_listener_->mutex);
+          listener = done_listener_->listener;
+        }
+        if (listener) {
+          listener();
+        }
         return;
       }
     }
@@ -304,6 +326,7 @@ class PumpWorker final : public executor::IBlockingIoWorker {
   executor::comm::MpscChannel<LogPumpDone>& done_events_;
   std::atomic<bool>& stopping_;
   std::unordered_map<std::uint64_t, Entry> entries_;
+  std::shared_ptr<DoneListenerSlot> done_listener_;
 };
 
 }  // namespace
@@ -319,6 +342,7 @@ class LogPump::Impl final {
 
   executor::comm::MpscChannel<Command> commands;
   executor::comm::MpscChannel<LogPumpDone> done_events;
+  std::shared_ptr<DoneListenerSlot> done_listener = std::make_shared<DoneListenerSlot>();
   executor::Executor& executor;
   executor::WorkerHandle handle;
   int wake_read{-1};
@@ -346,8 +370,9 @@ LogPumpStartResult LogPump::start() {
     return {LogPumpStartCode::kWorkerRejected, "wake pipe creation failed"};
   }
 
-  auto worker_storage = std::make_unique<PumpWorker>(wake_pipe[0], impl_->commands,
-                                                     impl_->done_events, impl_->worker_stopping);
+  auto worker_storage =
+      std::make_unique<PumpWorker>(wake_pipe[0], impl_->commands, impl_->done_events,
+                                   impl_->worker_stopping, impl_->done_listener);
   worker_storage->set_wake_write(wake_pipe[1]);
 
   // Executor 的 blocking worker 名字单次注册不可复用（DuplicateName 语义），
@@ -388,6 +413,11 @@ LogPumpAttachResult LogPump::attach(LogPumpJobInput&& input) {
     return {LogPumpAttachCode::kAckTimeout, "worker did not acknowledge attach"};
   }
   return completion.get();
+}
+
+void LogPump::set_done_listener(std::function<void()> listener) {
+  const std::lock_guard<std::mutex> lock(impl_->done_listener->mutex);
+  impl_->done_listener->listener = std::move(listener);
 }
 
 LogPumpDetachResult LogPump::detach(job::JobId job) {

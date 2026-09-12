@@ -1,3 +1,4 @@
+#include <dirent.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/stat.h>
@@ -140,23 +141,34 @@ BoundedCliRun run_cli_bounded(const std::string& directory, const std::string& s
   result.stalled = true;
   std::fprintf(stderr, "e2e: CLI stalled for %dms (pid %d); diagnostics:\n", stall_ms,
                static_cast<int>(child));
-  {
-    std::ifstream wchan("/proc/" + std::to_string(child) + "/wchan");
-    if (wchan.is_open()) {
-      std::string where;
-      std::getline(wchan, where);
-      std::fprintf(stderr, "  cli wchan: %s\n", where.c_str());
-    }
-    std::ifstream fds("/proc/" + std::to_string(child) + "/fd");
-    if (fds.is_open()) {
-      std::string line;
-      std::fprintf(stderr, "  cli fds:");
-      while (std::getline(fds, line)) {
-        std::fprintf(stderr, " %s", line.substr(line.find_last_of('/') + 1).c_str());
+  const auto dump_fd_table = [](const std::string& pid, const char* label) {
+    std::fprintf(stderr, "  %s fds:\n", label);
+    const std::string fd_dir = "/proc/" + pid + "/fd";
+    DIR* handle = ::opendir(fd_dir.c_str());
+    if (handle != nullptr) {
+      const dirent* entry = nullptr;
+      while ((entry = ::readdir(handle)) != nullptr) {
+        if (entry->d_name[0] == '.') {
+          continue;
+        }
+        char target[512] = {};
+        const std::string link = fd_dir + "/" + entry->d_name;
+        const ssize_t length = ::readlink(link.c_str(), target, sizeof(target) - 1);
+        if (length > 0) {
+          std::fprintf(stderr, "    %s -> %s\n", entry->d_name, target);
+        }
       }
-      std::fprintf(stderr, "\n");
+      ::closedir(handle);
     }
-  }
+    std::ifstream syscall_file("/proc/" + pid + "/syscall");
+    if (syscall_file.is_open()) {
+      std::string call;
+      std::getline(syscall_file, call);
+      std::fprintf(stderr, "  %s syscall: %s\n", label, call.c_str());
+    }
+  };
+  dump_fd_table(std::to_string(child), "cli");
+  dump_fd_table("self", "daemon(test)");
   result.out = read_file(out_path);
   result.err = read_file(err_path);
   std::fprintf(stderr, "  cli stdout so far: [%s]\n  cli stderr so far: [%s]\n", result.out.c_str(),

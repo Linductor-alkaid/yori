@@ -1228,10 +1228,14 @@ JobManagerStartResult JobManager::start(const std::optional<recovery::RecoveryRe
   }
   impl_->started = true;
 
-  // 唤醒源挂钩（回调非阻塞，只写唤醒字节）：退出监视事件、GPU 状态事件。
-  // 事件通道是 MpscChannel（无 fd 可 poll），与 LogStreamer 的变更监听同型。
+  // 唤醒源挂钩（回调非阻塞，只写唤醒字节）：退出监视事件、GPU 状态事件与
+  // 日志泵完成事件。事件通道是 MpscChannel（无 fd 可 poll），与 LogStreamer
+  // 的变更监听同型。泵完成必须唤醒：EOF 发布汇合（退出事件 + 泵完成，两者
+  // 到齐才发布）否则会滞留到下一个无关事件，跟随会话可无限悬挂（M7 遗留
+  // 缺陷，M8 E2E 复现并修复）。
   impl_->exit_monitor.set_event_listener([impl = impl_.get()]() noexcept { impl->kick(); });
   impl_->gpu_manager.set_event_listener([impl = impl_.get()]() noexcept { impl->kick(); });
+  impl_->log_pump.set_done_listener([impl = impl_.get()]() noexcept { impl->kick(); });
 
   // 恢复完成触发调度（设计 9：恢复完成是调度触发事件）。
   Command command;
@@ -1320,6 +1324,7 @@ JobManagerStopCode JobManager::stop() {
   }
   impl_->stop_requested = true;
   // 解除唤醒挂钩（先于 fd 关闭；GPU 周期任务已由 daemon 在阶段 ③ 停止）。
+  impl_->log_pump.set_done_listener(nullptr);
   impl_->gpu_manager.set_event_listener(nullptr);
   impl_->exit_monitor.set_event_listener(nullptr);
   if (impl_->worker != nullptr) {
