@@ -98,11 +98,13 @@ void print_usage() {
   std::fprintf(stderr,
                "usage: yori [--socket PATH] <command> [args]\n"
                "commands:\n"
-               "  submit [--gpus N] [--tensorboard-logdir DIR] [--cwd DIR]\n"
-               "         [--env K=V]... [--inherit-env] [--capture-env KEY]...\n"
-               "         -- CMD [ARG]...\n"
+               "  submit [--gpus N] [--gpu INDEX-or-UUID] [--tensorboard-logdir DIR]\n"
+               "         [--cwd DIR] [--env K=V]... [--inherit-env]\n"
+               "         [--capture-env KEY]... -- CMD [ARG]...\n"
                "         (captures the current execution context per DEC-011:\n"
                "          whitelist env, resolves CMD via the captured PATH)\n"
+               "         (--gpu N pins the job to one GPU per DEC-012: hard\n"
+               "          affinity, mutually exclusive with --gpus)\n"
                "  ps                          list jobs (own jobs in full, others masked)\n"
                "  queue                       list queued jobs in FIFO order\n"
                "  gpu                         list GPUs with logical state\n"
@@ -192,6 +194,8 @@ int fail_request(const std::string& command, const yori::ipc::IpcResponse& respo
 int command_submit(const std::string& socket_path, std::vector<std::string> arguments) {
   yori::ipc::IpcSubmitRequest submit;
   std::uint32_t gpus = 1;
+  bool gpus_explicit = false;
+  std::optional<std::string> gpu_spec;
   bool inherit_env = false;
   std::vector<std::string> capture_extra;
 
@@ -206,11 +210,33 @@ int command_submit(const std::string& socket_path, std::vector<std::string> argu
       return kExitUsage;
     }
     gpus = static_cast<std::uint32_t>(parsed);
+    gpus_explicit = true;
   }
   if (gpus != 1) {
     // MVP 单 GPU Job；多 GPU 为 POST-01（设计 16.2）。
     std::fprintf(stderr, "yori: only 1 GPU per job is supported in MVP\n");
     return kExitUsage;
+  }
+  while (parser.take_flag("--gpu", value)) {
+    // DEC-012：REQUIRED 硬亲和；index/UUID 由 daemon 以当前观测解析。
+    gpu_spec = value;
+  }
+  if (gpu_spec) {
+    if (gpus_explicit) {
+      std::fprintf(stderr, "yori: --gpu and --gpus are mutually exclusive\n");
+      return kExitUsage;
+    }
+    // 本地格式预检（fail-fast；daemon 侧解析与拒绝是权威）。
+    bool numeric =
+        !gpu_spec->empty() && gpu_spec->find_first_not_of("0123456789") == std::string::npos;
+    const bool uuid_like = !gpu_spec->empty() &&
+                           gpu_spec->size() <= yori::gpu::GpuUuid::kMaxBytes &&
+                           gpu_spec->find('\0') == std::string::npos;
+    if (!numeric && !uuid_like) {
+      std::fprintf(stderr, "yori: --gpu expects a GPU index or UUID\n");
+      return kExitUsage;
+    }
+    submit.gpu_spec = gpu_spec;
   }
   while (parser.take_flag("--tensorboard-logdir", value)) {
     submit.tensorboard_logdir = value;
@@ -324,10 +350,29 @@ int command_submit(const std::string& socket_path, std::vector<std::string> argu
   return kExitOk;
 }
 
+const char* wait_reason_name(std::uint8_t reason) {
+  return yori::ipc::to_string(static_cast<yori::ipc::IpcWaitReason>(reason));
+}
+
+// WAIT 列内容（DEC-012）：QUEUED Job 的等待原因；owner/admin 附目标 UUID。
+// detail 缺失（脱敏视图或尚无评估）时只显示原因本身。
+std::string wait_column(const std::uint8_t state, const std::uint8_t wait_reason,
+                        const std::optional<std::string>& detail) {
+  if (state != static_cast<std::uint8_t>(yori::job::JobState::kQueued) ||
+      wait_reason == static_cast<std::uint8_t>(yori::ipc::IpcWaitReason::kNone)) {
+    return "-";
+  }
+  std::string text = wait_reason_name(wait_reason);
+  if (detail) {
+    text += " (" + *detail + ")";
+  }
+  return text;
+}
+
 void print_job_row(std::uint64_t job_id, const char* state, std::uint32_t owner,
-                   const std::string& command) {
-  std::printf("%-10llu %-10s %-8u %s\n", static_cast<unsigned long long>(job_id), state, owner,
-              command.c_str());
+                   const std::string& wait, const std::string& command) {
+  std::printf("%-10llu %-10s %-8u %-24s %s\n", static_cast<unsigned long long>(job_id), state,
+              owner, wait.c_str(), command.c_str());
 }
 
 int command_ps(const std::string& socket_path) {
@@ -345,7 +390,7 @@ int command_ps(const std::string& socket_path) {
   if (response.error == yori::ipc::IpcError::kLimit) {
     std::fprintf(stderr, "yori: %s\n", response.detail.c_str());
   }
-  std::printf("%-10s %-10s %-8s %s\n", "JOB", "STATE", "OWNER", "COMMAND");
+  std::printf("%-10s %-10s %-8s %-24s %s\n", "JOB", "STATE", "OWNER", "WAIT", "COMMAND");
   for (const auto& summary : response.jobs) {
     std::string command;
     if (summary.masked) {
@@ -358,7 +403,8 @@ int command_ps(const std::string& socket_path) {
         command += summary.argv[i];
       }
     }
-    print_job_row(summary.job_id, job_state_name(summary.state), summary.owner_uid, command);
+    print_job_row(summary.job_id, job_state_name(summary.state), summary.owner_uid,
+                  wait_column(summary.state, summary.wait_reason, summary.wait_detail), command);
   }
   return kExitOk;
 }
@@ -378,7 +424,8 @@ int command_queue(const std::string& socket_path) {
   if (response.error == yori::ipc::IpcError::kLimit) {
     std::fprintf(stderr, "yori: %s\n", response.detail.c_str());
   }
-  std::printf("%-8s %-10s %-8s %-20s %s\n", "POSITION", "JOB", "OWNER", "SUBMITTED", "STATE");
+  std::printf("%-8s %-10s %-8s %-20s %-10s %s\n", "POSITION", "JOB", "OWNER", "SUBMITTED", "STATE",
+              "WAIT");
   std::size_t position = 1;
   for (const auto& entry : response.queue) {
     const auto seconds = static_cast<std::time_t>(entry.submit_time_unix_ns / 1000000000);
@@ -388,9 +435,10 @@ int command_queue(const std::string& socket_path) {
       static_cast<void>(
           std::strftime(formatted.data(), formatted.size(), "%Y-%m-%d %H:%M:%S", broken));
     }
-    std::printf("%-8zu %-10llu %-8u %-20s %s\n", position,
+    std::printf("%-8zu %-10llu %-8u %-20s %-10s %s\n", position,
                 static_cast<unsigned long long>(entry.job_id), entry.owner_uid, formatted.data(),
-                job_state_name(entry.state));
+                job_state_name(entry.state),
+                wait_column(entry.state, entry.wait_reason, entry.wait_detail).c_str());
     ++position;
   }
   return kExitOk;
@@ -710,6 +758,14 @@ int command_inspect(const std::string& socket_path, const std::string& job_text)
     command += inspect.argv[i];
   }
   std::printf("command:     %s\n", command.c_str());
+  // placement 输入（DEC-012）：owner/admin 视图（INSPECT 拒绝非 owner/admin）。
+  if (inspect.gpu_placement_mode ==
+      static_cast<std::uint8_t>(yori::job::GpuPlacementMode::kRequired)) {
+    std::printf("placement:   required %s\n",
+                inspect.gpu_placement_device ? inspect.gpu_placement_device->c_str() : "(missing)");
+  } else {
+    std::printf("placement:   any\n");
+  }
   if (inspect.env_metadata) {
     std::printf("environment: %s", environment_source_name(inspect.env_metadata->source));
     if (inspect.env_metadata->python_version) {
