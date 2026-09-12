@@ -81,6 +81,13 @@ yori_apply_warnings(unit_launch_adapter_test)
 add_test(NAME m2.unit.launch-adapter COMMAND unit_launch_adapter_test)
 set_tests_properties(m2.unit.launch-adapter PROPERTIES LABELS "unit" TIMEOUT 60)
 
+# ---- unit：提交时执行上下文捕获与解析（M8-02，DEC-011）--------------------
+add_executable(unit_environment_capture_test unit_environment_capture_test.cpp)
+target_link_libraries(unit_environment_capture_test PRIVATE yori::yori_core)
+yori_apply_warnings(unit_environment_capture_test)
+add_test(NAME m8.unit.environment-capture COMMAND unit_environment_capture_test)
+set_tests_properties(m8.unit.environment-capture PROPERTIES LABELS "unit" TIMEOUT 60)
+
 # ---- unit：进程引擎与守护状态机（M2-02/M2-03）-----------------------------
 add_executable(unit_process_supervisor_test unit_process_supervisor_test.cpp)
 target_link_libraries(unit_process_supervisor_test PRIVATE yori::yori_core)

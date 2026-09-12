@@ -11,6 +11,7 @@ add_library(yori_core
   ipc/ipc_service.cpp
   ipc/ipc_transport.cpp
   job/job.cpp
+  launch/environment_capture.cpp
   launch/launch_adapter.cpp
   observe/log_sink.cpp
   process/process_supervisor.cpp
