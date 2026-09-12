@@ -13,6 +13,7 @@
 #include <yori/launch/launch_adapter.hpp>
 #include <yori/queue/job_queue.hpp>
 #include <yori/recovery/job_recovery.hpp>
+#include <yori/scheduler/scheduler.hpp>
 
 #include "gpu_test_support.hpp"
 #include "process_test_support.hpp"
@@ -617,6 +618,99 @@ int run_test() {
       const auto load = store->load();
       YORI_CHECK(load.snapshot.leases.empty());
     }
+
+    static_cast<void>(manager.stop());
+    static_cast<void>(gpu_manager.stop());
+    YORI_CHECK(runtime.shutdown() == runtime::ExecutorRuntimeShutdownResult::kCompleted);
+  }
+
+  // ---- M9（DEC-012）：REQUIRED 亲和 + 有界跳过 + wait_reason 发布 -----------
+  {
+    ExecutorRuntime runtime;
+    std::string error;
+    YORI_CHECK(runtime.initialize({}, error));
+    testing::AtomicGpuProvider provider;
+    provider.set_uuid(0, "GPU-m9-a");
+    provider.set_present(0, true);
+    provider.set_state(0, gpu::GpuObservedState::kFree);
+    provider.set_uuid(1, "GPU-m9-b");
+    provider.set_present(1, true);
+    provider.set_state(1, gpu::GpuObservedState::kExternalBusy);
+
+    auto store = std::make_unique<runtime::SerialStateStore>(
+        std::make_unique<testing::InMemoryStateStore>());
+    queue::QueueErrorCode queue_error = queue::QueueErrorCode::kNone;
+    auto queue = GlobalJobQueue::create({}, queue_error);
+    runtime::GpuManager gpu_manager(runtime.executor(), provider, runtime::GpuManagerConfig{50ms});
+    YORI_CHECK(gpu_manager.start().ok());
+    runtime::LogStreamer streamer;
+    launch::PosixIdentityResolver resolver;
+    launch::DefaultLaunchAdapter adapter;
+    executor::comm::PhaseGate gate{"jm-m9-placement"};
+    runtime::JobManagerConfig manager_config;
+    manager_config.log_root = make_root();
+    manager_config.daemon_environment = {{"PATH", "/usr/bin:/bin"}};
+    runtime::JobManager manager(runtime.executor(), *store, *queue, gpu_manager, streamer, resolver,
+                                adapter, gate, manager_config);
+    static_cast<void>(gate.advance_to(runtime::kPhaseSchedulingOpen));
+    YORI_CHECK(manager.start().ok());
+
+    // J1：REQUIRED 亲和 GPU-m9-b（当前被外部占用）。
+    job::JobSpec required_spec = spec_for({"sleep", "5"});
+    required_spec.gpu_placement.mode = job::GpuPlacementMode::kRequired;
+    required_spec.gpu_placement.devices.push_back(gpu::GpuUuid{"GPU-m9-b"});
+    const auto first = manager.submit_job(required_spec);
+    YORI_CHECK(first.ok());
+    // J2：kAny，排在 J1 之后（有界跳过验证：不得被 J1 阻塞）。
+    const auto second = manager.submit_job(spec_for({"true"}));
+    YORI_CHECK(second.ok());
+
+    // J2 在 J1 的亲和目标不可用时越过队首启动（issue #10 场景 8）。
+    YORI_CHECK(wait_state(*store, second.job_id, job::JobState::kFinished));
+    {
+      const auto record = find_stored_simple(*store, first.job_id);
+      YORI_CHECK(record.has_value() && record->state == job::JobState::kQueued);
+    }
+
+    // wait_reason 视图：J1 的跳过原因携带目标 UUID（ps/queue 数据源）。
+    {
+      scheduler::ScheduleEvaluation evaluation;
+      YORI_CHECK(manager.try_get_schedule_evaluation(evaluation));
+      const scheduler::ScheduleSkip* skip = nullptr;
+      for (const auto& entry : evaluation.skipped) {
+        if (entry.job.value() == first.job_id) {
+          skip = &entry;
+          break;
+        }
+      }
+      YORI_CHECK(skip != nullptr);
+      if (skip != nullptr) {
+        YORI_CHECK(skip->reason == scheduler::WaitReason::kAffinityGpuExternal);
+        YORI_CHECK(skip->target == gpu::GpuUuid{"GPU-m9-b"});
+      }
+    }
+
+    // 亲和目标空闲 -> GPU 状态事件 -> J1 在目标卡上启动（绝不漂移到 GPU-m9-a）。
+    provider.set_state(1, gpu::GpuObservedState::kFree);
+    YORI_CHECK(wait_state(*store, first.job_id, job::JobState::kRunning));
+    {
+      store::StateSnapshot snapshot;
+      const store::StoredJob* record = find_stored(*store, first.job_id, snapshot);
+      YORI_CHECK(record != nullptr);
+      if (record != nullptr) {
+        bool leased_target = false;
+        for (const auto& held : snapshot.leases) {
+          if (held.job_id == record->id && held.gpu_uuid == gpu::GpuUuid{"GPU-m9-b"}) {
+            leased_target = true;
+          }
+        }
+        YORI_CHECK(leased_target);
+      }
+    }
+
+    // 清理：取消长跑的 J1。
+    YORI_CHECK(manager.cancel_job(first.job_id).code == ipc::JobCancelOutcome::Code::kStopping);
+    YORI_CHECK(wait_state(*store, first.job_id, job::JobState::kCancelled, 20s));
 
     static_cast<void>(manager.stop());
     static_cast<void>(gpu_manager.stop());
