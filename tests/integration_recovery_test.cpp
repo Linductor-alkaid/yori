@@ -350,6 +350,59 @@ int main() {
     YORI_CHECK(still_alive.has_value());
   }
 
+  // ---- 场景 D（M9，DEC-012）：REQUIRED placement 恢复一致性 -------------------
+  {
+    const std::string placement_database = directory + "/placement.db";
+    {
+      SqliteStateStore store{config_for(placement_database)};
+      YORI_CHECK(store.open().ok());
+      StateMutation create;
+      yori::store::StoredJob required = queued(21, 1021);
+      required.spec.gpu_placement.mode = yori::job::GpuPlacementMode::kRequired;
+      required.spec.gpu_placement.devices.push_back(yori::gpu::GpuUuid{"GPU-P"});
+      create.create_jobs.push_back(required);
+      apply_mutation(store, create);
+    }
+
+    // "重启后的 daemon"：重开同一数据库执行恢复，placement 随 Job 一致恢复。
+    SqliteStateStore store{config_for(placement_database)};
+    YORI_CHECK(store.open().ok());
+    yori::queue::QueueErrorCode queue_error = yori::queue::QueueErrorCode::kNone;
+    auto queue = yori::queue::GlobalJobQueue::create(yori::queue::QueueConfig{64}, queue_error);
+    YORI_CHECK(queue != nullptr);
+    yori::recovery::JobRecovery recovery(store, *queue);
+    YORI_CHECK(recovery.recover().ok());
+    {
+      const auto snapshot = store.load().snapshot;
+      const auto& restored = require_job(snapshot, 21);
+      YORI_CHECK(restored.spec.gpu_placement.mode == yori::job::GpuPlacementMode::kRequired);
+      YORI_CHECK(restored.spec.gpu_placement.devices.front() == yori::gpu::GpuUuid{"GPU-P"});
+    }
+
+    // UUID 枚举变化（GPU-P 从观测消失，出现新的空闲 GPU-Q）：不错误迁移
+    // REQUIRED Job —— 保持 QUEUED 并以 AFFINITY_GPU_STATE 解释（issue #10
+    // 场景 10）。
+    yori::scheduler::FifoScheduler scheduler(*queue, store);
+    auto scheduled = scheduler.run_once(yori::scheduler::SchedulerTrigger::kRecoveryCompleted,
+                                        free_gpu_snapshot(1, {"GPU-Q"}));
+    YORI_CHECK(scheduled.code == yori::scheduler::ScheduleResultCode::kNoCandidate);
+    YORI_CHECK(scheduled.evaluation.skipped.size() == 1);
+    if (scheduled.evaluation.skipped.size() == 1) {
+      const auto& skip = scheduled.evaluation.skipped.front();
+      YORI_CHECK(skip.job == yori::job::JobId{21});
+      YORI_CHECK(skip.reason == yori::scheduler::WaitReason::kAffinityGpuState);
+    }
+    YORI_CHECK(require_job(store.load().snapshot, 21).state == JobState::kQueued);
+    YORI_CHECK(store.load().snapshot.leases.empty());
+
+    // 目标重新出现在观测中：在目标卡上启动（恢复后亲和不漂移）。
+    scheduled = scheduler.run_once(yori::scheduler::SchedulerTrigger::kGpuStateChanged,
+                                   free_gpu_snapshot(2, {"GPU-Q", "GPU-P"}));
+    YORI_CHECK(scheduled.scheduled());
+    YORI_CHECK(scheduled.event.job_id == yori::job::JobId{21});
+    YORI_CHECK(scheduled.event.gpu_uuid.value_or(yori::gpu::GpuUuid{}).value() == "GPU-P");
+  }
+
   second_run.shutdown();
   reuse_guard.shutdown();
   return yori::testing::failure_count == 0 ? 0 : 1;
