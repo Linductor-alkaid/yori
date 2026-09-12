@@ -1,8 +1,10 @@
 # Yori 项目设计文档
 
 > **定位**：单节点多用户 GPU 训练任务排队、调度与进程守护系统\
-> **状态**：设计草案 v0.11（M7 守护总装收口：JobManager、恢复采纳、systemd 打包）\
-> **日期**：2026-09-10
+> **状态**：设计草案 v0.12（MVP 后演进立项：M8 执行上下文捕获
+> [DEC-011](../decisions/DEC-011-execution-context-capture.md)、M9 GPU placement
+> [DEC-012](../decisions/DEC-012-gpu-placement-policy.md)）\
+> **日期**：2026-09-12
 
 ## 1. 项目摘要
 
@@ -114,7 +116,7 @@ Executor 理解 GPU。职责划分为：
   组件                    职责                                               关键边界
   ----------------------- -------------------------------------------------- --------------------------------------
   `yori` CLI              `submit`、`ps`、`queue`、`logs`、`cancel`、`gpu`   不维护全局状态，不直接启动受调度训练
-                          等用户入口                                         
+                          等用户入口；提交时捕获执行上下文（M8，DEC-011）    
 
   `yorid`                 服务器级唯一调度 daemon，持有队列、资源和 Job      由 systemd 管理；不能把用户命令直接以
                           生命周期                                           root 执行
@@ -123,7 +125,8 @@ Executor 理解 GPU。职责划分为：
 
   `GpuManager`            NVML 资源发现、外部占用检测、GPU lease、遥测       NVML 遥测不能替代 Yori 自身 ownership
 
-  `Scheduler`             根据队列与 GPU 状态进行资源匹配                    调度策略与执行机制分离
+  `Scheduler`             根据队列与 GPU 状态进行资源匹配；placement          调度策略与执行机制分离
+                          约束过滤与有界跳过（M9，DEC-012）
 
   `ProcessSupervisor`     spawn、日志捕获、进程组、退出码、取消和恢复          子进程必须降权为提交用户
 
@@ -203,10 +206,13 @@ yori-launch-helper
 ``` text
 JobSpec
   owner_uid / owner_gid       # daemon 从 SO_PEERCRED 确定
-  argv                        # 原始命令参数
+  argv                        # 原始命令参数（argv 语义，无隐式 Shell）
   cwd                         # 提交时工作目录
-  env                         # 白名单继承 + 显式覆盖
+  env                         # 提交时捕获的用户执行上下文 + 显式追加（M8，DEC-011）
+  executable                  # M8：提交时解析的 argv[0] 绝对路径（DEC-011）
+  env_metadata                # M8：environment_type / python_version（可选）
   gpu_request                 # MVP 默认 1 GPU
+  gpu_placement               # M9：ANY / REQUIRED 亲和约束（DEC-012）
   launch_profile              # 可选项目/框架适配器
   tensorboard_logdir          # 可选；相对 cwd 的指标目录，供 yori tensorboard 使用
   priority                    # 后续扩展
@@ -228,6 +234,8 @@ M5 从 IPC 建立 `JobSpec` 时，owner 字段只能取自 `SO_PEERCRED`，客�
 | `env` | 最多 256 项；name 最多 255 bytes 且非空、不含 `=`/NUL；value 最多 32 KiB；name+value 总计 256 KiB |
 | `launch_profile` | 可选；存在时 1..128 bytes；不得含 NUL |
 | `tensorboard_logdir` | 可选；存在时为 cwd 下相对路径，1..4096 bytes，不得含 NUL、绝对路径或 `..` 路径分量 |
+| `executable`（M8） | 绝对路径；1..4096 bytes；不得含 NUL；由 CLI 在提交时解析，解析失败即拒绝提交 |
+| `gpu_placement`（M9） | `kAny`（默认，devices 为空）或 `kRequired`（devices 恰 1 个合法 GpuUuid）；UUID 由 daemon 在提交时解析，客户端索引不构成持久化身份 |
 
 校验拒绝通过 `JobSpecValidationResult` 返回稳定错误码和可选条目下标；Job 创建
 失败通过 `JobCreationError` 区分无效 JobId 与无效 JobSpec，不以截断或静默修复
@@ -478,6 +486,51 @@ M2 冻结的公开契约位于 `include/yori/launch/launch_adapter.hpp`：
   `getgrouplist`）在 fork 前解析；子进程内只执行 `setgroups -> setgid -> setuid`
   三个 syscall 封装，保持 fork-exec 窗口的 async-signal-safe 纪律。
 
+### 8.2 执行上下文捕获与恢复（M8，DEC-011）
+
+MVP 后第一批增强（M8）将任务提交模型从 `command + resource request` 扩展为
+`command + execution context + resource request`。目标是让以下两种方式具备
+一致的执行语义：
+
+``` bash
+python train.py --task humanoid          # 直接执行
+yori submit -- python train.py --task humanoid   # 经 Yori 排队执行
+```
+
+用户不需要重新声明 Conda/venv 环境，Yori 也不执行 `conda activate` 等环境
+激活过程，而是由 CLI 在提交瞬间捕获"用户已准备好的最终状态"：
+
+- **环境捕获**（`EnvironmentCapturePolicy`）：默认白名单捕获
+  `PATH/PYTHONPATH/LD_LIBRARY_PATH`、`CONDA_PREFIX/CONDA_DEFAULT_ENV/VIRTUAL_ENV`、
+  `CUDA_HOME/CUDA_PATH`、`OMP_NUM_THREADS/MKL_NUM_THREADS` 与代理变量；
+  `--env K=V` 显式追加；`--inherit-env` 显式全量（仍过滤保留键、仍受 env
+  总量上限约束）。GPU 管理键与 `YORI_*` 不捕获。
+- **executable 解析**：CLI 以捕获后的 PATH 在提交时解析 `argv[0]` 为绝对
+  路径并随 JobSpec 持久化，解析失败即拒绝提交（fail-fast）；daemon 启动时
+  直接 `execve(executable, ...)`，`argv[0]` 保持用户输入形式。
+- **环境合并 v2**（四层，优先级从低到高）：
+
+``` text
+daemon 白名单（PATH、LANG、TERM、TZ、LC_*）
+    ↓ 被覆盖
+捕获的用户执行上下文（JobSpec.env，含 --env / --inherit-env）
+    ↓ 被覆盖
+Yori 资源块（CUDA_VISIBLE_DEVICES、CUDA_DEVICE_ORDER=PCI_BUS_ID、
+            YORI_JOB_ID、YORI_GPU_UUID）——永远胜出
+
+身份块（HOME/USER/LOGNAME/SHELL，passwd 记录）独立于上述次序，不可被覆盖
+```
+
+- **保留键修订**：`LD_LIBRARY_PATH` 从"出现即拒绝"转入捕获白名单（降权先于
+  exec，与用户直接执行等价，见 DEC-011 风险评估）；身份四键、
+  `CUDA_VISIBLE_DEVICES`、`CUDA_DEVICE_ORDER`、`LD_PRELOAD` 与 `YORI_*` 前缀
+  维持出现即拒绝。
+- **观察面**：新增 `yori inspect <job-id>`（IPC kind `INSPECT`，owner/admin），
+  展示 cwd、executable、argv、环境类型、python 版本与 provenance；env 值对
+  敏感名模式脱敏（详见 DEC-011 第 7 条与第 11.5 节权限模型）。
+- **持久化**：schema v2 增量迁移（DEC-009 原则不变），M9 的 placement 再以
+  schema v3 增量扩展。
+
 ------------------------------------------------------------------------
 
 ## 9. 调度流程
@@ -583,6 +636,24 @@ worker 触发 `SchedulerTaskRunner` 后立即消费结果并在同一串行上�
 lease 释放同 mutation）都在 worker 内闭合。启动落地遵循 `JobSpec.launch_profile`
 的 MVP 约定（第 8.1 节）：缺省/空为 `cuda_visible_devices`，非空值为
 `physical_argument` 模式的参数名。
+
+M9（DEC-012）在该骨架上引入 GPU placement 约束与 FIFO 有界跳过：
+
+- `JobSpec.gpu_placement`（`kAny`/`kRequired`，设备身份为 `GpuUuid`）；CLI
+  `--gpu N|--gpu UUID` 由 daemon 在提交处理时以当前观测解析为 UUID，解析失败
+  拒绝提交。
+- `run_once` 的 GPU 选择扩展为候选集过滤：placement 限定候选设备 -> 排除
+  `UNAVAILABLE`/`EXTERNAL_BUSY`/已 lease -> 按现有确定性规则（物理 index
+  升序）选择。`kRequired` 目标不可用时该 Job 本轮不可调度，绝不 fallback。
+- 调度按 FIFO 顺序**有界扫描**（默认 32 条，配置校验上限）：跳过当前不可
+  调度的 Job 并继续考察后续 Job，被跳过 Job 保持 `QUEUED` 与原队列位置，
+  产生携带原因的结构化跳过事件。该语义修订 DEC-005 的队首不跳过条款——
+  FIFO 仍是服务顺序，但暂不可满足的亲和 Job 不再阻塞全局队列。
+- `ps`/`queue` 对 QUEUED Job 暴露派生的 `wait_reason`
+  （`NO_FREE_GPU`/`AFFINITY_GPU_ALLOCATED`/`AFFINITY_GPU_EXTERNAL`/
+  `AFFINITY_GPU_STATE`），owner/admin 附带目标 UUID；daemon 重启后 placement
+  随 Job 恢复，UUID 枚举变化不得迁移 `kRequired` Job（目标消失则保持
+  `QUEUED` 并以 `AFFINITY_GPU_STATE` 解释）。
 
 ------------------------------------------------------------------------
 
@@ -876,6 +947,9 @@ owner_gid
 argv
 cwd
 必要 env
+executable                # M8（DEC-011，schema v2）
+env_metadata              # M8：environment_type / python_version
+gpu_placement             # M9（DEC-012，schema v3）
 launch_profile
 
 requested_gpus
@@ -1008,6 +1082,14 @@ yori submit --priority high ...
 yori submit --gpus 2 ...
 ```
 
+MVP 后第一批增强（M8/M9，已立项）：
+
+``` bash
+yori submit [--env K=V]... [--inherit-env] -- CMD   # M8：执行上下文捕获（DEC-011）
+yori inspect <job-id>                                # M8：执行上下文与 provenance
+yori submit --gpu 2 -- CMD                           # M9：REQUIRED 硬亲和（DEC-012）
+```
+
 ### 13.2 IPC 协议要点
 
 MVP 的 IPC 消息分为两类：
@@ -1039,6 +1121,11 @@ M5 落地请求/响应族协议 v1，公开契约位于 `include/yori/ipc/`：
     演进"风险项的落地形态）。
     请求结构不携带任何身份字段——Job owner 只来自 `SO_PEERCRED`（第 5 节、
     DEC-010），客户端无从声明目标 UID。
+-   **协议 v2（M8/M9 计划，DEC-011/DEC-012）**：`SUBMIT` 以 v2 增量扩展可选
+    字段（捕获的 env、`executable`、env 元数据、placement 的 index/UUID 输入），
+    daemon 同时接受 v1 `SUBMIT`（缺省字段按无捕获/`kAny` 处理）；新增请求
+    kind `INSPECT`（=9，owner/admin 的执行上下文与 provenance 查询）。v2 与
+    v1 客户端在发布包内同版本交付，帧格式与全部边界纪律不变。
 -   **响应**：统一错误码（NONE/PROTOCOL/UNSUPPORTED/DENIED/INVALID_SPEC/
     QUEUE_REJECTED/STORE_FAILED/NOT_FOUND/INVALID_STATE/NOT_AVAILABLE/LIMIT/
     INTERNAL）+ detail + 按 kind 的结果体；错误响应携带可用上下文（如
@@ -1267,9 +1354,22 @@ MVP 采用：
 -   Job cancel。
 -   daemon restart recovery。
 
-### 16.2 第二阶段
+### 16.2 第二阶段（MVP 后增强）
 
-增加：
+MVP 后第一批增强已立项（2026-09-12，依据 issue #16/#10 真机反馈）：
+
+-   **M8 执行上下文捕获与恢复**
+    （[DEC-011](../decisions/DEC-011-execution-context-capture.md)）：提交时
+    捕获用户执行环境（cwd/env/executable 解析），四层环境合并，`yori inspect`
+    与 provenance。目标：`yori submit -- <cmd>` 与用户直接执行语义一致，
+    Conda/venv 已激活环境零重述提交。
+-   **M9 GPU placement 亲和调度**
+    （[DEC-012](../decisions/DEC-012-gpu-placement-policy.md)）：`ANY`/`REQUIRED`
+    placement、稳定 UUID 身份、候选集过滤、FIFO 有界跳过（修订 DEC-005 队首
+    语义）与等待原因展示。目标：用户声明"任务允许在哪些 GPU 运行"，Yori 在
+    约束内调度，硬亲和不造成全局队头阻塞。
+
+后续增强（原第二阶段清单）：
 
 -   多 GPU Job。
 -   每用户最大并发数。
@@ -1293,7 +1393,9 @@ MVP 采用：
 -   Container backend。
 -   Job dependency。
 -   Reservation。
--   GPU affinity。
+-   GPU Set / tag / pool、PREFERRED 模式与项目级 placement profile
+    （GPU affinity 基础能力已由 M9 承接，见 16.2 与
+    [DEC-012](../decisions/DEC-012-gpu-placement-policy.md)）。
 -   MIG。
 -   Heyaki transport。
 -   Central Scheduler。

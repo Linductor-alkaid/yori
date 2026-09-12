@@ -1,8 +1,8 @@
 # Yori 实施总计划
 
 > 状态：Active
-> 版本：1.11
-> 更新日期：2026-09-10
+> 版本：1.12
+> 更新日期：2026-09-12
 > 负责人：Linductor-alkaid
 > 设计依据：[Yori 项目设计文档](../design/yori-project-design.md)（v0.5）
 > 治理依据：[AGENTS.md](../../AGENTS.md)、[项目管理与工程规范](../project/project-standards.md)
@@ -67,14 +67,22 @@
   交付；其中 EXEC-09 启动 `PhaseGate` 与六场景闭环集成测试已由 M7 守护总装
   承接（`m7.unit.job-manager`），触发合并未建独立 comm 层（由 JobManager
   命令通道承载）。M1 里程碑随 M7 关闭（见 M1 文档 2026-09-10 收口记录）。
-- 当前里程碑：无（M0-M7 全部完成）。`v0.1.0` 发布（2026-09-10）：LICENSE
+- MVP 后第一批增强立项（2026-09-12）：依据真机使用反馈
+  （[#16](https://github.com/Linductor-alkaid/yori/issues/16) 执行上下文、
+  [#10](https://github.com/Linductor-alkaid/yori/issues/10) GPU placement）
+  立项 M8（提交时执行上下文捕获与恢复，
+  [DEC-011](../decisions/DEC-011-execution-context-capture.md)）与 M9（GPU
+  placement 亲和调度，[DEC-012](../decisions/DEC-012-gpu-placement-policy.md)）。
+  两份决策记录状态 Proposed，冻结动作为负责人确认后改 Accepted；里程碑文档
+  在各自启动时创建。`v0.1.0` 发布（2026-09-10）：LICENSE
   选定 MIT（第 6 节冻结）、仓库级 `README.md` 与 `CHANGELOG.md`、deb 运行时
   包（`packaging/deb/build-deb.sh`，安装即启用服务）与 Release 流水线
   （`.github/workflows/release.yml`：`v*` tag 构建 deb 并发布）。真机验收
   补跑条件见 M7 验收矩阵。
+- 当前里程碑：M8（Planned，执行上下文）；M9（Planned，GPU placement）排队。
 - MVP 端到端验收以设计文档第 19 节判据为准，由 M7 执行并记录证据（见第 10 节）。
-- 里程碑文档在各自启动时创建（工程规范第 2 节）；当前实体文件：M0、M1、M2、
-  M3、M4、M5、M6。
+- 里程碑文档在各自启动时创建（工程规范第 2 节）；当前实体文件：M0-M7
+  （M8/M9 文件在各自启动时创建）。
 
 ## 2. 交付边界（SCOPE）
 
@@ -102,6 +110,13 @@ MVP 明确不交付（依据设计第 2.2 节）：
 | `SCOPE-13` | 跨服务器全局调度 |
 | `SCOPE-14` | 以 GPU utilization == 0 作为唯一空闲判据 |
 | `SCOPE-15` | 要求训练程序链接 Yori、Executor 或 Heyaki |
+
+MVP 后已立项增强（2026-09-12，依据 issue #16/#10）：
+
+| 编号 | 增强内容 | 里程碑 | 决策依据 |
+| --- | --- | --- | --- |
+| `SCOPE-16` | 提交时执行上下文捕获与恢复：环境捕获白名单 + `--env`/`--inherit-env`、executable 提交时解析、四层环境合并（含 `LD_LIBRARY_PATH` 保留键修订）、`yori inspect` 与 env 脱敏、schema v2 | M8 | [DEC-011](../decisions/DEC-011-execution-context-capture.md)（Proposed） |
+| `SCOPE-17` | GPU placement 亲和调度：`ANY`/`REQUIRED`、daemon 侧 index→UUID 解析、候选集过滤、FIFO 有界跳过（修订 DEC-005 队首条款）、`wait_reason` 展示、schema v3 | M9 | [DEC-012](../decisions/DEC-012-gpu-placement-policy.md)（Proposed） |
 
 ## 3. 不可破坏架构约束（RULE）
 
@@ -156,6 +171,8 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | M5 | IPC 与 CLI | M3、M4 | UDS 传输、`SO_PEERCRED` 鉴权、请求/响应协议与 owner/admin 授权、`submit`/`ps`/`queue`/`gpu`/`cancel`/`logs` 快照、IPC fuzz 起步 | 无 | Completed |
 | M6 | 观察面 | M5 | `logs -f` 流式帧（offset 续传、`GAP`/`EOF`/`BACKPRESSURE`）、日志轮转、`yori tensorboard` | 无 | Completed |
 | M7 | 打包与 MVP 端到端验收 | M6 | systemd unit、安装打包、设计 §19 判据逐项验收；前置：守护总装收口 | `v0.1.0`（MVP；tag/发布需负责人授权） | Completed |
+| M8 | 提交时执行上下文 | M7 | 环境捕获（白名单/`--env`/`--inherit-env`）、executable 提交时解析、环境合并 v2 与保留键修订、`yori inspect`（owner/admin + 脱敏）、IPC 协议 v2、schema v2 迁移；Conda/venv 语义一致性验证 | `v0.2.0` | Planned（DEC-011 Proposed，冻结于 M8 启动） |
+| M9 | GPU placement 亲和调度 | M7（与 M8 无代码依赖，建议随后执行以共享迁移框架） | `GpuPlacement` Core 类型与校验、daemon 侧 `--gpu` 解析、Scheduler 候选集过滤与 FIFO 有界跳过、`wait_reason`、schema v3 与恢复一致性；issue #10 12 场景矩阵 | `v0.3.0` | Planned（DEC-012 Proposed，冻结于 M9 启动） |
 
 - M3 与 M4 在 M2 完成后可并行推进。
 - 里程碑文件命名 `m<N>-<scope>.md`，在该里程碑启动时创建；当前实体文件：
@@ -183,6 +200,8 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | IPC 端点 | 已冻结：`/run/yori/yori.sock`、`root:yori 0660`、`yori` 系统组连接准入、admin 组双路径判定（[DEC-010](../decisions/DEC-010-uds-ipc-endpoint.md)） | Linductor-alkaid | M5 | 已于 2026-09-09 冻结；变更需新决策记录替代 DEC-010 |
 | 日志与跟随上限默认值 | 已冻结：落盘单文件 256 MiB / 保留 1 个历史文件（M2 `LogSink`）；跟随会话每 Job 8 / 全局 64、回看窗口 8 MiB/流（64 KiB ~ 64 MiB）、订阅队列 64 chunk、会话写出缓冲 2 MiB、单帧写截止 2 s（M6 `LogStreamer`/`LogFollowService`，全部配置化并有负向测试） | Linductor-alkaid | M6 | 已于 2026-09-10 冻结（配置定稿 + 测试）；变更走配置级评审 |
 | 仓库自身许可证 | 已冻结：MIT（2026-09-10 负责人选定，`v0.1.0` 发布）；与 Executor（MIT）兼容 | Linductor-alkaid | M7（发布前） | 已添加 `LICENSE` 并同步[供应链策略](../supply-chain/dependency-policy.md)与 `README.md` |
+| 执行上下文捕获策略 | Proposed：提交时白名单捕获 + `--env`/`--inherit-env`、executable 提交时解析、环境合并 v2（`LD_LIBRARY_PATH` 转白名单、`LD_PRELOAD`/`YORI_*` 维持拒绝）、无 `--shell`（用 `-- bash -c` 表达）（[DEC-011](../decisions/DEC-011-execution-context-capture.md)，issue #16） | Linductor-alkaid | M8 启动 | 负责人确认后 DEC-011 改 Accepted |
+| GPU placement 模型 | Proposed：M9 交付 `ANY`+`REQUIRED`（`--gpu N` = 硬亲和，与 `--gpus N` 计数互斥）；设备身份复用 `GpuUuid`，daemon 侧解析 index→UUID；FIFO 修订为有界跳过（默认扫描 32）；`PREFERRED`/GPU Set/tag/pool/项目级 profile/管理员静态映射延后（[DEC-012](../decisions/DEC-012-gpu-placement-policy.md)，issue #10） | Linductor-alkaid | M9 启动 | 负责人确认后 DEC-012 改 Accepted |
 
 ## 7. 跨里程碑完成定义（DOD）
 
@@ -226,11 +245,15 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | `POST-03` | 显存/CPU/RAM 资源请求维度 | 出现因资源估计不足导致的训练失败记录 | §16.2 |
 | `POST-04` | Job 自动重试（`RETRY_WAIT`） | 故障统计显示瞬态失败占比值得自动重试 | §6.2、§16.2 |
 | `POST-05` | TUI | MVP 稳定且出现交互需求 | §16.2 |
-| `POST-06` | Web UI、Container backend、Job dependency、Reservation、GPU affinity、MIG | MVP 与第二阶段稳定后逐项评估 | §16.3 |
+| `POST-06` | Web UI、Container backend、Job dependency、Reservation、MIG | MVP 与第二阶段稳定后逐项评估 | §16.3 |
 | `POST-07` | Heyaki transport、Central Scheduler、多节点调度 | 单节点容量饱和或出现跨服务器调度需求 | §15、§16.3 |
 | `POST-08` | pidfd 进程生命周期增强 | 守护总装（M7）已确认 wait + 启动时间核验的不足：采纳进程（daemon 重启后恢复的 Job）非子进程，自然退出的状态不可得（FAILED + 显式原因），且退出发现有约 1 个探测周期的延迟；pidfd（`waitid(P_PIDFD)`）可消除两者 | §10.2、§6.2 |
 | `POST-09` | 拆分 `yori-launch-helper`（最小特权 launcher） | MVP 稳定后的安全演进 | §5、DEC-004 |
 | `POST-10` | daemon 托管常驻指标面板 | 用户提出常驻 TensorBoard 需求；届时必须新建设计与决策记录 | §11.6、DEC-003 |
+| `POST-11` | GPU placement 第二批：`PREFERRED` 模式、GPU Set（`--gpu-any-of`）、affinity-aware 的 `ANY` 设备选择（避开队列中 `REQUIRED` 目标） | M9 交付后出现软偏好或目标卡被 `ANY` 占用的运行记录 | DEC-012、issue #10 |
+| `POST-12` | GPU tag/pool 资源池、项目级默认 placement profile、管理员静态 user/project→GPU 映射 | 团队规模化后"专卡专用"需要集中治理 | DEC-012、issue #10 |
+| `POST-13` | 独立 `--shell` 提交接口 | 用户普遍需要管道/`&&` 且 `-- bash -c` 表达被证明不足 | DEC-011 |
+| `POST-14` | 完整环境 provenance（git commit/dirty、PyTorch/CUDA 版本探测）与训练复现报告 | `yori inspect` 基础 provenance（M8）使用后出现复现/排障需求 | DEC-011、issue #16 |
 
 ## 10. MVP 总体验收
 
@@ -260,7 +283,9 @@ CI 无法覆盖的项按工程规范第 4 节保持未勾选并记录原因与�
   [DEC-007 取消宽限期与升级语义](../decisions/DEC-007-cancel-grace-period.md)、
   [DEC-008 daemon 重启日志管道断裂语义](../decisions/DEC-008-daemon-restart-log-continuity.md)、
   [DEC-009 SQLite StateStore 采用与 dlopen 绑定](../decisions/DEC-009-sqlite-state-store.md)、
-  [DEC-010 UDS IPC 端点、权限与管理员判定](../decisions/DEC-010-uds-ipc-endpoint.md)
+  [DEC-010 UDS IPC 端点、权限与管理员判定](../decisions/DEC-010-uds-ipc-endpoint.md)、
+  [DEC-011 提交时执行上下文捕获与训练环境恢复](../decisions/DEC-011-execution-context-capture.md)（Proposed，M8）、
+  [DEC-012 GPU placement 约束与 FIFO 有界跳过语义](../decisions/DEC-012-gpu-placement-policy.md)（Proposed，M9）
 - 安全：[威胁模型（草案）](../security/threat-model.md)
 - 供应链：[依赖管理与供应链策略](../supply-chain/dependency-policy.md)
 - Executor 反馈：[能力缺口反馈台账](../executor_feedback/ledger.md)
