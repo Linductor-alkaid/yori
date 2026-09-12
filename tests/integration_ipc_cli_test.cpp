@@ -1,3 +1,5 @@
+#include <fcntl.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -7,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <thread>
@@ -68,6 +71,100 @@ std::string read_file(const std::string& path) {
   }
   std::fclose(file);
   return data;
+}
+
+// logs -f 的有界运行（看门狗）：偶发竞态导致 CLI 无限等待时（PR #18 复盘），
+// 转储诊断（daemon 跟随会话统计 + 卡住进程的内核等待点）后击杀并以失败
+// 返回，把 180s 静默超时变成有界、可定位的失败。参数不含空格（本测试的
+// logs -f 形态保证）。
+struct BoundedCliRun final {
+  bool stalled{false};
+  int exit_code{-1};
+  std::string out;
+  std::string err;
+};
+
+BoundedCliRun run_cli_bounded(const std::string& directory, const std::string& socket_path,
+                              const std::string& arguments, int stall_ms) {
+  BoundedCliRun result;
+  const std::string out_path = directory + "/bounded-out.txt";
+  const std::string err_path = directory + "/bounded-err.txt";
+
+  std::vector<std::string> words{YORI_CLI_BIN, "--socket", socket_path};
+  std::size_t begin = 0;
+  while (begin <= arguments.size()) {
+    const std::size_t end = arguments.find(' ', begin);
+    const std::size_t length = (end == std::string::npos ? arguments.size() : end) - begin;
+    if (length > 0) {
+      words.emplace_back(arguments.substr(begin, length));
+    }
+    if (end == std::string::npos) {
+      break;
+    }
+    begin = end + 1;
+  }
+  std::vector<char*> argv;
+  argv.reserve(words.size() + 1);
+  for (const std::string& word : words) {
+    argv.push_back(const_cast<char*>(word.c_str()));
+  }
+  argv.push_back(nullptr);
+
+  const pid_t child = ::fork();
+  if (child == 0) {
+    const int out_fd = ::open(out_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    const int err_fd = ::open(err_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (out_fd >= 0) {
+      static_cast<void>(::dup2(out_fd, STDOUT_FILENO));
+    }
+    if (err_fd >= 0) {
+      static_cast<void>(::dup2(err_fd, STDERR_FILENO));
+    }
+    ::execv(YORI_CLI_BIN, argv.data());
+    ::_exit(127);
+  }
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds{stall_ms};
+  int status = 0;
+  while (std::chrono::steady_clock::now() < deadline) {
+    const pid_t reaped = ::waitpid(child, &status, WNOHANG);
+    if (reaped == child) {
+      result.exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+      result.out = read_file(out_path);
+      result.err = read_file(err_path);
+      return result;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+  }
+
+  result.stalled = true;
+  std::fprintf(stderr, "e2e: CLI stalled for %dms (pid %d); diagnostics:\n", stall_ms,
+               static_cast<int>(child));
+  {
+    std::ifstream wchan("/proc/" + std::to_string(child) + "/wchan");
+    if (wchan.is_open()) {
+      std::string where;
+      std::getline(wchan, where);
+      std::fprintf(stderr, "  cli wchan: %s\n", where.c_str());
+    }
+    std::ifstream fds("/proc/" + std::to_string(child) + "/fd");
+    if (fds.is_open()) {
+      std::string line;
+      std::fprintf(stderr, "  cli fds:");
+      while (std::getline(fds, line)) {
+        std::fprintf(stderr, " %s", line.substr(line.find_last_of('/') + 1).c_str());
+      }
+      std::fprintf(stderr, "\n");
+    }
+  }
+  result.out = read_file(out_path);
+  result.err = read_file(err_path);
+  std::fprintf(stderr, "  cli stdout so far: [%s]\n  cli stderr so far: [%s]\n", result.out.c_str(),
+               result.err.c_str());
+  static_cast<void>(::kill(child, SIGKILL));
+  while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {
+  }
+  return result;
 }
 
 bool contains(const std::string& haystack, const std::string& needle) {
@@ -265,8 +362,31 @@ int main() {
   phase("logs -f job2");
   // logs -f：对已终态 Job 以 since=0 回放全部窗口后 EOF，退出码与终态对齐
   // （FINISHED -> 0）；无 since 时按设计从订阅时刻的流末开始（空回放）。
-  code = run_cli(directory, socket_path, "logs -f 2 --since-stdout 0 --since-stderr 0", out, err);
-  YORI_CHECK(code == 0);
+  // 偶发竞态（PR #18 复盘）会让该调用无限等待：以 30s 看门狗有界化并转储
+  // daemon 侧会话统计，失败可见而非 180s 静默超时。
+  {
+    const BoundedCliRun followed = run_cli_bounded(
+        directory, socket_path, "logs -f 2 --since-stdout 0 --since-stderr 0", 30000);
+    if (followed.stalled) {
+      const yori::runtime::LogFollowStatistics stats = daemon.log_follow_statistics();
+      std::fprintf(stderr,
+                   "  daemon follow stats: started=%llu completed=%llu disconnected=%llu"
+                   " backpressure=%llu\n",
+                   static_cast<unsigned long long>(stats.sessions_started),
+                   static_cast<unsigned long long>(stats.sessions_completed),
+                   static_cast<unsigned long long>(stats.sessions_disconnected),
+                   static_cast<unsigned long long>(stats.sessions_backpressure));
+      const yori::runtime::JobManagerStats job_stats = daemon.job_manager_stats();
+      std::fprintf(stderr, "  daemon job stats: submitted=%llu launched=%llu finished=%llu\n",
+                   static_cast<unsigned long long>(job_stats.jobs_submitted),
+                   static_cast<unsigned long long>(job_stats.jobs_launched),
+                   static_cast<unsigned long long>(job_stats.jobs_finished));
+    }
+    YORI_CHECK(!followed.stalled);
+    YORI_CHECK(followed.exit_code == 0);
+    out = followed.out;
+    err = followed.err;
+  }
   YORI_CHECK(contains(out, "e2e-stdout"));
   YORI_CHECK(contains(err, "e2e-stderr"));
 
