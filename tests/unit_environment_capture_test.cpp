@@ -120,7 +120,7 @@ int main() {
   {
     std::vector<EnvironmentEntry> many;
     for (std::size_t i = 0; i <= yori::job::JobSpecLimits::kMaxEnvironmentVariables + 1; ++i) {
-      many.push_back({"VAR_" + std::to_string(i), "v"});
+      many.push_back({std::string("VAR_") + std::to_string(i), "v"});
     }
     EnvironmentCapturePolicy policy;
     policy.inherit_all = true;
@@ -144,7 +144,7 @@ int main() {
     std::vector<EnvironmentEntry> large;
     std::size_t total = 0;
     while (total <= yori::job::JobSpecLimits::kMaxEnvironmentBytes) {
-      const std::string name = "FILLER_" + std::to_string(large.size());
+      const std::string name = std::string("FILLER_") + std::to_string(large.size());
       const std::string value(1024, 'x');
       total += name.size() + value.size();
       large.emplace_back(name, value);

@@ -153,7 +153,11 @@ int main() {
   check_error(spec, JobSpecErrorCode::kInvalidExecutable);
 
   spec = valid_spec();
-  spec.executable = "/" + std::string(JobSpecLimits::kMaxExecutableBytes, 'x');
+  // 注意构造方式：gcc-12 对 "/" + std::string(... 形态有 -Wrestrict 误报
+  // （operator+(const char*, string&&) 的已知缺陷），以 insert 规避。
+  std::string oversized(JobSpecLimits::kMaxExecutableBytes, 'x');
+  oversized.insert(oversized.begin(), '/');
+  spec.executable = oversized;
   check_error(spec, JobSpecErrorCode::kInvalidExecutable);
 
   spec = valid_spec();
