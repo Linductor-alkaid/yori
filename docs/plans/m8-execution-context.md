@@ -1,6 +1,6 @@
 # M8：提交时执行上下文捕获与训练环境恢复
 
-> 状态：Implemented（待 MR 合并与 CI 收口）
+> 状态：Implemented（CI 全绿，待 MR 合并——合并由负责人决定）
 > 负责人：Linductor-alkaid
 > 所属计划：[Yori 实施总计划](yori-implementation-plan.md)
 > 前置：M7（打包与 MVP 端到端验收，PR [#11](https://github.com/Linductor-alkaid/yori/pull/11)）
@@ -153,7 +153,7 @@
 - [x] 降权顺序回归：`m2.security.process-demotion` 维持通过（基线 4/16/27
   复核；root 补跑条件沿用 M2 记录）。
 - [x] fuzz：`m5.fuzz.ipc-parser` 语料纳入 v2 SUBMIT 与 INSPECT 帧（三方向）。
-- [ ] 五预设构建与 CI 全绿（本地五预设已全绿：debug/release/asan/ubsan/tsan 各 44/44；GitHub CI 随 MR 收口）（format/tidy/gcc/clang/sanitizers/依赖锁定）。
+- [x] 五预设构建与 CI 全绿：本地 debug/release/asan/ubsan/tsan 各 44/44；PR [#18](https://github.com/Linductor-alkaid/yori/pull/18) 最终 CI 9/9 全绿（[run 34691974501](https://github.com/Linductor-alkaid/yori/actions/runs/34691974501)：format/tidy/gcc-13 与 clang-18 的 debug+release/sanitizers/deb 打包冒烟/依赖锁定）（format/tidy/gcc/clang/sanitizers/依赖锁定）。
 - [x] 文档同步矩阵（工程规范第 8 节）核对：设计文档（§6.1/§8.2/§13，
   版本号递增）、DEC-006 修订标注、威胁模型基线 26-27 落地状态与证据、
   总计划（§1/§5/§6/§11）、本文档验证记录、CHANGELOG（`## Unreleased`）。
@@ -201,7 +201,13 @@
 - 白名单"daemon 配置可扩展"落地形态：`EnvironmentCapturePolicy.extra_keys`
   + CLI `--capture-env KEY`（运行时扩展点）；yorid 当前无配置文件机制，集中
   配置随未来配置统一工作收敛（见本文档风险节，已按配置级变更处理）。
-- 限制：GitHub CI（GCC/Clang 双编译器矩阵与远端门禁）随 MR 收口；真实
-  Conda/venv 环境与真机 NVML 组合按 M7 补跑条件沿用（CI 以假环境注入
-  近似覆盖语义一致性矩阵）。
+- CI 收口（PR [#18](https://github.com/Linductor-alkaid/yori/pull/18)）：首轮两处环境特定失败——
+  (1) ubuntu-22.04/gcc-12 deb 任务对 `"/" + std::string(...)` 形态报
+  `-Wrestrict` 误报（gcc-12 已知缺陷，gcc-13/clang-18 接受），测试改用
+  `insert()` 构造规避；同时解除 build-deb.sh 对 configure/build/install 的
+  静默重定向（该静默曾使失败零诊断，违反失败可见纪律）。(2) clang-tidy
+  报 `nanosleep` timespec 的 int 乘法拓宽（bugprone），改 long 字面量。
+  最终 CI 9/9 全绿（run 34691974501）。
+- 限制：真实 Conda/venv 环境与真机 NVML 组合按 M7 补跑条件沿用（CI 以
+  假环境注入近似覆盖语义一致性矩阵）。
 
