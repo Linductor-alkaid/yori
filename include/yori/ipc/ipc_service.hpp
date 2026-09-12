@@ -31,6 +31,9 @@ struct IpcServiceConfig final {
   std::uint32_t max_listed_jobs{IpcProtocolLimits::kMaxListItems};
   // logs 快照每流上限（请求值取 min）。
   std::uint32_t max_log_tail_bytes{IpcProtocolLimits::kMaxLogTailBytes};
+  // INSPECT 敏感名模式（DEC-011 决策 7）：变量名大小写不敏感子串命中即把值
+  // 替换为固定掩码（协议不传输原值）。缺省 TOKEN/KEY/SECRET/PASSWORD。
+  std::vector<std::string> sensitive_env_patterns{"TOKEN", "KEY", "SECRET", "PASSWORD"};
 
   [[nodiscard]] bool valid() const noexcept;
 };
@@ -142,8 +145,10 @@ class IpcService final : public IpcRequestHandler {
   [[nodiscard]] IpcResponse handle_cancel(const PeerCredentials& peer, std::uint64_t job_id);
   [[nodiscard]] IpcResponse handle_logs(const PeerCredentials& peer, const IpcLogsRequest& request);
   [[nodiscard]] IpcResponse handle_tensorboard(const PeerCredentials& peer, std::uint64_t job_id);
+  [[nodiscard]] IpcResponse handle_inspect(const PeerCredentials& peer, std::uint64_t job_id);
 
   [[nodiscard]] bool is_admin(const PeerCredentials& peer) const noexcept;
+  [[nodiscard]] bool is_sensitive_env_name(const std::string& name) const;
   [[nodiscard]] static IpcResponse error_response(IpcRequestKind kind, IpcError error,
                                                   std::string detail);
 

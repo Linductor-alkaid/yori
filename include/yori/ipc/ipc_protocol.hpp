@@ -10,11 +10,15 @@
 namespace yori::ipc {
 
 // ---------------------------------------------------------------------------
-// IPC 协议 v1（设计第 13 节，M5 冻结）。
+// IPC 协议（设计第 13 节；v1 于 M5 冻结，v2 于 M8 按 DEC-011 增量扩展）。
 //
 // 帧格式（两个方向一致）：
 //   [u32 LE payload_bytes][payload]
-//   payload = [u8 version=1][u8 kind][kind body]
+//   payload = [u8 version][u8 kind][kind body]
+//
+// v2 只增量扩展 SUBMIT（尾部追加可选 executable/env 元数据）并新增 INSPECT
+// kind；v1 帧仍被接受（缺省字段按无捕获处理）。流式帧族（M6）冻结于
+// version=1，不随请求/响应 v2 变化。
 //
 // 协议层只承担结构安全：负载/字符串/计数/字节数组上限、NUL 禁止、全量消费、
 // 枚举值域校验；语义上限（argv/env/cwd/logdir 的精确 JobSpec 限制）由
@@ -27,12 +31,15 @@ struct IpcProtocolLimits final {
   // + cwd/logdir 等）与 LOGS 响应（两路尾部各 256 KiB），留余量。
   static constexpr std::uint32_t kMaxPayloadBytes = 1u << 20;  // 1 MiB
   static constexpr std::uint32_t kMinPayloadBytes = 2;         // version + kind
-  static constexpr std::uint32_t kProtocolVersion = 1;
+  static constexpr std::uint8_t kProtocolVersion = 2;
+  static constexpr std::uint8_t kMinProtocolVersion = 1;  // daemon 接受的最低版本
+  // 流式帧族（M6 冻结）的协议版本，独立于请求/响应版本。
+  static constexpr std::uint8_t kStreamFrameVersion = 1;
   // 单个字符串字段（argv/env/cwd/uuid/detail 等）。
   static constexpr std::uint32_t kMaxStringBytes = 64 * 1024;
   // 请求内数组/映射计数（与 JobSpecLimits 的 argv/env 计数对齐）。
   static constexpr std::uint32_t kMaxItemCount = 256;
-  // 响应列表字段计数（ps/queue/gpu 列表的服务端上限一致）。
+  // 响应列表字段计数（ps/queue/gpu/inspect-env 列表的服务端上限一致）。
   static constexpr std::uint32_t kMaxListItems = 1024;
   // LOGS 响应尾部字节数组的服务端上限（每流）。
   static constexpr std::uint32_t kMaxLogTailBytes = 256 * 1024;
@@ -47,6 +54,11 @@ struct IpcProtocolLimits final {
          payload_bytes <= IpcProtocolLimits::kMaxPayloadBytes;
 }
 
+[[nodiscard]] constexpr bool ipc_version_supported(std::uint8_t version) noexcept {
+  return version >= IpcProtocolLimits::kMinProtocolVersion &&
+         version <= IpcProtocolLimits::kProtocolVersion;
+}
+
 enum class IpcRequestKind : std::uint8_t {
   kSubmit = 1,
   kPs = 2,
@@ -58,9 +70,18 @@ enum class IpcRequestKind : std::uint8_t {
   kLogsFollow = 7,
   // M6：TensorBoard logdir 解析查询（DEC-003；优先级判定在 CLI 侧）。
   kTensorboard = 8,
+  // M8：执行上下文与 provenance 查询（DEC-011；owner/admin，v2 起）。
+  kInspect = 9,
 };
 
 [[nodiscard]] const char* to_string(IpcRequestKind kind) noexcept;
+
+// 提交时环境来源元数据（DEC-011；wire 数值与 job::EnvSource 对齐：
+// 0 = none，1 = conda，2 = venv）。
+struct IpcEnvMetadata final {
+  std::uint8_t source{0};
+  std::optional<std::string> python_version;
+};
 
 struct IpcSubmitRequest final {
   std::vector<std::string> argv;
@@ -69,6 +90,10 @@ struct IpcSubmitRequest final {
   std::uint32_t gpu_request{1};
   std::optional<std::string> launch_profile;
   std::optional<std::string> tensorboard_logdir;
+  // v2（DEC-011）：提交时解析的 argv[0] 绝对路径与捕获环境元数据；v1 帧
+  // 缺省（无捕获语义）。
+  std::optional<std::string> executable;
+  std::optional<IpcEnvMetadata> env_metadata;
 };
 
 struct IpcCancelRequest final {
@@ -95,14 +120,22 @@ struct IpcTensorboardRequest final {
   std::uint64_t job_id{0};
 };
 
+// 执行上下文与 provenance 查询（M8，DEC-011 决策 7）。
+struct IpcInspectRequest final {
+  std::uint64_t job_id{0};
+};
+
 struct IpcRequest final {
   IpcRequestKind kind{IpcRequestKind::kSubmit};
+  // 帧协议版本（编码时写入帧头；缺省当前版本）。服务端响应回显请求版本。
+  std::uint8_t version{IpcProtocolLimits::kProtocolVersion};
   // 按 kind 取用；未用字段保持默认。
   IpcSubmitRequest submit;
   IpcCancelRequest cancel;
   IpcLogsRequest logs;
   IpcLogsFollowRequest logs_follow;
   IpcTensorboardRequest tensorboard;
+  IpcInspectRequest inspect;
 };
 
 enum class IpcError : std::uint8_t {
@@ -197,10 +230,42 @@ struct IpcTensorboardPayload final {
   std::string cwd;
 };
 
+// INSPECT 的单条环境条目（DEC-011 决策 7）：变量名全部可见；masked=true 时
+// 值命中敏感名模式、已由 daemon 替换为固定掩码（客户端不得显示原值——
+// 协议不传输原值）。
+struct IpcEnvEntry final {
+  std::string name;
+  bool masked{false};
+  std::string value;
+};
+
+// INSPECT 查询结果（M8，DEC-011）：执行上下文（cwd/executable/argv/环境）
+// 与 placement、分配结果、基本 provenance。仅 owner/admin 可得（否则 DENIED）。
+struct IpcInspectPayload final {
+  std::uint64_t job_id{0};
+  std::uint8_t state{0};
+  std::uint32_t owner_uid{0};
+  std::uint64_t revision{0};
+  std::string cwd;
+  std::optional<std::string> executable;
+  std::vector<std::string> argv;
+  std::optional<IpcEnvMetadata> env_metadata;
+  std::vector<IpcEnvEntry> env;
+  // 分配结果（lease 事实；placement 输入属 M9）。
+  std::optional<std::string> gpu_uuid;
+  std::optional<std::uint32_t> gpu_index;
+  // provenance。
+  std::uint64_t submit_time_unix_ns{0};
+  std::optional<IpcExitStatus> exit;
+  std::optional<std::string> log_path;
+};
+
 // 响应按 kind 取用结果字段；error 非 kNone 时除 kind/detail（及 CANCEL 的
 // state 上下文）外字段无意义。
 struct IpcResponse final {
   IpcRequestKind kind{IpcRequestKind::kSubmit};
+  // 回显请求的协议版本（服务端填写；缺省当前版本）。
+  std::uint8_t version{IpcProtocolLimits::kProtocolVersion};
   IpcError error{IpcError::kNone};
   std::string detail;
   std::uint64_t job_id{0};            // SUBMIT 成功时的 JobId
@@ -212,6 +277,7 @@ struct IpcResponse final {
   IpcLogsPayload logs;                // LOGS
   IpcLogsFollowPayload logs_follow;   // LOGS_FOLLOW ack
   IpcTensorboardPayload tensorboard;  // TENSORBOARD
+  IpcInspectPayload inspect;          // INSPECT
 };
 
 enum class IpcDecodeError : std::uint8_t {

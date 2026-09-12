@@ -3,6 +3,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
@@ -95,11 +96,30 @@ class FileLogSnapshotReader final : public LogSnapshotReader {
   }
 };
 
+std::string to_lower_ascii(const std::string& text) {
+  std::string lowered = text;
+  for (char& c : lowered) {
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  }
+  return lowered;
+}
+
 }  // namespace
 
 bool IpcServiceConfig::valid() const noexcept {
-  return max_listed_jobs > 0 && max_listed_jobs <= IpcProtocolLimits::kMaxListItems &&
-         max_log_tail_bytes > 0 && max_log_tail_bytes <= IpcProtocolLimits::kMaxLogTailBytes;
+  if (max_listed_jobs == 0 || max_listed_jobs > IpcProtocolLimits::kMaxListItems ||
+      max_log_tail_bytes == 0 || max_log_tail_bytes > IpcProtocolLimits::kMaxLogTailBytes) {
+    return false;
+  }
+  if (sensitive_env_patterns.size() > 64) {
+    return false;
+  }
+  for (const std::string& pattern : sensitive_env_patterns) {
+    if (pattern.empty() || pattern.size() > 64 || pattern.find('\0') != std::string::npos) {
+      return false;
+    }
+  }
+  return true;
 }
 
 std::unique_ptr<LogSnapshotReader> file_log_snapshot_reader() {
@@ -158,6 +178,8 @@ IpcResponse IpcService::handle(const PeerCredentials& peer, const IpcRequest& re
                             "streaming follow is not enabled on this endpoint");
     case IpcRequestKind::kTensorboard:
       return handle_tensorboard(peer, request.tensorboard.job_id);
+    case IpcRequestKind::kInspect:
+      return handle_inspect(peer, request.inspect.job_id);
   }
   return error_response(request.kind, IpcError::kInternal, "unhandled request kind");
 }
@@ -175,6 +197,15 @@ IpcResponse IpcService::handle_submit(const PeerCredentials& peer,
   spec.gpu_request = request.gpu_request;
   spec.launch_profile = request.launch_profile;
   spec.tensorboard_logdir = request.tensorboard_logdir;
+  // v2 扩展（DEC-011）：提交时捕获的 executable 与环境元数据；v1 提交
+  // 缺省（无捕获语义，daemon 启动时沿用 PATH 搜索）。
+  spec.executable = request.executable;
+  if (request.env_metadata) {
+    job::EnvMetadata metadata;
+    metadata.source = static_cast<job::EnvSource>(request.env_metadata->source);
+    metadata.python_version = request.env_metadata->python_version;
+    spec.env_metadata = std::move(metadata);
+  }
   spec.submit_time = std::chrono::system_clock::now();
 
   const job::JobSpecValidationResult validation = job::validate(spec);
@@ -476,8 +507,7 @@ IpcResponse IpcService::validate_logs_follow(const PeerCredentials& peer,
   return response;
 }
 
-IpcResponse IpcService::handle_tensorboard(const PeerCredentials& peer, std::uint64_t job_id) {
-  const store::StateStoreLoadResult load = store_.load();
+IpcResponse IpcService::handle_tensorboard(const PeerCredentials& peer, std::uint64_t job_id) {  const store::StateStoreLoadResult load = store_.load();
   if (!load.ok()) {
     return error_response(IpcRequestKind::kTensorboard, IpcError::kStoreFailed,
                           store::to_string(load.code));
@@ -497,6 +527,85 @@ IpcResponse IpcService::handle_tensorboard(const PeerCredentials& peer, std::uin
   response.error = IpcError::kNone;
   response.tensorboard.logdir = record->spec.tensorboard_logdir;
   response.tensorboard.cwd = record->spec.cwd;
+  return response;
+}
+
+bool IpcService::is_sensitive_env_name(const std::string& name) const {
+  const std::string lowered = to_lower_ascii(name);
+  for (const std::string& pattern : config_.sensitive_env_patterns) {
+    if (lowered.find(to_lower_ascii(pattern)) != std::string::npos) {
+      return true;
+    }
+  }
+  return false;
+}
+
+IpcResponse IpcService::handle_inspect(const PeerCredentials& peer, std::uint64_t job_id) {
+  const store::StateStoreLoadResult load = store_.load();
+  if (!load.ok()) {
+    return error_response(IpcRequestKind::kInspect, IpcError::kStoreFailed,
+                          store::to_string(load.code));
+  }
+  const store::StoredJob* record = find_job(load.snapshot, job_id);
+  if (record == nullptr) {
+    return error_response(IpcRequestKind::kInspect, IpcError::kNotFound, "job not found");
+  }
+  // 执行上下文属敏感面（DEC-011 决策 7）：非 owner 非 admin 直接拒绝，不提供
+  // 脱敏视图（同 TENSORBOARD 模式）。
+  if (record->spec.owner_uid != peer.uid && !is_admin(peer)) {
+    return error_response(IpcRequestKind::kInspect, IpcError::kDenied, "not job owner or admin");
+  }
+
+  IpcResponse response;
+  response.kind = IpcRequestKind::kInspect;
+  response.error = IpcError::kNone;
+  IpcInspectPayload& inspect = response.inspect;
+  inspect.job_id = record->id.value();
+  inspect.state = job_state_wire(record->state);
+  inspect.owner_uid = record->spec.owner_uid;
+  inspect.revision = record->revision;
+  inspect.cwd = record->spec.cwd;
+  inspect.executable = record->spec.executable;
+  inspect.argv = record->spec.argv;
+  if (record->spec.env_metadata) {
+    inspect.env_metadata = IpcEnvMetadata{
+        static_cast<std::uint8_t>(record->spec.env_metadata->source),
+        record->spec.env_metadata->python_version};
+  }
+
+  // env：变量名全部可见；命中敏感名模式的值在 daemon 侧替换为固定掩码
+  // （协议不传输原值；daemon 日志同样不打印 env 值）。
+  inspect.env.reserve(record->spec.env.size());
+  for (const auto& [name, value] : record->spec.env) {
+    const bool masked = is_sensitive_env_name(name);
+    inspect.env.push_back(IpcEnvEntry{name, masked, masked ? std::string{"***"} : value});
+  }
+
+  // 分配结果：lease 是调度事实（RULE-05）；物理索引来自当前 GPU 观测。
+  for (const gpu::GpuLease& lease : load.snapshot.leases) {
+    if (lease.job_id == record->id) {
+      inspect.gpu_uuid = lease.gpu_uuid.value();
+      gpu::GpuObservationSnapshot gpu_snapshot;
+      if (gpu_source_.try_get_snapshot(gpu_snapshot)) {
+        for (const gpu::GpuObservation& device : gpu_snapshot.devices) {
+          if (device.uuid == lease.gpu_uuid) {
+            inspect.gpu_index = device.index;
+            break;
+          }
+        }
+      }
+      break;
+    }
+  }
+
+  inspect.submit_time_unix_ns = unix_ns(record->spec.submit_time);
+  if (record->execution.exit) {
+    inspect.exit =
+        IpcExitStatus{record->execution.exit->exited(),
+                      record->execution.exit->exited() ? record->execution.exit->exit_code
+                                                       : record->execution.exit->signal_number};
+  }
+  inspect.log_path = record->execution.log_path;
   return response;
 }
 

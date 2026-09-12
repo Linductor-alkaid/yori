@@ -168,6 +168,7 @@ class ServerWorker final : public executor::IBlockingIoWorker {
         outcome.taken_over = false;
         outcome.response =
             error_response(decoded.value.kind, IpcError::kInternal, "internal error");
+        outcome.response.version = decoded.value.version;
       }
       if (outcome.taken_over) {
         return;  // fd 所有权已转移，服务器不再触碰。
@@ -177,13 +178,15 @@ class ServerWorker final : public executor::IBlockingIoWorker {
     }
 
     // handler 异常映射为 INTERNAL 响应（不吞、不崩 daemon；异常被消费为
-    // 显式结果而非丢失）。
+    // 显式结果而非丢失）。响应回显请求版本（v1 客户端在 v2 daemon 上保持
+    // 可用，DEC-011 决策 8）。
     IpcResponse response;
     try {
       response = handler_.handle(peer, decoded.value);
     } catch (...) {
       response = error_response(decoded.value.kind, IpcError::kInternal, "internal error");
     }
+    response.version = decoded.value.version;
     write_response_and_close(client_fd, response, deadline);
   }
 

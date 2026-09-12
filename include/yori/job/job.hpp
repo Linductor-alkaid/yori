@@ -57,6 +57,8 @@ enum class EnvSource : std::uint8_t {
 struct EnvMetadata final {
   EnvSource source{EnvSource::kNone};
   std::optional<std::string> python_version;
+
+  bool operator==(const EnvMetadata&) const noexcept = default;
 };
 
 struct JobSpec final {

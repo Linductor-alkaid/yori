@@ -582,6 +582,7 @@ UdsIpcStreamDelegate::Outcome LogFollowService::begin_stream(const ipc::PeerCred
   Outcome outcome;
   outcome.taken_over = false;
   outcome.response.kind = IpcRequestKind::kLogsFollow;
+  outcome.response.version = request.version;
 
   if (request.kind != IpcRequestKind::kLogsFollow) {
     outcome.response.error = IpcError::kProtocol;
@@ -596,6 +597,7 @@ UdsIpcStreamDelegate::Outcome LogFollowService::begin_stream(const ipc::PeerCred
 
   // 验证面（授权/存在性/已启动）在 IpcService；拒绝路径由服务器写回。
   outcome.response = impl_->service.validate_logs_follow(peer, request.logs_follow);
+  outcome.response.version = request.version;
   if (outcome.response.error != IpcError::kNone) {
     return outcome;
   }
@@ -625,6 +627,8 @@ UdsIpcStreamDelegate::Outcome LogFollowService::begin_stream(const ipc::PeerCred
   const LogReplayPlan& stderr_plan = subscribed.session.replay(LogStreamKind::kStderr);
   ipc::IpcResponse ack;
   ack.kind = IpcRequestKind::kLogsFollow;
+  // 响应回显请求版本（v1 客户端的 logs -f 在 v2 daemon 上保持可用）。
+  ack.version = request.version;
   ack.error = IpcError::kNone;
   // Job 状态以验证面的 store 快照为准（streamer 侧仅在终态后有值）。
   ack.logs_follow.job_state = validated_job_state;

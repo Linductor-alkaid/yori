@@ -186,8 +186,8 @@ void test_malformed_requests() {
   result = decode_request_payload(only_version, 1);
   YORI_CHECK(result.error == IpcDecodeError::kTruncated);
 
-  // 坏版本。
-  const std::uint8_t bad_version[2] = {2, static_cast<std::uint8_t>(IpcRequestKind::kPs)};
+  // 坏版本（v2 起接受 1/2，3 仍非法）。
+  const std::uint8_t bad_version[2] = {3, static_cast<std::uint8_t>(IpcRequestKind::kPs)};
   result = decode_request_payload(bad_version, sizeof(bad_version));
   YORI_CHECK(result.error == IpcDecodeError::kBadVersion);
 
@@ -195,8 +195,12 @@ void test_malformed_requests() {
   const std::uint8_t bad_kind[2] = {1, 0};
   result = decode_request_payload(bad_kind, sizeof(bad_kind));
   YORI_CHECK(result.error == IpcDecodeError::kBadKind);
-  const std::uint8_t bad_kind_high[2] = {1, 9};
+  const std::uint8_t bad_kind_high[2] = {1, 10};
   result = decode_request_payload(bad_kind_high, sizeof(bad_kind_high));
+  YORI_CHECK(result.error == IpcDecodeError::kBadKind);
+  // INSPECT 是 v2 kind：v1 帧携带判坏 kind。
+  const std::uint8_t v1_inspect[2] = {1, static_cast<std::uint8_t>(IpcRequestKind::kInspect)};
+  result = decode_request_payload(v1_inspect, sizeof(v1_inspect));
   YORI_CHECK(result.error == IpcDecodeError::kBadKind);
 
   // 空 kind 之后的尾部字节。
@@ -635,6 +639,7 @@ void test_m6_golden_vectors() {
   // since_stderr 无。
   IpcRequest request;
   request.kind = IpcRequestKind::kLogsFollow;
+  request.version = 1;  // v1 客户端形态（v2 daemon 仍接受）
   request.logs_follow.job_id = 9;
   request.logs_follow.since_stdout = std::uint64_t{4096};
   std::vector<std::uint8_t> buffer;
@@ -687,6 +692,200 @@ void test_m6_golden_vectors() {
   YORI_CHECK(buffer == expected_eof);
 }
 
+
+// ---------------------------------------------------------------------------
+// M8：协议 v2（DEC-011）——SUBMIT 扩展字段、INSPECT、版本协商。
+// ---------------------------------------------------------------------------
+
+void test_m8_submit_v2_roundtrip() {
+  // v2 SUBMIT：捕获 executable 与 env 元数据往返。
+  IpcRequest request;
+  request.kind = IpcRequestKind::kSubmit;
+  request.submit = sample_submit();
+  request.submit.executable = std::string("/opt/conda/envs/train/bin/python");
+  request.submit.env_metadata =
+      IpcEnvMetadata{1, std::string("3.11.5")};  // conda
+  IpcRequest decoded;
+  YORI_CHECK(roundtrip_request(request, decoded));
+  YORI_CHECK(decoded.submit.executable == request.submit.executable);
+  YORI_CHECK(decoded.submit.env_metadata.has_value());
+  if (decoded.submit.env_metadata) {
+    YORI_CHECK(decoded.submit.env_metadata->source == 1);
+    YORI_CHECK(decoded.submit.env_metadata->python_version == std::string("3.11.5"));
+  }
+
+  // v2 无捕获（字段缺省）同样合法。
+  request.submit.executable.reset();
+  request.submit.env_metadata.reset();
+  YORI_CHECK(roundtrip_request(request, decoded));
+  YORI_CHECK(!decoded.submit.executable.has_value());
+  YORI_CHECK(!decoded.submit.env_metadata.has_value());
+
+  // v1 SUBMIT：编码不含扩展字段，解码按无捕获处理。
+  request.version = 1;
+  std::vector<std::uint8_t> frame;
+  YORI_CHECK(append_request_frame(request, frame));
+  const IpcRequestDecodeResult v1_result =
+      decode_request_payload(frame.data() + 4, frame.size() - 4);
+  YORI_CHECK(v1_result.ok());
+  YORI_CHECK(!v1_result.value.submit.executable.has_value());
+  YORI_CHECK(!v1_result.value.submit.env_metadata.has_value());
+  YORI_CHECK(v1_result.value.version == 1);
+
+  // v1 帧携带 v2 字段：编码拒绝（版本与字段一致性）。
+  IpcRequest inconsistent;
+  inconsistent.kind = IpcRequestKind::kSubmit;
+  inconsistent.version = 1;
+  inconsistent.submit = sample_submit();
+  inconsistent.submit.executable = std::string("/bin/true");
+  std::vector<std::uint8_t> rejected;
+  YORI_CHECK(!append_request_frame(inconsistent, rejected));
+
+  // v2 SUBMIT 截断矩阵。
+  request.version = 2;
+  request.submit.executable = std::string("/bin/python3");
+  request.submit.env_metadata = IpcEnvMetadata{2, std::string("3.12")};
+  frame.clear();
+  YORI_CHECK(append_request_frame(request, frame));
+  for (std::size_t cut = 4; cut < frame.size(); ++cut) {
+    const IpcRequestDecodeResult cut_result =
+        decode_request_payload(frame.data() + 4, cut - 4);
+    YORI_CHECK(cut_result.error == IpcDecodeError::kTruncated ||
+               cut_result.error == IpcDecodeError::kNone);
+  }
+}
+
+void test_m8_inspect_roundtrip() {
+  IpcRequest request;
+  request.kind = IpcRequestKind::kInspect;
+  request.inspect.job_id = 77;
+  IpcRequest decoded;
+  YORI_CHECK(roundtrip_request(request, decoded));
+  YORI_CHECK(decoded.kind == IpcRequestKind::kInspect);
+  YORI_CHECK(decoded.inspect.job_id == 77);
+
+  IpcResponse response;
+  response.kind = IpcRequestKind::kInspect;
+  IpcInspectPayload& inspect = response.inspect;
+  inspect.job_id = 77;
+  inspect.state = 2;  // RUNNING
+  inspect.owner_uid = 1000;
+  inspect.revision = 5;
+  inspect.cwd = "/srv/training";
+  inspect.executable = std::string("/opt/conda/bin/python");
+  inspect.argv = {"python", "train.py"};
+  inspect.env_metadata = IpcEnvMetadata{1, std::string("3.11.5")};
+  inspect.env = {IpcEnvEntry{"PATH", false, "/opt/conda/bin"},
+                 IpcEnvEntry{"HF_TOKEN", true, "***"}};
+  inspect.gpu_uuid = std::string("GPU-abcdef");
+  inspect.gpu_index = std::uint32_t{3};
+  inspect.submit_time_unix_ns = std::uint64_t{1757600000} * 1000000000ULL;
+  inspect.exit = IpcExitStatus{true, 0};
+  inspect.log_path = std::string("/var/lib/yori/jobs/77");
+  IpcResponse decoded_response;
+  YORI_CHECK(roundtrip_response(response, decoded_response));
+  const IpcInspectPayload& out = decoded_response.inspect;
+  YORI_CHECK(out.job_id == 77 && out.state == 2 && out.owner_uid == 1000 && out.revision == 5);
+  YORI_CHECK(out.cwd == inspect.cwd && out.executable == inspect.executable);
+  YORI_CHECK(out.argv == inspect.argv);
+  YORI_CHECK(out.env_metadata.has_value() && out.env_metadata->source == 1 &&
+             out.env_metadata->python_version == std::string("3.11.5"));
+  YORI_CHECK(out.env.size() == 2);
+  if (out.env.size() == 2) {
+    YORI_CHECK(out.env[0].name == "PATH" && !out.env[0].masked &&
+               out.env[0].value == "/opt/conda/bin");
+    YORI_CHECK(out.env[1].name == "HF_TOKEN" && out.env[1].masked && out.env[1].value == "***");
+  }
+  YORI_CHECK(out.gpu_uuid == std::string("GPU-abcdef") && out.gpu_index == std::uint32_t{3});
+  YORI_CHECK(out.submit_time_unix_ns == inspect.submit_time_unix_ns);
+  YORI_CHECK(out.exit.has_value() && out.exit->exited_normally && out.exit->code == 0);
+  YORI_CHECK(out.log_path == inspect.log_path);
+
+  // 响应回显请求版本。
+  YORI_CHECK(decoded_response.version == response.version);
+
+  // 无分配（QUEUED）与无元数据的极简载荷。
+  response = IpcResponse{};
+  response.kind = IpcRequestKind::kInspect;
+  response.inspect.job_id = 78;
+  YORI_CHECK(roundtrip_response(response, decoded_response));
+  YORI_CHECK(!decoded_response.inspect.gpu_uuid.has_value());
+  YORI_CHECK(!decoded_response.inspect.gpu_index.has_value());
+  YORI_CHECK(!decoded_response.inspect.exit.has_value());
+  YORI_CHECK(!decoded_response.inspect.log_path.has_value());
+
+  // 越界拒绝：env 超列表上限、坏 source。
+  IpcResponse invalid = response;
+  invalid.inspect.env.assign(IpcProtocolLimits::kMaxListItems + 1, IpcEnvEntry{"K", false, "v"});
+  std::vector<std::uint8_t> reject;
+  YORI_CHECK(!append_response_frame(invalid, reject));
+
+  invalid = response;
+  invalid.inspect.env_metadata = IpcEnvMetadata{7, std::nullopt};
+  YORI_CHECK(!append_response_frame(invalid, reject));
+
+  // 手工坏帧：source 越界（payload: version 2, kind 9, error 0, detail "", ...）。
+  std::vector<std::uint8_t> handcrafted = {
+      0x02, 0x09,                                      // version 2, INSPECT
+      0x00,                                            // error none
+      0x00, 0x00, 0x00, 0x00,                          // detail ""
+      0x4d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // job 77
+      0x02,                                            // RUNNING
+      0xe8, 0x03, 0x00, 0x00,                          // owner 1000
+      0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // revision 5
+      0x00, 0x00, 0x00, 0x00,                          // cwd ""
+      0x00,                                            // executable 无
+      0x00, 0x00, 0x00, 0x00,                          // argv count 0
+      0x01,                                            // env_metadata 有
+      0x07,                                            // source 7（非法）
+  };
+  const IpcResponseDecodeResult bad_source =
+      decode_response_payload(handcrafted.data(), handcrafted.size());
+  YORI_CHECK(bad_source.error == IpcDecodeError::kInvalidValue);
+}
+
+void test_m8_golden_vectors() {
+  // v2 SUBMIT 尾部追加字段：executable="/bin/true"，env_metadata 无。
+  IpcRequest request;
+  request.kind = IpcRequestKind::kSubmit;
+  request.version = 2;
+  request.submit.argv = {"true"};
+  request.submit.cwd = "/tmp";
+  request.submit.gpu_request = 1;
+  request.submit.executable = std::string("/bin/true");
+  std::vector<std::uint8_t> buffer;
+  YORI_CHECK(append_request_frame(request, buffer));
+  const std::vector<std::uint8_t> expected = {
+      0x2f, 0x00, 0x00, 0x00,                          // 长度 47
+      0x02, 0x01,                                      // version 2, SUBMIT
+      0x01, 0x00, 0x00, 0x00,                          // argv count 1
+      0x04, 0x00, 0x00, 0x00, 't', 'r', 'u', 'e',      // "true"
+      0x04, 0x00, 0x00, 0x00, '/', 't', 'm', 'p',      // cwd "/tmp"
+      0x00, 0x00, 0x00, 0x00,                          // env count 0
+      0x01, 0x00, 0x00, 0x00,                          // gpu_request 1
+      0x00,                                            // launch_profile 无
+      0x00,                                            // tensorboard_logdir 无
+      0x01,                                            // executable 有
+      0x09, 0x00, 0x00, 0x00,                          // 长度 9
+      '/', 'b', 'i', 'n', '/', 't', 'r', 'u', 'e',
+      0x00,                                            // env_metadata 无
+  };
+  YORI_CHECK(buffer == expected);
+
+  // INSPECT 请求：version 2, kind 9, job 5。
+  request = IpcRequest{};
+  request.kind = IpcRequestKind::kInspect;
+  request.inspect.job_id = 5;
+  buffer.clear();
+  YORI_CHECK(append_request_frame(request, buffer));
+  const std::vector<std::uint8_t> expected_inspect = {
+      0x0a, 0x00, 0x00, 0x00,                          // 长度 10（2 头 + 8）
+      0x02, 0x09,                                      // version 2, INSPECT
+      0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // job 5
+  };
+  YORI_CHECK(buffer == expected_inspect);
+}
+
 }  // namespace
 
 int main() {
@@ -701,6 +900,9 @@ int main() {
   test_m6_stream_frame_roundtrips();
   test_m6_stream_frame_malformed();
   test_m6_golden_vectors();
+  test_m8_submit_v2_roundtrip();
+  test_m8_inspect_roundtrip();
+  test_m8_golden_vectors();
   if (yori::testing::failure_count != 0) {
     std::fprintf(stderr, "ipc protocol: %d failure(s)\n", yori::testing::failure_count);
     return 1;
