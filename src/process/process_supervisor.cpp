@@ -65,10 +65,16 @@ bool join_path(const char* directory, std::size_t directory_size, const char* na
   return true;
 }
 
-// 子进程 PATH 解析 + execve。仅使用 async-signal-safe 调用；envp 无 PATH 时回退
-// 系统默认路径（confstr(_CS_PATH) 的静态近似，与 posix_spawn 缺省一致）。
+// 子进程 exec。仅使用 async-signal-safe 调用。DEC-011：LaunchPlan.executable
+// 非空时为提交时解析的绝对路径，直接 execve（argv[0] 保持用户输入形式，$0/ps
+// 展示与直接执行一致）；为空时沿用 argv[0] + envp PATH 搜索（envp 无 PATH 则
+// 回退系统默认路径，与 posix_spawn 缺省一致）。
 [[noreturn]] void child_exec(const launch::LaunchPlan& plan, char* const* argv,
                              char* const* envp) noexcept {
+  if (!plan.executable.empty()) {
+    ::execve(plan.executable.c_str(), argv, envp);
+    write_child_report(ChildStage::kExec, errno);
+  }
   if (plan.argv.front().find('/') != std::string::npos) {
     ::execve(argv[0], argv, envp);
     write_child_report(ChildStage::kExec, errno);

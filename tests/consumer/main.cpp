@@ -76,7 +76,8 @@ int main() {
 
   yori::launch::DefaultLaunchAdapter adapter;
   const auto plan = adapter.prepare(
-      launch_spec, yori::launch::GpuAssignment{yori::gpu::GpuUuid{"GPU-consumer"}, 1, 0},
+      yori::job::JobId{7}, launch_spec,
+      yori::launch::GpuAssignment{yori::gpu::GpuUuid{"GPU-consumer"}, 1, 0},
       yori::launch::LaunchProfile{}, identity);
   if (!plan || !yori::launch::validate(plan.plan)) {
     return 1;

@@ -217,6 +217,12 @@ LaunchPlanValidationResult validate(const LaunchPlan& plan) noexcept {
   if (!plan.cwd.empty() && plan.cwd.front() != '/') {
     return {LaunchPlanErrorCode::kInvalidWorkingDirectory, std::nullopt, std::nullopt};
   }
+  // DEC-011：executable 非空时必须是绝对路径（spawn 直接 execve，不做 PATH 搜索）。
+  if (!plan.executable.empty() &&
+      (plan.executable.front() != '/' || contains_nul(plan.executable) ||
+       plan.executable.size() > LaunchPlanLimits::kMaxExecutableBytes)) {
+    return {LaunchPlanErrorCode::kInvalidExecutable, std::nullopt, std::nullopt};
+  }
   if (plan.env.size() > LaunchPlanLimits::kMaxEnvironmentVariables) {
     return {LaunchPlanErrorCode::kTooManyEnvironmentVariables, std::nullopt, std::nullopt};
   }
@@ -275,10 +281,14 @@ const char* to_string(LaunchPlanErrorCode code) noexcept {
       return "environment value too long";
     case LaunchPlanErrorCode::kEnvironmentTooLarge:
       return "environment too large";
+    case LaunchPlanErrorCode::kInvalidExecutable:
+      return "invalid executable";
     case LaunchPlanErrorCode::kInvalidIdentity:
       return "invalid identity";
     case LaunchPlanErrorCode::kInvalidUsername:
       return "invalid username";
+    case LaunchPlanErrorCode::kInvalidJobId:
+      return "invalid job id";
   }
   return "unknown";
 }
@@ -306,17 +316,20 @@ bool EnvironmentPolicy::accepts(const std::string& name) const {
 }
 
 bool is_reserved_environment_key(const std::string& name) {
-  static constexpr std::array<std::string_view, 8> kReserved{
+  static constexpr std::array<std::string_view, 7> kReserved{
       "CUDA_DEVICE_ORDER",
       "CUDA_VISIBLE_DEVICES",
       "HOME",
-      "LD_LIBRARY_PATH",
       "LD_PRELOAD",
       "LOGNAME",
       "SHELL",
       "USER",
   };
-  return std::find(kReserved.begin(), kReserved.end(), name) != kReserved.end();
+  if (std::find(kReserved.begin(), kReserved.end(), name) != kReserved.end()) {
+    return true;
+  }
+  // DEC-011：YORI_* 前缀属于调度器输出/管面注入，显式设置视为伪造尝试。
+  return name.rfind("YORI_", 0) == 0;
 }
 
 DefaultLaunchAdapter::DefaultLaunchAdapter(EnvironmentPolicy policy) : policy_(std::move(policy)) {}
@@ -329,10 +342,13 @@ void DefaultLaunchAdapter::set_environment_policy(EnvironmentPolicy policy) {
   policy_ = std::move(policy);
 }
 
-LaunchPlanResult DefaultLaunchAdapter::prepare(const job::JobSpec& spec,
+LaunchPlanResult DefaultLaunchAdapter::prepare(job::JobId job_id, const job::JobSpec& spec,
                                                const GpuAssignment& assignment,
                                                const LaunchProfile& profile,
                                                const IdentityInfo& identity) {
+  if (!job_id.valid()) {
+    return {LaunchPrepareErrorCode::kInvalidSpec, {}, {}, "invalid job id"};
+  }
   if (const job::JobSpecValidationResult spec_check = job::validate(spec); !spec_check.ok()) {
     return {LaunchPrepareErrorCode::kInvalidSpec, {}, {}, job::to_string(spec_check.code)};
   }
@@ -346,7 +362,7 @@ LaunchPlanResult DefaultLaunchAdapter::prepare(const job::JobSpec& spec,
     return {LaunchPrepareErrorCode::kInvalidGpuAssignment, {}, {}, "invalid gpu assignment uuid"};
   }
 
-  // DEC-006：保留键出现在用户环境中即拒绝整个 LaunchPlan。
+  // DEC-006/DEC-011：保留键出现在用户环境中即拒绝整个 LaunchPlan。
   for (const auto& [name, value] : spec.env) {
     static_cast<void>(value);
     if (is_reserved_environment_key(name)) {
@@ -357,6 +373,11 @@ LaunchPlanResult DefaultLaunchAdapter::prepare(const job::JobSpec& spec,
     }
   }
 
+  // 四层合并 v2（DEC-011 决策 4）。写入次序即优先级：后写覆盖先写。
+  // 1) 身份块（passwd 记录）：不可被任何层覆盖（保留键拒绝已保证）。
+  // 2) daemon 白名单：基础层。
+  // 3) 捕获的用户执行上下文（spec.env）：覆盖同名 daemon 键。
+  // 4) Yori 资源块：最高优先级，最后写入。
   std::map<std::string, std::string> env;
   env.emplace("HOME", identity.home);
   env.emplace("USER", identity.username);
@@ -367,24 +388,28 @@ LaunchPlanResult DefaultLaunchAdapter::prepare(const job::JobSpec& spec,
       env[name] = value;
     }
   }
+  for (const auto& [name, value] : spec.env) {
+    env[name] = value;
+  }
+  env["YORI_JOB_ID"] = std::to_string(job_id.value());
+  env["YORI_GPU_UUID"] = assignment.uuid.value();
   std::vector<std::string> argv = spec.argv;
   if (profile.mode == GpuMappingMode::kCudaVisibleDevices) {
     env["CUDA_VISIBLE_DEVICES"] = std::to_string(assignment.physical_index);
     env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID";
   } else {
-    // physical_argument 模式不改环境：物理索引按用户程序的参数语义原样追加，
-    // CUDA 变量不设置（设计第 8.1 节，遗留项目自行解释编号）。
+    // physical_argument 模式不设置 CUDA 变量：物理索引按用户程序的参数语义
+    // 原样追加（设计第 8.1 节，遗留项目自行解释编号）。YORI_JOB_ID/
+    // YORI_GPU_UUID 是 Yori 管理事实而非 GPU 映射，两种模式都写入。
     argv.emplace_back(profile.physical_argument);
     argv.emplace_back(std::to_string(assignment.physical_index));
-  }
-  for (const auto& [name, value] : spec.env) {
-    env[name] = value;
   }
 
   LaunchPlan plan;
   plan.argv = std::move(argv);
   plan.env.assign(env.begin(), env.end());
   plan.cwd = spec.cwd;
+  plan.executable = spec.executable.value_or(std::string{});
   plan.uid = identity.uid;
   plan.gid = identity.gid;
   plan.username = identity.username;

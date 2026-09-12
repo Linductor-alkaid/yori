@@ -748,7 +748,8 @@ class ManagerWorker final : public executor::IBlockingIoWorker {
     }
 
     const launch::LaunchPlanResult plan = launch_adapter_.prepare(
-        spec, launch::GpuAssignment{uuid, physical_index, 0}, profile, identity.identity);
+        job::JobId{job_id}, spec, launch::GpuAssignment{uuid, physical_index, 0}, profile,
+        identity.identity);
     if (!plan.ok()) {
       fail_launch(job_id, uuid, "launch plan rejected: " + plan.message);
       return;

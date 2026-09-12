@@ -39,13 +39,15 @@ inline launch::IdentityInfo current_identity() {
 }
 
 // 以指定 argv 构造"当前有效身份"的 LaunchPlan（uid==euid 时引擎跳过降权）。
+// executable 非空时为提交时解析的绝对路径直 exec 语义（DEC-011）。
 inline launch::LaunchPlan self_plan(std::vector<std::string> argv,
                                     std::vector<launch::EnvironmentEntry> env = {},
-                                    std::string cwd = "") {
+                                    std::string cwd = "", std::string executable = "") {
   launch::LaunchPlan plan;
   plan.argv = std::move(argv);
   plan.env = std::move(env);
   plan.cwd = std::move(cwd);
+  plan.executable = std::move(executable);
   plan.uid = static_cast<std::uint32_t>(::geteuid());
   plan.gid = static_cast<std::uint32_t>(::getegid());
   launch::IdentityInfo identity = current_identity();

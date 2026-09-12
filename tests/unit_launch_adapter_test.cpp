@@ -17,10 +17,12 @@ yori::job::JobSpec valid_spec() {
   spec.owner_gid = 1000;
   spec.argv = {"python", "train.py"};
   spec.cwd = "/srv/training";
-  spec.env = {{"YORI_RUN", "test"}};
+  spec.env = {{"PYTHONPATH", "/opt/lib"}};
   spec.submit_time = std::chrono::system_clock::time_point{std::chrono::seconds{1}};
   return spec;
 }
+
+constexpr yori::job::JobId kJobId{42};
 
 IdentityInfo valid_identity() {
   IdentityInfo identity;
@@ -46,7 +48,7 @@ void check_prepare_error(LaunchPrepareErrorCode expected, const yori::job::JobSp
                          const GpuAssignment& assignment, const LaunchProfile& profile,
                          const IdentityInfo& identity) {
   DefaultLaunchAdapter adapter;
-  const auto result = adapter.prepare(spec, assignment, profile, identity);
+  const auto result = adapter.prepare(kJobId, spec, assignment, profile, identity);
   YORI_CHECK(!result);
   YORI_CHECK(result.code == expected);
 }
@@ -110,7 +112,7 @@ int main() {
     }
   }
 
-  // ---- prepare：cuda_visible_devices 模式（DEC-006 三层合并）------------------
+  // ---- prepare：cuda_visible_devices 模式（DEC-011 四层合并 v2）----------------
   {
     DefaultLaunchAdapter adapter;
     adapter.set_daemon_environment({{"PATH", "/usr/bin"},
@@ -119,38 +121,51 @@ int main() {
                                     {"SECRET_TOKEN", "leak"},
                                     {"SUDO_USER", "root"},
                                     {"TERM", "xterm"}});
+    // 捕获层覆盖 daemon 白名单同名键（第 3 层 > 第 2 层）。
+    yori::job::JobSpec spec = valid_spec();
+    spec.env["PATH"] = "/opt/conda/envs/train/bin";
+    spec.env["LD_LIBRARY_PATH"] = "/opt/conda/envs/train/lib";
+    spec.executable = "/opt/conda/envs/train/bin/python";
+    spec.env_metadata = yori::job::EnvMetadata{yori::job::EnvSource::kConda, "3.11.5"};
     const auto result =
-        adapter.prepare(valid_spec(), valid_assignment(), LaunchProfile{}, valid_identity());
+        adapter.prepare(kJobId, spec, valid_assignment(), LaunchProfile{}, valid_identity());
     YORI_CHECK(result);
     if (result) {
       const LaunchPlan& plan = result.plan;
-      YORI_CHECK(plan.argv == valid_spec().argv);
+      YORI_CHECK(plan.argv == spec.argv);
+      YORI_CHECK(plan.executable == "/opt/conda/envs/train/bin/python");
       YORI_CHECK(plan.uid == 1000 && plan.gid == 1000);
       YORI_CHECK(plan.username == "trainer");
       YORI_CHECK(plan.cwd == "/srv/training");
       YORI_CHECK(plan.supplementary_groups == valid_identity().supplementary_groups);
 
-      // 身份块。
+      // 第 1 层：身份块。
       YORI_CHECK(find_entry(plan, "HOME") != nullptr &&
                  find_entry(plan, "HOME")->second == "/home/trainer");
       YORI_CHECK(find_entry(plan, "USER") != nullptr &&
                  find_entry(plan, "USER")->second == "trainer");
       YORI_CHECK(find_entry(plan, "LOGNAME") != nullptr);
       YORI_CHECK(find_entry(plan, "SHELL") != nullptr);
-      // 白名单继承。
-      YORI_CHECK(find_entry(plan, "PATH") != nullptr);
+      // 第 2 层：daemon 白名单继承；第 3 层：捕获值覆盖同名键。
+      YORI_CHECK(find_entry(plan, "PATH") != nullptr &&
+                 find_entry(plan, "PATH")->second == "/opt/conda/envs/train/bin");
+      YORI_CHECK(find_entry(plan, "LD_LIBRARY_PATH") != nullptr);
       YORI_CHECK(find_entry(plan, "LC_ALL") != nullptr);
       YORI_CHECK(find_entry(plan, "TERM") != nullptr);
       // 白名单外不进入。
       YORI_CHECK(find_entry(plan, "SECRET_TOKEN") == nullptr);
       YORI_CHECK(find_entry(plan, "SUDO_USER") == nullptr);
-      // GPU 映射块（NVML 索引 + PCI 总线序）。
+      // 第 4 层：Yori 资源块最后写入（最高优先级）。
       YORI_CHECK(find_entry(plan, "CUDA_VISIBLE_DEVICES") != nullptr &&
                  find_entry(plan, "CUDA_VISIBLE_DEVICES")->second == "3");
       YORI_CHECK(find_entry(plan, "CUDA_DEVICE_ORDER") != nullptr &&
                  find_entry(plan, "CUDA_DEVICE_ORDER")->second == "PCI_BUS_ID");
+      YORI_CHECK(find_entry(plan, "YORI_JOB_ID") != nullptr &&
+                 find_entry(plan, "YORI_JOB_ID")->second == "42");
+      YORI_CHECK(find_entry(plan, "YORI_GPU_UUID") != nullptr &&
+                 find_entry(plan, "YORI_GPU_UUID")->second == "GPU-abcdef");
       // 用户变量。
-      YORI_CHECK(find_entry(plan, "YORI_RUN") != nullptr);
+      YORI_CHECK(find_entry(plan, "PYTHONPATH") != nullptr);
       // 键唯一且按字典序。
       YORI_CHECK(std::is_sorted(plan.env.begin(), plan.env.end()));
       for (std::size_t i = 1; i < plan.env.size(); ++i) {
@@ -163,7 +178,7 @@ int main() {
   // ---- prepare：physical_argument 模式追加参数、不设 CUDA 环境变量 ------------
   {
     DefaultLaunchAdapter adapter;
-    const auto result = adapter.prepare(valid_spec(), valid_assignment(),
+    const auto result = adapter.prepare(kJobId, valid_spec(), valid_assignment(),
                                         LaunchProfile{GpuMappingMode::kPhysicalArgument, "--gpu"},
                                         valid_identity());
     YORI_CHECK(result);
@@ -172,7 +187,26 @@ int main() {
       YORI_CHECK(result.plan.argv == expected);
       YORI_CHECK(find_entry(result.plan, "CUDA_VISIBLE_DEVICES") == nullptr);
       YORI_CHECK(find_entry(result.plan, "CUDA_DEVICE_ORDER") == nullptr);
+      // Yori 管理事实（非 GPU 映射）两种模式都写入。
+      YORI_CHECK(find_entry(result.plan, "YORI_JOB_ID") != nullptr);
+      YORI_CHECK(find_entry(result.plan, "YORI_GPU_UUID") != nullptr);
     }
+  }
+
+  // ---- prepare：无捕获（v1 语义）executable 为空、JobId 无效拒绝 --------------
+  {
+    DefaultLaunchAdapter adapter;
+    const auto result =
+        adapter.prepare(kJobId, valid_spec(), valid_assignment(), LaunchProfile{}, valid_identity());
+    YORI_CHECK(result);
+    if (result) {
+      YORI_CHECK(result.plan.executable.empty());
+    }
+
+    const auto invalid_id = adapter.prepare(yori::job::JobId{0}, valid_spec(), valid_assignment(),
+                                            LaunchProfile{}, valid_identity());
+    YORI_CHECK(!invalid_id);
+    YORI_CHECK(invalid_id.code == LaunchPrepareErrorCode::kInvalidSpec);
   }
 
   // ---- prepare：保留键与无效输入拒绝 ----------------------------------------
@@ -190,6 +224,35 @@ int main() {
     spec = valid_spec();
     spec.env = {{"LD_PRELOAD", "/tmp/evil.so"}};
     check_prepare_error(LaunchPrepareErrorCode::kReservedEnvironmentKey, spec, valid_assignment(),
+                        LaunchProfile{}, valid_identity());
+
+    // DEC-011：YORI_* 前缀出现即拒绝（管面伪造尝试）。
+    spec = valid_spec();
+    spec.env = {{"YORI_JOB_ID", "1"}};
+    check_prepare_error(LaunchPrepareErrorCode::kReservedEnvironmentKey, spec, valid_assignment(),
+                        LaunchProfile{}, valid_identity());
+
+    spec = valid_spec();
+    spec.env = {{"YORI_ANYTHING", "x"}};
+    check_prepare_error(LaunchPrepareErrorCode::kReservedEnvironmentKey, spec, valid_assignment(),
+                        LaunchProfile{}, valid_identity());
+
+    // LD_LIBRARY_PATH 不再是保留键（DEC-011 修订：转入捕获白名单）。
+    {
+      DefaultLaunchAdapter adapter;
+      yori::job::JobSpec allowed = valid_spec();
+      allowed.env = {{"LD_LIBRARY_PATH", "/opt/conda/lib"}};
+      const auto result =
+          adapter.prepare(kJobId, allowed, valid_assignment(), LaunchProfile{}, valid_identity());
+      YORI_CHECK(result);
+      if (result) {
+        YORI_CHECK(find_entry(result.plan, "LD_LIBRARY_PATH") != nullptr);
+      }
+    }
+
+    spec = valid_spec();
+    spec.executable = "relative/path/python";
+    check_prepare_error(LaunchPrepareErrorCode::kInvalidSpec, spec, valid_assignment(),
                         LaunchProfile{}, valid_identity());
 
     spec = valid_spec();
@@ -214,7 +277,7 @@ int main() {
     DefaultLaunchAdapter adapter(std::move(policy));
     adapter.set_daemon_environment({{"PATH", "/usr/bin"}, {"TERM", "xterm"}});
     const auto result =
-        adapter.prepare(valid_spec(), valid_assignment(), LaunchProfile{}, valid_identity());
+        adapter.prepare(kJobId, valid_spec(), valid_assignment(), LaunchProfile{}, valid_identity());
     YORI_CHECK(result);
     if (result) {
       YORI_CHECK(find_entry(result.plan, "PATH") != nullptr);
@@ -224,11 +287,12 @@ int main() {
 
   // ---- LaunchPlan 独立复验 ---------------------------------------------------
   const auto make_plan = [](std::vector<std::string> argv, std::vector<EnvironmentEntry> env = {},
-                            std::string cwd = "") {
+                            std::string cwd = "", std::string executable = "") {
     LaunchPlan plan;
     plan.argv = std::move(argv);
     plan.env = std::move(env);
     plan.cwd = std::move(cwd);
+    plan.executable = std::move(executable);
     plan.uid = 1000;
     plan.gid = 1000;
     plan.username = "trainer";
@@ -247,6 +311,12 @@ int main() {
 
   plan = make_plan({"true"}, {}, "relative/path");
   YORI_CHECK(validate(plan).code == LaunchPlanErrorCode::kInvalidWorkingDirectory);
+
+  plan = make_plan({"python"}, {}, "/srv", "/opt/conda/bin/python");
+  YORI_CHECK(validate(plan));
+
+  plan = make_plan({"python"}, {}, "/srv", "relative/python");
+  YORI_CHECK(validate(plan).code == LaunchPlanErrorCode::kInvalidExecutable);
 
   return yori::testing::failure_count == 0 ? 0 : 1;
 }

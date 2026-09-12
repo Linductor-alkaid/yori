@@ -130,6 +130,31 @@ int main() {
     }
   }
 
+  // ---- M8 executable 直 exec（DEC-011）：argv[0] 保持用户输入形式 -------------
+  {
+    ProcessSupervisor supervisor;
+    // executable 为绝对路径，argv[0] 为裸名：不做 PATH 搜索，$0 与直接执行一致。
+    const auto result = supervisor.spawn(yori::testing::self_plan(
+        {"sh", "-c", "test \"$0\" = sh && echo direct-exec-ok"}, {{"PATH", "/nonexistent"}},
+        "", "/bin/sh"));
+    YORI_CHECK(result);
+    if (result) {
+      const std::string out = read_all(result.stdout_read, std::chrono::milliseconds{3000});
+      YORI_CHECK(out == "direct-exec-ok\n");
+      const auto exit = yori::testing::wait_for_exit(supervisor);
+      YORI_CHECK(exit.status.is_success());
+    }
+  }
+  {
+    // executable 不存在/不可执行：结构化 exec 失败（fail-fast 的 daemon 侧防线）。
+    ProcessSupervisor supervisor;
+    const auto result = supervisor.spawn(
+        yori::testing::self_plan({"python", "train.py"}, {}, "", "/nonexistent/python"));
+    YORI_CHECK(!result);
+    YORI_CHECK(result.code == SpawnErrorCode::kExecFailed);
+    YORI_CHECK(result.error_number == ENOENT);
+  }
+
   // ---- cwd 生效 --------------------------------------------------------------
   {
     ProcessSupervisor supervisor;

@@ -74,9 +74,9 @@ int main() {
     spec.env = {{"TRAIN_STEP", "42"}};
     spec.submit_time = std::chrono::system_clock::time_point{std::chrono::seconds{1}};
 
-    const auto plan =
-        adapter.prepare(spec, launch::GpuAssignment{yori::gpu::GpuUuid{"GPU-it"}, 2, 0},
-                        launch::LaunchProfile{}, identity);
+    const auto plan = adapter.prepare(job::JobId{100}, spec,
+                                      launch::GpuAssignment{yori::gpu::GpuUuid{"GPU-it"}, 2, 0},
+                                      launch::LaunchProfile{}, identity);
     YORI_CHECK(plan);
 
     observe::LogSinkConfig sink_config;
@@ -132,9 +132,9 @@ int main() {
     spec.argv = {"/bin/sh", "-c", "echo starting; trap '' TERM; sleep 300"};
     spec.cwd = "/tmp";
     spec.submit_time = std::chrono::system_clock::time_point{std::chrono::seconds{1}};
-    const auto plan =
-        adapter.prepare(spec, launch::GpuAssignment{yori::gpu::GpuUuid{"GPU-it"}, 0, 0},
-                        launch::LaunchProfile{}, identity);
+    const auto plan = adapter.prepare(job::JobId{101}, spec,
+                                      launch::GpuAssignment{yori::gpu::GpuUuid{"GPU-it"}, 0, 0},
+                                      launch::LaunchProfile{}, identity);
     YORI_CHECK(plan);
 
     observe::LogSink sink;
