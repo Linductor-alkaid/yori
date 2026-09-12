@@ -1,7 +1,7 @@
 # DEC-011：提交时执行上下文捕获与训练环境恢复
 
-> 状态：Proposed
-> 日期：2026-09-12
+> 状态：Accepted（2026-09-12 负责人确认依总计划启动 M8，随 M8 启动冻结）
+> 日期：2026-09-12（Proposed）/ 2026-09-12（Accepted）
 > 负责人：Linductor-alkaid
 > 冻结里程碑：M8
 > 替代/被替代：部分修订 [DEC-006](DEC-006-launch-environment-policy.md)（用户变量层与保留键集）；需求来源 [#16](https://github.com/Linductor-alkaid/yori/issues/16)
