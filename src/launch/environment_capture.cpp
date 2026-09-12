@@ -331,7 +331,7 @@ std::optional<std::string> probe_python_version(const std::string& executable) {
       return std::nullopt;
     }
     struct timespec pause {
-      0, 2 * 1000 * 1000
+      0, 2L * 1000L * 1000L
     };
     ::nanosleep(&pause, nullptr);
   }
