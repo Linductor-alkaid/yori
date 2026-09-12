@@ -1,6 +1,8 @@
 # M8：提交时执行上下文捕获与训练环境恢复
 
-> 状态：Implemented（CI 全绿，待 MR 合并——合并由负责人决定）
+> 状态：Completed（2026-09-12 PR
+> [#18](https://github.com/Linductor-alkaid/yori/pull/18) 合并，master
+> `2199546`；随 `v0.2.0` 发布）
 > 负责人：Linductor-alkaid
 > 所属计划：[Yori 实施总计划](yori-implementation-plan.md)
 > 前置：M7（打包与 MVP 端到端验收，PR [#11](https://github.com/Linductor-alkaid/yori/pull/11)）
@@ -159,6 +161,10 @@
   总计划（§1/§5/§6/§11）、本文档验证记录、CHANGELOG（`## Unreleased`）。
 
 ## 验证记录
+
+收口：2026-09-12 负责人授权合并 PR #18（merge commit `2199546`，含
+`fix(runtime)` 丢失唤醒修复与全部证据文档），合并后 master 本地 44/44
+复验；`v0.2.0` 随发版 PR 定稿发布。
 
 2026-09-12：M8 实现完成（本地验证，Linux x86_64，GCC 13，分支
 `feat/m8-execution-context`，6 个实现 commit）。
