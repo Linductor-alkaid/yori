@@ -41,6 +41,7 @@ struct DaemonArguments final {
   std::vector<std::uint32_t> admin_gids;
   std::string state_db{kDefaultStateDb};
   std::string log_root{kDefaultLogRoot};
+  std::uint32_t scheduler_scan_window{32};
   std::string gpu_library{kDefaultGpuLibrary};
   std::string sqlite_library{kDefaultSqliteLibrary};
 };
@@ -57,6 +58,9 @@ void print_usage() {
                "                         job (repeatable)\n"
                "  --state-db PATH        SQLite state database (default %s)\n"
                "  --log-root PATH        job log root (default %s)\n"
+               "  --scheduler-scan-window N\n"
+               "                         FIFO bounded-skip scan window (default 32,\n"
+               "                         1..4096; DEC-012)\n"
                "  --gpu-library PATH     NVML library (default %s)\n"
                "  --sqlite-library PATH  SQLite library (default %s)\n"
                "  --version              print version and exit\n",
@@ -157,6 +161,17 @@ int parse_arguments(int argc, char* argv[], DaemonArguments& args, bool& valid) 
     }
     if (flag == "--log-root") {
       if (!take_value("--log-root", args.log_root)) {
+        valid = false;
+      }
+      continue;
+    }
+    if (flag == "--scheduler-scan-window") {
+      std::string value;
+      constexpr std::uint32_t kMaxScanWindow = 4096;
+      if (!take_value("--scheduler-scan-window", value) ||
+          !parse_u32(value.c_str(), 10, args.scheduler_scan_window) ||
+          args.scheduler_scan_window < 1 || args.scheduler_scan_window > kMaxScanWindow) {
+        std::fprintf(stderr, "yorid: --scheduler-scan-window expects a number in 1..4096\n");
         valid = false;
       }
       continue;
@@ -270,6 +285,7 @@ int main(int argc, char* argv[]) {
   daemon_config.service.admin_gids = args.admin_gids;
   resolve_admin_members(args.admin_gids, daemon_config.service.admin_uids);
   daemon_config.job_manager.log_root = args.log_root;
+  daemon_config.job_manager.scheduler_scan_window = args.scheduler_scan_window;
   // DEC-006：daemon 环境快照（白名单继承源）。
   for (char* const* entry = ::environ; entry != nullptr && *entry != nullptr; ++entry) {
     const std::string_view text{*entry};

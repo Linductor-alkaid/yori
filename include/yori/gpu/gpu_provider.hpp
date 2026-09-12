@@ -8,27 +8,10 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <yori/gpu/gpu_uuid.hpp>
 #include <yori/job/job.hpp>
 
 namespace yori::gpu {
-
-class GpuUuid final {
- public:
-  static constexpr std::size_t kMaxBytes = 96;
-
-  GpuUuid() = default;
-  explicit GpuUuid(std::string value) : value_(std::move(value)) {}
-
-  [[nodiscard]] const std::string& value() const noexcept { return value_; }
-  [[nodiscard]] bool valid() const noexcept {
-    return !value_.empty() && value_.size() <= kMaxBytes && value_.find('\0') == std::string::npos;
-  }
-
-  auto operator<=>(const GpuUuid&) const = default;
-
- private:
-  std::string value_;
-};
 
 // Provider 只能报告资源观测，不得把 Yori lease 伪装成设备事实。
 enum class GpuObservedState {

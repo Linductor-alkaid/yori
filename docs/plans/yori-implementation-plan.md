@@ -87,8 +87,10 @@
   工作分支已清理，合并后 master 本地 44/44 复验。随发版 PR 同步收口状态并
   交付 `v0.2.0`。M8 期间修复 M7 遗留丢失唤醒（`yori logs -f` 偶发悬挂：
   LogPump 完成事件不唤醒 JobManager，EOF 汇合永不触发）。
-- 当前里程碑：M9（Planned，GPU placement，DEC-012 Proposed）排队；无进行中
-  里程碑。
+- 当前里程碑：M9（GPU placement 亲和调度，In Progress，
+  [m9-gpu-placement.md](m9-gpu-placement.md)，分支
+  `feat/m9-gpu-placement`）；DEC-012 已于 2026-09-13 随 M9 启动冻结为
+  Accepted（部分修订 DEC-005 队首条款）。
 - MVP 端到端验收以设计文档第 19 节判据为准，由 M7 执行并记录证据（见第 10 节）。
 - 里程碑文档在各自启动时创建（工程规范第 2 节）；当前实体文件：M0-M7
   （M8/M9 文件在各自启动时创建）。
@@ -181,7 +183,7 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | M6 | 观察面 | M5 | `logs -f` 流式帧（offset 续传、`GAP`/`EOF`/`BACKPRESSURE`）、日志轮转、`yori tensorboard` | 无 | Completed |
 | M7 | 打包与 MVP 端到端验收 | M6 | systemd unit、安装打包、设计 §19 判据逐项验收；前置：守护总装收口 | `v0.1.0`（MVP；tag/发布需负责人授权） | Completed |
 | M8 | 提交时执行上下文 | M7 | 环境捕获（白名单/`--env`/`--inherit-env`）、executable 提交时解析、环境合并 v2 与保留键修订、`yori inspect`（owner/admin + 脱敏）、IPC 协议 v2、schema v2 迁移；Conda/venv 语义一致性验证 | `v0.2.0` | Completed（2026-09-12，PR [#18](https://github.com/Linductor-alkaid/yori/pull/18)，`v0.2.0` 发布） |
-| M9 | GPU placement 亲和调度 | M7（与 M8 无代码依赖，建议随后执行以共享迁移框架） | `GpuPlacement` Core 类型与校验、daemon 侧 `--gpu` 解析、Scheduler 候选集过滤与 FIFO 有界跳过、`wait_reason`、schema v3 与恢复一致性；issue #10 12 场景矩阵 | `v0.3.0` | Planned（DEC-012 Proposed，冻结于 M9 启动） |
+| M9 | GPU placement 亲和调度 | M7（与 M8 无代码依赖，建议随后执行以共享迁移框架） | `GpuPlacement` Core 类型与校验、daemon 侧 `--gpu` 解析、Scheduler 候选集过滤与 FIFO 有界跳过、`wait_reason`、schema v3 与恢复一致性；issue #10 12 场景矩阵 | `v0.3.0` | In Progress（2026-09-13 启动，DEC-012 Accepted） |
 
 - M3 与 M4 在 M2 完成后可并行推进。
 - 里程碑文件命名 `m<N>-<scope>.md`，在该里程碑启动时创建；当前实体文件：
@@ -211,7 +213,7 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | 日志与跟随上限默认值 | 已冻结：落盘单文件 256 MiB / 保留 1 个历史文件（M2 `LogSink`）；跟随会话每 Job 8 / 全局 64、回看窗口 8 MiB/流（64 KiB ~ 64 MiB）、订阅队列 64 chunk、会话写出缓冲 2 MiB、单帧写截止 2 s（M6 `LogStreamer`/`LogFollowService`，全部配置化并有负向测试） | Linductor-alkaid | M6 | 已于 2026-09-10 冻结（配置定稿 + 测试）；变更走配置级评审 |
 | 仓库自身许可证 | 已冻结：MIT（2026-09-10 负责人选定，`v0.1.0` 发布）；与 Executor（MIT）兼容 | Linductor-alkaid | M7（发布前） | 已添加 `LICENSE` 并同步[供应链策略](../supply-chain/dependency-policy.md)与 `README.md` |
 | 执行上下文捕获策略 | 已冻结：提交时白名单捕获 + `--env`/`--inherit-env`、executable 提交时解析、环境合并 v2（`LD_LIBRARY_PATH` 转白名单、`LD_PRELOAD`/`YORI_*` 维持拒绝）、无 `--shell`（用 `-- bash -c` 表达）（[DEC-011](../decisions/DEC-011-execution-context-capture.md)，issue #16） | Linductor-alkaid | M8 启动 | 已于 2026-09-12 冻结（负责人确认启动 M8，DEC-011 改 Accepted）；变更需新决策记录 |
-| GPU placement 模型 | Proposed：M9 交付 `ANY`+`REQUIRED`（`--gpu N` = 硬亲和，与 `--gpus N` 计数互斥）；设备身份复用 `GpuUuid`，daemon 侧解析 index→UUID；FIFO 修订为有界跳过（默认扫描 32）；`PREFERRED`/GPU Set/tag/pool/项目级 profile/管理员静态映射延后（[DEC-012](../decisions/DEC-012-gpu-placement-policy.md)，issue #10） | Linductor-alkaid | M9 启动 | 负责人确认后 DEC-012 改 Accepted |
+| GPU placement 模型 | 已冻结：M9 交付 `ANY`+`REQUIRED`（`--gpu N` = 硬亲和，与 `--gpus N` 计数互斥）；设备身份复用 `GpuUuid`，daemon 侧解析 index→UUID；FIFO 修订为有界跳过（默认扫描 32）；`PREFERRED`/GPU Set/tag/pool/项目级 profile/管理员静态映射延后（[DEC-012](../decisions/DEC-012-gpu-placement-policy.md)，issue #10） | Linductor-alkaid | M9 启动 | 已于 2026-09-13 随 M9 启动冻结（负责人确认依计划推进，DEC-012 改 Accepted，部分修订 DEC-005 队首条款）；变更需新决策记录 |
 
 ## 7. 跨里程碑完成定义（DOD）
 

@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstring>
 #include <executor/blocking_io.hpp>
+#include <executor/comm/mailbox.hpp>
 #include <executor/executor.hpp>
 #include <future>
 #include <memory>
@@ -242,7 +243,8 @@ class ManagerWorker final : public executor::IBlockingIoWorker {
                 executor::comm::PhaseGate& startup_gate, store::StateStore& store,
                 queue::GlobalJobQueue& queue, GpuManager& gpu_manager, LogStreamer& log_streamer,
                 launch::IdentityResolver& identity_resolver, launch::LaunchAdapter& launch_adapter,
-                const JobManagerConfig& config, AtomicStats& stats, std::atomic<bool>& stopping)
+                const JobManagerConfig& config, AtomicStats& stats, std::atomic<bool>& stopping,
+                executor::comm::LatestMailbox<scheduler::ScheduleEvaluation>& evaluation_mailbox)
       : wake_read_(wake_read),
         commands_(commands),
         startup_gate_(startup_gate),
@@ -255,7 +257,8 @@ class ManagerWorker final : public executor::IBlockingIoWorker {
         config_(config),
         stats_(stats),
         stopping_(stopping),
-        scheduler_(queue, store),
+        scheduler_(queue, store, scheduler::SchedulerConfig{config.scheduler_scan_window}),
+        evaluation_mailbox_(evaluation_mailbox),
         scheduler_runner_(nullptr),
         store_runner_(nullptr),
         exit_monitor_(nullptr),
@@ -698,6 +701,12 @@ class ManagerWorker final : public executor::IBlockingIoWorker {
       return;
     }
     const scheduler::ScheduleResult& result = *completion.schedule_result;
+    // 调度评估结论发布（DEC-012 决策 5）：ps/queue 的 wait_reason 数据源。
+    // 仅有意义结果（调度成功或本轮无候选）进入最新值视图；失败/取消不清除
+    // 上一次结论。
+    if (result.scheduled() || result.code == scheduler::ScheduleResultCode::kNoCandidate) {
+      evaluation_mailbox_.publish(result.evaluation);
+    }
     if (result.scheduled() && result.event.job_id.has_value() &&
         result.event.gpu_uuid.has_value()) {
       stats_.scheduler_scheduled.fetch_add(1, std::memory_order_relaxed);
@@ -1021,6 +1030,7 @@ class ManagerWorker final : public executor::IBlockingIoWorker {
   std::atomic<bool>& stopping_;
 
   scheduler::FifoScheduler scheduler_;
+  executor::comm::LatestMailbox<scheduler::ScheduleEvaluation>& evaluation_mailbox_;
   SchedulerTaskRunner* scheduler_runner_;
   StoreTaskRunner* store_runner_;
   ProcessExitMonitor* exit_monitor_;
@@ -1054,6 +1064,10 @@ bool JobManagerConfig::valid(std::string& error) const noexcept {
   }
   if (ack_timeout <= std::chrono::milliseconds{0}) {
     error = "ack timeout must be positive";
+    return false;
+  }
+  if (!scheduler::SchedulerConfig{scheduler_scan_window}.valid()) {
+    error = "scheduler scan window must be within [1, 4096]";
     return false;
   }
   return true;
@@ -1108,7 +1122,8 @@ class JobManager::Impl final {
         log_pump(executor_ref),
         identity_resolver(identity_resolver_ref),
         launch_adapter(launch_adapter_ref),
-        scheduler(queue_ref, store_ref),
+        scheduler(queue_ref, store_ref,
+                  scheduler::SchedulerConfig{config_value.scheduler_scan_window}),
         config(std::move(config_value)) {}
 
   executor::comm::MpscChannel<Command> commands;
@@ -1125,6 +1140,10 @@ class JobManager::Impl final {
   launch::IdentityResolver& identity_resolver;
   launch::LaunchAdapter& launch_adapter;
   scheduler::FifoScheduler scheduler;
+  // 最近一次调度评估（DEC-012）：worker 发布、IPC 读路径经
+  // try_get_schedule_evaluation 读取的 comm 最新值视图。
+  executor::comm::LatestMailbox<scheduler::ScheduleEvaluation> evaluation_mailbox{
+      "yori-schedule-evaluation"};
   JobManagerConfig config;
 
   // 唤醒源（退出监视/GPU 事件监听回调，非阻塞）：停止后忽略，fd 关闭前先
@@ -1199,7 +1218,7 @@ JobManagerStartResult JobManager::start(const std::optional<recovery::RecoveryRe
   auto worker_storage = std::make_unique<ManagerWorker>(
       wake_pipe[0], impl_->commands, impl_->startup_gate, impl_->store, impl_->queue,
       impl_->gpu_manager, impl_->log_streamer, impl_->identity_resolver, impl_->launch_adapter,
-      impl_->config, impl_->stats, impl_->stopping);
+      impl_->config, impl_->stats, impl_->stopping, impl_->evaluation_mailbox);
   worker_storage->set_wake_write(wake_pipe[1]);
   worker_storage->bind(impl_->executor, impl_->scheduler_runner, impl_->store_runner,
                        impl_->exit_monitor, impl_->log_pump, impl_->bridge);
@@ -1289,6 +1308,10 @@ ipc::JobCancelOutcome JobManager::cancel_job(std::uint64_t job_id) {
 }
 
 ProcessExitMonitor& JobManager::exit_monitor() { return impl_->exit_monitor; }
+
+bool JobManager::try_get_schedule_evaluation(scheduler::ScheduleEvaluation& out) {
+  return impl_->evaluation_mailbox.try_load(out);
+}
 
 LogPump& JobManager::log_pump() { return impl_->log_pump; }
 

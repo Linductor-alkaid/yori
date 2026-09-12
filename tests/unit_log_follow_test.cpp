@@ -151,6 +151,11 @@ class NullJobControl final : public yori::ipc::JobControl {
   }
 };
 
+// ScheduleStatusSource 空实现：跟随会话测试不消费调度评估。
+class NullScheduleStatus final : public yori::ipc::ScheduleStatusSource {
+ public:
+  bool try_get_schedule_evaluation(yori::scheduler::ScheduleEvaluation&) override { return false; }
+};
 struct FollowFixture final {
   FollowFixture() {
     std::string error;
@@ -161,7 +166,9 @@ struct FollowFixture final {
     // 守护委派的假实现（M7 起 submit/cancel 走 JobControl）：跟随会话测试
     // 不触发状态变更，静态空实现即可。
     control = std::make_unique<NullJobControl>();
-    service = std::make_unique<IpcService>(service_config, store, gpu_status, log_reader, *control);
+    schedule_status = std::make_unique<NullScheduleStatus>();
+    service = std::make_unique<IpcService>(service_config, store, gpu_status, log_reader, *control,
+                                           *schedule_status);
 
     streamer_config.subscription_capacity = 4;
     streamer_config.backlog_bytes_per_stream = LogStreamerConfig::kMinBacklogBytes;
@@ -251,6 +258,7 @@ struct FollowFixture final {
   yori::testing::InMemoryStateStore store;
   FakeGpuStatus gpu_status;
   FakeLogReader log_reader;
+  std::unique_ptr<NullScheduleStatus> schedule_status;
   std::unique_ptr<IpcService> service;
   std::unique_ptr<NullJobControl> control;
   LogStreamerConfig streamer_config;

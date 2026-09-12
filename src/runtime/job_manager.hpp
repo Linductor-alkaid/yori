@@ -67,6 +67,8 @@ struct JobManagerConfig final {
   std::size_t command_capacity{256};
   // submit/cancel 的 ack 等待上限（调用侧同步等待）。
   std::chrono::milliseconds ack_timeout{5000};
+  // FIFO 有界跳过的调度扫描窗口（DEC-012：默认 32，[1, 4096]）。
+  std::uint32_t scheduler_scan_window{scheduler::SchedulerConfig::kDefaultScanWindow};
   // daemon 环境快照（DEC-006 白名单继承源；空则不继承任何 daemon 变量）。
   std::vector<launch::EnvironmentEntry> daemon_environment;
   // LogSink 的文件后端（测试注入写失败等故障；缺省 POSIX 实现）。
@@ -123,7 +125,7 @@ struct JobManagerStats final {
   std::uint64_t active_supervised{0};
 };
 
-class JobManager final : public ipc::JobControl {
+class JobManager final : public ipc::JobControl, public ipc::ScheduleStatusSource {
  public:
   // identity_resolver/launch_adapter 的生命周期由调用方保证覆盖本组件
   // （生产：Daemon 持有 PosixIdentityResolver + DefaultLaunchAdapter）。
@@ -151,6 +153,10 @@ class JobManager final : public ipc::JobControl {
   // ipc::JobControl（IPC worker 线程调用；同步等待有界 ack）。
   [[nodiscard]] ipc::JobSubmitOutcome submit_job(const job::JobSpec& spec) override;
   [[nodiscard]] ipc::JobCancelOutcome cancel_job(std::uint64_t job_id) override;
+
+  // ipc::ScheduleStatusSource（DEC-012）：最近一次调度评估结论（comm 最新值
+  // 视图，跨线程读取安全）。尚无评估时返回 false。
+  [[nodiscard]] bool try_get_schedule_evaluation(scheduler::ScheduleEvaluation& out) override;
 
   [[nodiscard]] JobManagerStats stats() const;
 
