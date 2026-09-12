@@ -208,6 +208,19 @@
   静默重定向（该静默曾使失败零诊断，违反失败可见纪律）。(2) clang-tidy
   报 `nanosleep` timespec 的 int 乘法拓宽（bugprone），改 long 字面量。
   最终 CI 9/9 全绿（run 34691974501）。
+- **偶发 `logs -f` 悬挂的根因修复（M7 遗留丢失唤醒）**：CI 两轮在
+  gcc-13/clang-18 release 上 E2E 180s 超时；阶段标记定位到首个 `logs -f`
+  的流式等待后，本地以 30s 看门狗稳定复现（~50%）。诊断（客户端 poll 系
+  统调用 + daemon fd 表 + 会话统计）证实：会话存活但 EOF 永不发布 ->
+  `LogStreamer::finish_job` 未执行 -> 根因是 `LogPump` 投递完成事件后
+  **不唤醒 JobManager worker**：done 通道无 fd 可 poll，worker 在退出事件
+  周期后睡进 `wait_for_wakeup`，"退出事件 + 泵完成" 的 EOF 汇合永不触发；
+  被阻塞的跟随客户端无法产生新事件，死锁闭环。修复：`LogPump` 增加线程
+  安全的 `set_done_listener`（与 `ProcessExitMonitor::set_event_listener`
+  同型），JobManager 挂接到自身唤醒管道（与退出监视/GPU 事件并列），停止
+  时解除。修复后 release E2E 连续 20/20（修复前 ~50% 卡死），debug/release/
+  asan/ubsan/tsan 各 44/44。E2E 的看门狗与阶段标记保留为回归防线：跟随
+  悬挂将在 30s 内以带诊断（fd 表、syscall、会话/Job 统计）的显式失败呈现。
 - 限制：真实 Conda/venv 环境与真机 NVML 组合按 M7 补跑条件沿用（CI 以
   假环境注入近似覆盖语义一致性矩阵）。
 
