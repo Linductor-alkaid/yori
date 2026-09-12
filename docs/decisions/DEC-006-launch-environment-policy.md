@@ -1,10 +1,10 @@
 # DEC-006：训练进程环境变量继承白名单
 
-> 状态：Accepted
+> 状态：Accepted（用户变量层与保留键集由 [DEC-011](DEC-011-execution-context-capture.md) 修订为"捕获的用户执行上下文 + 四层合并"，`LD_LIBRARY_PATH` 转入捕获白名单，2026-09-12；身份块/daemon 白名单/GPU 映射块与 fork 前解析纪律继续生效）
 > 日期：2026-09-08
 > 负责人：Linductor-alkaid
 > 冻结里程碑：M2
-> 替代/被替代：无
+> 替代/被替代：部分被 [DEC-011](DEC-011-execution-context-capture.md) 修订（执行上下文捕获）
 
 ## 背景与问题
 

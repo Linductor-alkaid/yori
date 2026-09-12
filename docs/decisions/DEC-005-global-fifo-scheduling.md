@@ -1,10 +1,10 @@
 # DEC-005：MVP 全局 FIFO 调度策略
 
-> 状态：Accepted
+> 状态：Accepted（第 2 条"不得跳过队首"条款由 [DEC-012](DEC-012-gpu-placement-policy.md) 修订为"FIFO 服务顺序 + 有界跳过"，2026-09-12；其余条款继续生效）
 > 日期：2026-09-04
 > 负责人：Linductor-alkaid
 > 冻结里程碑：M1
-> 替代/被替代：无
+> 替代/被替代：部分被 [DEC-012](DEC-012-gpu-placement-policy.md) 修订（队首阻塞与 GPU placement）
 
 ## 背景与问题
 
