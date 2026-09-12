@@ -35,7 +35,7 @@ yori submit 提交 Job -> yorid 全局队列排队 -> Scheduler 匹配空闲 GPU
 `yori_<version>_<arch>.deb`，在服务器上安装：
 
 ```bash
-sudo apt install ./yori_0.1.3_amd64.deb
+sudo apt install ./yori_0.2.0_amd64.deb
 ```
 
 安装即完成：`yori`/`yorid` 进入 PATH、创建 `yori` 系统组、写入
@@ -81,34 +81,51 @@ yori tensorboard 1                                # 以本人身份拉起 Tensor
 yori cancel 1                                     # 取消（排队期或运行期）
 ```
 
-提交选项：`--gpus N`（MVP 仅 1）、`--cwd DIR`、`--env K=V`、
-`--tensorboard-logdir DIR`；命令以 `--` 分隔。CLI 全局 `--socket` 或
-`YORI_SOCKET` 指定端点（默认 `/run/yori/yori.sock`）。
+提交选项：`--gpus N`（MVP 仅 1）、`--cwd DIR`（缺省取当前目录）、
+`--env K=V`、`--inherit-env`（显式全量继承）、`--capture-env KEY`（扩展
+捕获白名单）、`--tensorboard-logdir DIR`；命令以 `--` 分隔。CLI 全局
+`--socket` 或 `YORI_SOCKET` 指定端点（默认 `/run/yori/yori.sock`）。
+
+自 v0.2.0 起，`submit` 在提交瞬间捕获执行上下文（DEC-011）：按白名单记录
+当前终端的关键环境变量（`PATH`/`PYTHONPATH`/`LD_LIBRARY_PATH`、
+`CONDA_PREFIX`/`CONDA_DEFAULT_ENV`/`VIRTUAL_ENV`、`CUDA_HOME`/`CUDA_PATH`、
+`OMP/MKL_NUM_THREADS`、代理变量含小写形式），并以捕获后的 `PATH` 把
+`argv[0]` 解析为绝对路径持久化——解析失败或不可执行时**拒绝提交**（把
+"解释器选错"从排队数小时后提前到提交瞬间）。GPU 管理键
+（`CUDA_VISIBLE_DEVICES` 等）与 `YORI_*` 变量不捕获、不允许经 `--env`
+设置；调度器注入的 `YORI_JOB_ID`/`YORI_GPU_UUID` 永远胜出。
+
+```bash
+yori inspect 1     # 查看执行上下文与 provenance（owner/admin；敏感 env 值
+                   # 如 *TOKEN*/*KEY*/*SECRET*/*PASSWORD* 由 daemon 掩码）
+```
 
 ### 训练环境（conda / venv）
 
-任务环境**不继承**提交会话（DEC-006：环境只来自 daemon 白名单 + 显式
-`--env`，保证可复现、不泄漏会话变量），`HOME`/`USER` 等身份变量由 daemon
-按提交用户注入。训练在特定 conda 环境运行时，任选其一（venv 同理）：
+**已激活环境里能直接跑的命令，排队执行语义一致（v0.2.0，DEC-011）**：在
+你激活了 conda/venv 的终端里直接提交即可——提交瞬间的解释器路径与环境
+（白名单变量）被快照式捕获并在获得 GPU 启动时恢复，排队期间的环境变化
+不影响已提交的任务：
 
 ```bash
-# A. 推荐：直接用环境的绝对路径解释器（python 按自身路径定位 site-packages）
-yori submit --cwd ~/train -- ~/miniconda3/envs/rl/bin/python train.py
-
-# B. 标准 conda 激活语义：经登录 shell 加载你自己的 conda init（bash -l 读
-#    ~/.profile -> ~/.bashrc）。LD_LIBRARY_PATH 等激活副作用在 Job 内自然
-#    生效（--env 不能传保留键 LD_LIBRARY_PATH，shell 内激活不受此限）。
-yori submit --cwd ~/train -- /bin/bash -lc 'conda activate rl && python train.py'
-
-# C. conda run（--no-capture-output 保证 logs -f 实时流式）
-yori submit --cwd ~/train -- ~/miniconda3/bin/conda run -n rl --no-capture-output \
-    python train.py
+conda activate rl
+yori submit --cwd ~/train -- python train.py    # 直接可用
 ```
 
-每个用户的 conda 装在自己家目录下也没关系：Job 以提交用户身份运行（含其
-supplementary groups），`HOME` 指向该用户家目录，方案 B 经各自的 shell 配置
-定位各自的 conda。也可用 `--env PATH=...`、`--env CONDA_DEFAULT_ENV=...`
-显式覆盖（用户 `--env` 最后合并，可覆盖 daemon 的 PATH）。
+补充说明：
+
+- `--env K=V` 在捕获结果上显式追加/覆盖；`--inherit-env` 显式全量继承
+  （仍过滤保留键，受 env 总量上限约束，超限提交失败并具名报错）；
+  `--capture-env KEY` 按需扩展捕获白名单（如 `JAX_PLATFORMS`）。
+- 保留键（`HOME`/`USER` 等身份变量、`CUDA_VISIBLE_DEVICES`/
+  `CUDA_DEVICE_ORDER`、`LD_PRELOAD`、`YORI_*` 前缀）不可经 `--env` 设置；
+  身份变量由 daemon 按提交用户注入，GPU 变量由调度器注入。
+  `LD_LIBRARY_PATH` 已转入捕获白名单（降权先于 exec，与直接执行等价）。
+- 不理解 conda/venv 语义，也不执行 `conda activate`：需要 Shell 语义
+  （管道、`&&`）时显式表达为 `yori submit -- bash -c '<command>'`。
+- 兼容旧写法：绝对路径解释器（`~/miniconda3/envs/rl/bin/python`）与
+  `bash -lc 'conda activate ... && ...'` 依然可用；旧版 daemon（< 0.2.0）
+  不做捕获，仍需这些配方或显式 `--env`。
 
 ## 运维要点
 
