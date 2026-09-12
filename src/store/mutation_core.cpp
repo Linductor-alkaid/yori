@@ -8,7 +8,8 @@ namespace {
 
 bool same_spec(const job::JobSpec& lhs, const job::JobSpec& rhs) {
   return lhs.owner_uid == rhs.owner_uid && lhs.owner_gid == rhs.owner_gid && lhs.argv == rhs.argv &&
-         lhs.cwd == rhs.cwd && lhs.env == rhs.env && lhs.gpu_request == rhs.gpu_request &&
+         lhs.cwd == rhs.cwd && lhs.env == rhs.env && lhs.executable == rhs.executable &&
+         lhs.env_metadata == rhs.env_metadata && lhs.gpu_request == rhs.gpu_request &&
          lhs.launch_profile == rhs.launch_profile &&
          lhs.tensorboard_logdir == rhs.tensorboard_logdir && lhs.submit_time == rhs.submit_time;
 }

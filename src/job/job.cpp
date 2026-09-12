@@ -123,6 +123,18 @@ JobSpecValidationResult validate(const JobSpec& spec) noexcept {
   if (spec.gpu_request != 1) {
     return {JobSpecErrorCode::kUnsupportedGpuRequest, std::nullopt};
   }
+  // DEC-011：executable 为提交时解析的 argv[0] 绝对路径（可选；空 = 未捕获）。
+  if (spec.executable &&
+      (spec.executable->empty() || spec.executable->size() > JobSpecLimits::kMaxExecutableBytes ||
+       contains_nul(*spec.executable) || spec.executable->front() != '/')) {
+    return {JobSpecErrorCode::kInvalidExecutable, std::nullopt};
+  }
+  if (spec.env_metadata && spec.env_metadata->python_version &&
+      (spec.env_metadata->python_version->empty() ||
+       spec.env_metadata->python_version->size() > JobSpecLimits::kMaxPythonVersionBytes ||
+       contains_nul(*spec.env_metadata->python_version))) {
+    return {JobSpecErrorCode::kInvalidPythonVersion, std::nullopt};
+  }
   if (spec.launch_profile && (spec.launch_profile->empty() ||
                               spec.launch_profile->size() > JobSpecLimits::kMaxLaunchProfileBytes ||
                               contains_nul(*spec.launch_profile))) {
@@ -173,8 +185,24 @@ const char* to_string(JobSpecErrorCode code) noexcept {
       return "INVALID_TENSORBOARD_LOGDIR";
     case JobSpecErrorCode::kInvalidSubmitTime:
       return "INVALID_SUBMIT_TIME";
+    case JobSpecErrorCode::kInvalidExecutable:
+      return "INVALID_EXECUTABLE";
+    case JobSpecErrorCode::kInvalidPythonVersion:
+      return "INVALID_PYTHON_VERSION";
   }
   return "UNKNOWN";
+}
+
+const char* to_string(EnvSource source) noexcept {
+  switch (source) {
+    case EnvSource::kNone:
+      return "none";
+    case EnvSource::kConda:
+      return "conda";
+    case EnvSource::kVenv:
+      return "venv";
+  }
+  return "unknown";
 }
 
 const char* to_string(JobState state) noexcept {

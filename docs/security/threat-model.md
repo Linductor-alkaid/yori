@@ -72,8 +72,8 @@ yori CLI（用户会话） --> tensorboard 子进程（用户身份，默认 127
 | 23 | IPC 授权与脱敏仅在 daemon 侧判定：owner = `SO_PEERCRED` uid 相等；admin = 主 GID 匹配配置组或 UID 属于启动时解析的组成员集（客户端声明不可信）；非 owner 非 admin 的 `ps`/`queue` 仅见 JobId/状态/revision/owner_uid/退出状态，argv/cwd/tensorboard_logdir 不出现在响应；admin 组成员解析失败降级为仅主 GID 匹配 | 跨用户信息泄露（argv/日志路径/env 探测）；伪造 admin 身份绕过授权 | M5 | 授权矩阵（owner/admin/第三方 x ps/queue/gpu/cancel/logs）与脱敏字段断言（`m5.unit.ipc-service`）；协议无身份字段的结构性保证（基线 2/3）；真实多用户环境补跑见 M5 计划 |
 | 24 | `logs -f` 流式会话有界：会话数每 Job 8/全局 64、每订阅者队列 64 chunk、会话写出缓冲 2 MiB、单帧写截止 2 s（全部可配）；溢出以订阅者侧 offset 间断检出并回 BACKPRESSURE 帧后断开（含当前 offset，不静默丢弃）；写超时/对端断开的会话有界回收；流式帧解码与请求/响应共用畸形矩阵与 fuzz 集（含 golden vector）；无日志源的 Job 显式 `NOT_AVAILABLE`，不伪造流；fd 接管发生在 runtime 层流式委派，Core 契约不暴露平台类型 | 慢客户端拖垮 daemon（队头阻塞/内存耗尽）；流式 parser 漏洞成为 root 入口；会话资源耗尽 | M6 | 六场景会话单测（正常 EOF/对端断开/准入拒绝/执行中取消/写超时/shutdown）+ 慢客户端 BACKPRESSURE 负向 + `--since-*` 回放与 GAP（`m6.unit.log-follow`）；流式帧畸形矩阵与 golden vector（`m5.unit.ipc-protocol` 扩展）；fuzz 集三方向变异（`m5.fuzz.ipc-parser` 扩展）；E2E 全链路（`m6.integration.logs-follow-e2e`） |
 | 25 | `TENSORBOARD` 查询仅对 owner/admin 返回 spec.tensorboard_logdir 与 cwd（非 owner 非 admin 直接 DENIED，无脱敏视图）；`yori tensorboard` 由 CLI 以当前用户身份拉起，默认仅监听 127.0.0.1、端口默认 OS 分配，绑定更大范围必须显式 `--host`（DEC-003）；TensorBoard 进程属于用户观察会话，不占 GPU lease、不进队列 | 训练曲线与日志目录路径泄露给同机其他用户；指标面板默认暴露给网络邻居 | M6 | 授权矩阵与敏感字段不泄漏断言（`m5.unit.ipc-service` 扩展）；CLI 参数/解析优先级/回环默认 E2E（PATH 注入假二进制，`m6.integration.logs-follow-e2e`）；真实 TensorBoard 二进制不在 CI，M7 真机补跑 |
-| 26 | 捕获/显式环境变量治理：默认仅白名单捕获（DEC-011），`--env`/`--inherit-env` 为显式 opt-in 且仍过滤保留键与 `YORI_*`；`INSPECT` 仅 owner/admin，env 变量名可见、值仅 owner/admin 可见且命中敏感名模式（`*TOKEN*`/`*KEY*`/`*SECRET*`/`*PASSWORD*`，可配置）一律掩码；daemon 日志不打印 env 值；持久化沿用数据库 `0600` root 收敛（基线 8/M4） | 用户凭据（Token/Key/代理认证）经提交进入 StateStore、IPC 响应或 daemon 日志形成泄漏面；`--inherit-env` 扩大敏感变量收集 | M8（计划，DEC-011 Proposed） | 白名单边界与保留键负向测试；`--inherit-env` 超限显式失败；INSPECT 授权矩阵与脱敏断言（非 owner 非 admin DENIED、敏感值掩码）；daemon 日志无 env 值断言 |
-| 27 | `LD_LIBRARY_PATH` 从保留键转入捕获白名单（DEC-011）：安全性依赖"子进程在 `setgroups -> setgid -> setuid` 完成降权之后才 exec"这一不变量（基线 4/16），训练进程携带的 `LD_LIBRARY_PATH` 与用户在 Shell 中直接执行等价；`LD_PRELOAD` 与 `YORI_*` 前缀维持出现即拒绝 | 动态库注入（若降权顺序回归，用户可控库路径将作用于特权路径） | M8（计划，DEC-011 Proposed） | 降权先于 exec 的顺序回归测试（基线 4/16 复核纳入 M8）；`LD_PRELOAD`/`YORI_*` 保留键负向测试维持 |
+| 26 | 捕获/显式环境变量治理：默认仅白名单捕获（DEC-011），`--env`/`--inherit-env` 为显式 opt-in 且仍过滤保留键与 `YORI_*`；`INSPECT` 仅 owner/admin，env 变量名可见、值仅 owner/admin 可见且命中敏感名模式（`*TOKEN*`/`*KEY*`/`*SECRET*`/`*PASSWORD*`，可配置）一律掩码；daemon 日志不打印 env 值；持久化沿用数据库 `0600` root 收敛（基线 8/M4） | 用户凭据（Token/Key/代理认证）经提交进入 StateStore、IPC 响应或 daemon 日志形成泄漏面；`--inherit-env` 扩大敏感变量收集 | M8（已落地，DEC-011 Accepted） | 白名单边界与保留键负向（`m8.unit.environment-capture`、`m2.unit.launch-adapter` 扩展）；`--inherit-env` 超限显式失败（unit + E2E `m5.integration.ipc-e2e` M8 段）；INSPECT 授权矩阵与脱敏断言（非 owner 非 admin DENIED、敏感值掩码且原值不进协议，`m5.unit.ipc-service` 扩展 + E2E `M8_TOKEN=***` 断言）；daemon 侧无 env 值日志路径（IpcService 不输出 env 值，代码审查） |
+| 27 | `LD_LIBRARY_PATH` 从保留键转入捕获白名单（DEC-011）：安全性依赖"子进程在 `setgroups -> setgid -> setuid` 完成降权之后才 exec"这一不变量（基线 4/16），训练进程携带的 `LD_LIBRARY_PATH` 与用户在 Shell 中直接执行等价；`LD_PRELOAD` 与 `YORI_*` 前缀维持出现即拒绝 | 动态库注入（若降权顺序回归，用户可控库路径将作用于特权路径） | M8（已落地，DEC-011 Accepted） | 降权顺序不变量维持（`m2.unit.process-supervisor`/`security_process_demotion_test` 非 root 空跑 + root 补跑条件沿用 M2；E2E `m5.integration.ipc-e2e` M8 段断言捕获的 `LD_LIBRARY_PATH` 原样到达训练进程）；`LD_PRELOAD`/`YORI_*` 保留键负向（`m2.unit.launch-adapter` 扩展 + E2E 本地拒绝路径） |
 
 ## 5. 初步威胁清单（待细化）
 
@@ -115,11 +115,13 @@ yori CLI（用户会话） --> tensorboard 子进程（用户身份，默认 127
   写位/符号链接拒绝）；采纳进程退出状态不可得（恢复后自然退出为 FAILED +
   显式原因，pidfd 增强见 `POST-08`）记入残留风险；daemon 关闭 abandon 不发
   信号（RULE-10）不扩大攻击面。
-- [ ] M8/M9 实施前：执行上下文捕获与 GPU placement 的威胁细化 —— 已预置
-  基线 26（捕获环境治理与 INSPECT 脱敏）与 27（`LD_LIBRARY_PATH` 放开依赖
-  降权先于 exec 的不变量，需回归测试锁定）；M8 启动时细化 `--inherit-env`
-  与脱敏名模式矩阵；M9 复核 placement 不新增攻击面（脱敏视图不暴露
-  placement 明细，授权边界不变）。
+- [x] M8 实施中：执行上下文捕获威胁细化收口 —— 基线 26（白名单/继承
+  治理与 INSPECT 脱敏，掩码在 daemon 侧完成、原值不进协议）与 27
+  （`LD_LIBRARY_PATH` 放开依赖降权先于 exec，降权顺序不变量维持）已随
+  M8 落地并附验证证据；`--inherit-env` 超限显式失败与脱敏名模式配置化
+  （默认 `TOKEN/KEY/SECRET/PASSWORD`）已覆盖单测与 E2E。
+- [ ] M9 实施时：GPU placement 威胁复核 —— placement 不新增攻击面（脱敏
+  视图不暴露 placement 明细，授权边界不变）。
 - [ ] M7 发布前：全模型复查、残留风险清单定稿，本文件升级为 Active（含
   root/systemd/双用户真机验收后的基线 6 root 收敛复核）。
 - [ ] root 环境补跑：`m2.security.process-demotion`（DEC-004 降权身份断言，

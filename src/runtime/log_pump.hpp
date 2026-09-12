@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstddef>
 #include <executor/comm/channel.hpp>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -117,6 +118,12 @@ class LogPump final {
 
   [[nodiscard]] bool try_receive_done(LogPumpDone& out);
   [[nodiscard]] bool receive_done_for(LogPumpDone& out, std::chrono::milliseconds timeout);
+
+  // 完成事件投递成功后由 pump worker 线程调用（与 ProcessExitMonitor 的
+  // set_event_listener 同型）。消费方（JobManager worker）以通道 poll 不可达，
+  // 必须经此唤醒，否则 EOF 发布汇合（退出事件 + 泵完成）可能滞留到下一个
+  // 无关事件。回调必须非阻塞、不抛出；置空解除。
+  void set_done_listener(std::function<void()> listener);
 
   // 停止 worker（请求停止、唤醒并 join），幂等；不向子进程发送任何信号。
   void stop();

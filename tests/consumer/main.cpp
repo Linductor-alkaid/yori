@@ -75,9 +75,10 @@ int main() {
   identity.supplementary_groups = {1000};
 
   yori::launch::DefaultLaunchAdapter adapter;
-  const auto plan = adapter.prepare(
-      launch_spec, yori::launch::GpuAssignment{yori::gpu::GpuUuid{"GPU-consumer"}, 1, 0},
-      yori::launch::LaunchProfile{}, identity);
+  const auto plan =
+      adapter.prepare(yori::job::JobId{7}, launch_spec,
+                      yori::launch::GpuAssignment{yori::gpu::GpuUuid{"GPU-consumer"}, 1, 0},
+                      yori::launch::LaunchProfile{}, identity);
   if (!plan || !yori::launch::validate(plan.plan)) {
     return 1;
   }

@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <map>
 #include <yori/ipc/ipc_service.hpp>
 
 #include "testing/in_memory_state_store.hpp"
@@ -723,6 +724,163 @@ void test_tensorboard_query() {
              IpcError::kNotFound);
 }
 
+// ---------------------------------------------------------------------------
+// M8（DEC-011）：v2 SUBMIT 字段映射与 INSPECT 授权/脱敏。
+// ---------------------------------------------------------------------------
+
+IpcResponse call_inspect(IpcService& service, std::uint32_t uid, std::uint32_t gid,
+                         std::uint64_t job_id) {
+  IpcRequest request;
+  request.kind = IpcRequestKind::kInspect;
+  request.inspect.job_id = job_id;
+  return service.handle(peer(uid, gid), request);
+}
+
+void test_submit_v2_fields() {
+  Fixture fixture;
+  FakeJobControl control(fixture);
+  IpcService service = make_service(fixture, control);
+
+  // v2 捕获字段进入 JobSpec（owner 身份仍只来自 peer）。
+  IpcSubmitRequest request = valid_submit();
+  request.env = {{"PATH", "/opt/conda/bin"},
+                 {"HF_TOKEN", "secret-value"},
+                 {"LD_LIBRARY_PATH", "/opt/conda/lib"}};
+  request.executable = std::string("/opt/conda/bin/python");
+  request.env_metadata = IpcEnvMetadata{1, std::string("3.11.5")};
+  const IpcResponse response = submit(service, kAliceUid, kAliceGid, std::move(request));
+  YORI_CHECK(response.error == IpcError::kNone && response.job_id == 1);
+
+  const auto snapshot = fixture.store.load().snapshot;
+  YORI_CHECK(snapshot.jobs.size() == 1);
+  const auto& spec = snapshot.jobs[0].spec;
+  YORI_CHECK(spec.executable == std::string("/opt/conda/bin/python"));
+  YORI_CHECK(spec.env_metadata.has_value());
+  if (spec.env_metadata) {
+    YORI_CHECK(spec.env_metadata->source == yori::job::EnvSource::kConda);
+    YORI_CHECK(spec.env_metadata->python_version == std::string("3.11.5"));
+  }
+  YORI_CHECK(spec.env.at("LD_LIBRARY_PATH") == "/opt/conda/lib");
+
+  // 非法 executable（相对路径）映射 INVALID_SPEC。
+  IpcSubmitRequest bad = valid_submit();
+  bad.executable = std::string("relative/python");
+  const IpcResponse invalid = submit(service, kAliceUid, kAliceGid, std::move(bad));
+  YORI_CHECK(invalid.error == IpcError::kInvalidSpec);
+  YORI_CHECK(invalid.detail ==
+             yori::job::to_string(yori::job::JobSpecErrorCode::kInvalidExecutable));
+}
+
+void test_inspect() {
+  Fixture fixture;
+  FakeJobControl control(fixture);
+  IpcService service = make_service(fixture, control);
+
+  // 提交一个带捕获的 Job（含敏感名与非敏感名）。
+  IpcSubmitRequest request = valid_submit();
+  request.env = {{"PATH", "/opt/conda/bin"},
+                 {"HF_TOKEN", "secret-value"},
+                 {"AWS_SECRET_ACCESS_KEY", "k=value"},
+                 {"MY_API_KEY", "abc"},
+                 {"PASSWORD", "pw"},
+                 {"http_proxy", "http://p:1"}};
+  request.executable = std::string("/opt/conda/bin/python");
+  request.env_metadata = IpcEnvMetadata{1, std::string("3.11.5")};
+  const std::map<std::string, std::string> expected_env = request.env;
+  YORI_CHECK(submit(service, kAliceUid, kAliceGid, std::move(request)).error == IpcError::kNone);
+
+  // owner：变量名全可见；敏感名值掩码；非敏感值原样。
+  const IpcResponse owner_view = call_inspect(service, kAliceUid, kAliceGid, 1);
+  YORI_CHECK(owner_view.error == IpcError::kNone);
+  YORI_CHECK(owner_view.inspect.cwd == "/srv/training");
+  YORI_CHECK(owner_view.inspect.executable == std::string("/opt/conda/bin/python"));
+  YORI_CHECK(owner_view.inspect.argv == valid_submit().argv);
+  YORI_CHECK(owner_view.inspect.env_metadata.has_value() &&
+             owner_view.inspect.env_metadata->source == 1 &&
+             owner_view.inspect.env_metadata->python_version == std::string("3.11.5"));
+  YORI_CHECK(owner_view.inspect.env.size() == 6);
+  for (const IpcEnvEntry& entry : owner_view.inspect.env) {
+    const bool sensitive = entry.name.find("TOKEN") != std::string::npos ||
+                           entry.name.find("KEY") != std::string::npos ||
+                           entry.name.find("SECRET") != std::string::npos ||
+                           entry.name.find("PASSWORD") != std::string::npos;
+    YORI_CHECK(entry.masked == sensitive);
+    YORI_CHECK(entry.value == (sensitive ? std::string{"***"} : expected_env.at(entry.name)));
+  }
+  // QUEUED：无分配结果。
+  YORI_CHECK(!owner_view.inspect.gpu_uuid.has_value());
+  YORI_CHECK(owner_view.inspect.submit_time_unix_ns > 0);
+
+  // 第三方：DENIED（无脱敏视图）；admin：放行且同样掩码。
+  YORI_CHECK(call_inspect(service, kBobUid, kBobGid, 1).error == IpcError::kDenied);
+  const IpcResponse admin_view = call_inspect(service, kBobUid, kAdminGid, 1);
+  YORI_CHECK(admin_view.error == IpcError::kNone);
+  YORI_CHECK(admin_view.inspect.env.size() == 6);
+
+  // 不存在的 Job。
+  YORI_CHECK(call_inspect(service, kAliceUid, kAliceGid, 77).error == IpcError::kNotFound);
+
+  // 自定义敏感模式（配置级）：默认模式之外的名字按配置判定。
+  IpcServiceConfig config = service_config();
+  config.sensitive_env_patterns = {"PRIVATE"};
+  FakeJobControl control2(fixture);
+  IpcService custom(config, fixture.store, fixture.gpu_status, fixture.log_reader, control2);
+  IpcSubmitRequest plain = valid_submit();
+  plain.env = {{"HF_TOKEN", "v"}, {"MY_PRIVATE_VAR", "v"}};
+  YORI_CHECK(submit(custom, kAliceUid, kAliceGid, std::move(plain)).error == IpcError::kNone);
+  const IpcResponse custom_view = call_inspect(custom, kAliceUid, kAliceGid, 2);
+  YORI_CHECK(custom_view.error == IpcError::kNone);
+  for (const IpcEnvEntry& entry : custom_view.inspect.env) {
+    YORI_CHECK(entry.masked == (entry.name == "MY_PRIVATE_VAR"));
+  }
+}
+
+void test_inspect_allocation_view() {
+  Fixture fixture;
+  FakeJobControl control(fixture);
+  IpcService service = make_service(fixture, control);
+
+  // 已启动（RUNNING）+ lease 的 Job：展示分配结果（lease 事实 + 观测索引）。
+  // leaseable 状态与 lease 必须同一 mutation 落盘（lease 矩阵整体校验）。
+  seed_job(fixture.store, JobId{1}, kAliceUid, JobState::kQueued);
+  const auto seeded = fixture.store.load().snapshot;
+  yori::store::StoredJob running;
+  for (const auto& record : seeded.jobs) {
+    if (record.id == JobId{1}) {
+      running = record;
+    }
+  }
+  running.state = JobState::kStarting;  // identity 可选的 leaseable 状态
+  running.revision = 1;
+  running.execution.log_path = "/var/lib/yori/jobs/1";
+  yori::store::StateMutation lease_mutation;
+  lease_mutation.update_jobs.push_back(std::move(running));
+  lease_mutation.acquire_leases.push_back(
+      yori::gpu::GpuLease{yori::gpu::GpuUuid{"GPU-abcdef"}, JobId{1}});
+  lease_mutation.expected_revision = seeded.revision;
+  YORI_CHECK(fixture.store.apply(lease_mutation).ok());
+
+  fixture.gpu_status.has_snapshot = true;
+  yori::gpu::GpuObservation observation;
+  observation.uuid = yori::gpu::GpuUuid{"GPU-abcdef"};
+  observation.index = 3;
+  fixture.gpu_status.snapshot.devices.push_back(observation);
+
+  const IpcResponse view = call_inspect(service, kAliceUid, kAliceGid, 1);
+  YORI_CHECK(view.error == IpcError::kNone);
+  YORI_CHECK(view.inspect.gpu_uuid == std::string("GPU-abcdef"));
+  YORI_CHECK(view.inspect.gpu_index == std::uint32_t{3});
+  YORI_CHECK(view.inspect.log_path == std::string("/var/lib/yori/jobs/1"));
+  YORI_CHECK(view.inspect.state == static_cast<std::uint8_t>(JobState::kStarting));
+
+  // 无 GPU 观测时仍有 lease uuid，无索引。
+  fixture.gpu_status.has_snapshot = false;
+  const IpcResponse no_observation = call_inspect(service, kAliceUid, kAliceGid, 1);
+  YORI_CHECK(no_observation.error == IpcError::kNone);
+  YORI_CHECK(no_observation.inspect.gpu_uuid == std::string("GPU-abcdef"));
+  YORI_CHECK(!no_observation.inspect.gpu_index.has_value());
+}
+
 int main() {
   test_submit_basics();
   test_queue_capacity_rollback();
@@ -735,6 +893,9 @@ int main() {
   test_file_log_reader();
   test_logs_follow_validation();
   test_tensorboard_query();
+  test_submit_v2_fields();
+  test_inspect();
+  test_inspect_allocation_view();
   if (yori::testing::failure_count != 0) {
     std::fprintf(stderr, "ipc service: %d failure(s)\n", yori::testing::failure_count);
     return 1;

@@ -145,6 +145,7 @@ struct LaunchPlanLimits final {
   static constexpr std::size_t kMaxEnvironmentValueBytes =
       job::JobSpecLimits::kMaxEnvironmentValueBytes;
   static constexpr std::size_t kMaxEnvironmentBytes = job::JobSpecLimits::kMaxEnvironmentBytes;
+  static constexpr std::size_t kMaxExecutableBytes = job::JobSpecLimits::kMaxExecutableBytes;
 };
 
 using EnvironmentEntry = std::pair<std::string, std::string>;
@@ -153,10 +154,13 @@ using EnvironmentEntry = std::pair<std::string, std::string>;
 // cwd 为空表示继承 daemon 当前目录；其余字段由 LaunchAdapter 保证有界。
 // supplementary_groups 由 IdentityResolver 在 fork 前解析（DEC-006），子进程仅执行
 // setgroups -> setgid -> setuid 三个 syscall 封装。
+// executable 为提交时解析的 argv[0] 绝对路径（DEC-011）：非空时 spawn 直接
+// execve(executable)，argv[0] 保持用户输入形式；空时沿用 argv[0] + PATH 搜索。
 struct LaunchPlan final {
   std::vector<std::string> argv;
   std::vector<EnvironmentEntry> env;
   std::string cwd;
+  std::string executable;
   std::uint32_t uid{0};
   std::uint32_t gid{0};
   std::string username;
@@ -177,8 +181,10 @@ enum class LaunchPlanErrorCode {
   kEnvironmentNameTooLong,
   kEnvironmentValueTooLong,
   kEnvironmentTooLarge,
+  kInvalidExecutable,
   kInvalidIdentity,
   kInvalidUsername,
+  kInvalidJobId,
 };
 
 struct LaunchPlanValidationResult final {
@@ -205,8 +211,9 @@ struct EnvironmentPolicy final {
   [[nodiscard]] bool accepts(const std::string& name) const;
 };
 
-// 保留键：身份块与 GPU/动态链接器安全键。出现在 JobSpec.env 中即拒绝整个
-// LaunchPlan（DEC-006）。
+// 保留键（DEC-006，DEC-011 修订）：身份四键、GPU 管理键与 `LD_PRELOAD` 出现
+// 即拒绝；`YORI_*` 前缀视为对 Yori 管理面的伪造尝试同样拒绝。`LD_LIBRARY_PATH`
+// 已转入捕获白名单（DEC-011 决策 5，安全性依赖降权先于 exec）。
 [[nodiscard]] bool is_reserved_environment_key(const std::string& name);
 
 enum class LaunchPrepareErrorCode {
@@ -233,14 +240,17 @@ class LaunchAdapter {
  public:
   virtual ~LaunchAdapter() = default;
 
-  [[nodiscard]] virtual LaunchPlanResult prepare(const job::JobSpec& spec,
+  [[nodiscard]] virtual LaunchPlanResult prepare(job::JobId job_id, const job::JobSpec& spec,
                                                  const GpuAssignment& assignment,
                                                  const LaunchProfile& profile,
                                                  const IdentityInfo& identity) = 0;
 };
 
-// DEC-006 的默认实现。daemon 环境快照经 set_daemon_environment 注入（通常来自
-// environ），未注入时不继承任何 daemon 变量。
+// DEC-006 + DEC-011 合并 v2 的默认实现。daemon 环境快照经 set_daemon_environment
+// 注入（通常来自 environ），未注入时不继承任何 daemon 变量。四层合并次序：
+// 身份块（不可覆盖）-> daemon 白名单 -> 捕获的用户执行上下文（spec.env）->
+// Yori 资源块最后写入（CUDA_VISIBLE_DEVICES/CUDA_DEVICE_ORDER/YORI_JOB_ID/
+// YORI_GPU_UUID）。
 class DefaultLaunchAdapter final : public LaunchAdapter {
  public:
   DefaultLaunchAdapter() = default;
@@ -249,7 +259,8 @@ class DefaultLaunchAdapter final : public LaunchAdapter {
   void set_daemon_environment(std::vector<EnvironmentEntry> environment);
   void set_environment_policy(EnvironmentPolicy policy);
 
-  [[nodiscard]] LaunchPlanResult prepare(const job::JobSpec& spec, const GpuAssignment& assignment,
+  [[nodiscard]] LaunchPlanResult prepare(job::JobId job_id, const job::JobSpec& spec,
+                                         const GpuAssignment& assignment,
                                          const LaunchProfile& profile,
                                          const IdentityInfo& identity) override;
 

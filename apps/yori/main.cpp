@@ -17,6 +17,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 #include <yori/gpu/gpu_provider.hpp>
@@ -24,6 +25,7 @@
 #include <yori/ipc/ipc_transport.hpp>
 #include <yori/ipc/uds_client.hpp>
 #include <yori/job/job.hpp>
+#include <yori/launch/environment_capture.hpp>
 
 namespace {
 
@@ -97,7 +99,10 @@ void print_usage() {
                "usage: yori [--socket PATH] <command> [args]\n"
                "commands:\n"
                "  submit [--gpus N] [--tensorboard-logdir DIR] [--cwd DIR]\n"
-               "         [--env K=V]... -- CMD [ARG]...\n"
+               "         [--env K=V]... [--inherit-env] [--capture-env KEY]...\n"
+               "         -- CMD [ARG]...\n"
+               "         (captures the current execution context per DEC-011:\n"
+               "          whitelist env, resolves CMD via the captured PATH)\n"
                "  ps                          list jobs (own jobs in full, others masked)\n"
                "  queue                       list queued jobs in FIFO order\n"
                "  gpu                         list GPUs with logical state\n"
@@ -105,6 +110,8 @@ void print_usage() {
                "  logs [--bytes N] <job-id>   print current log tail\n"
                "  logs -f [--since-stdout N] [--since-stderr N] <job-id>\n"
                "                              follow logs (GAP/EOF/BACKPRESSURE aware)\n"
+               "  inspect <job-id>            show execution context and provenance\n"
+               "                              (owner/admin; sensitive env masked)\n"
                "  tensorboard [--logdir DIR] [--port N] [--host H] <job-id>\n"
                "                              run TensorBoard for a job in this session\n"
                "options:\n"
@@ -133,6 +140,16 @@ class CommandLine final {
         value = arguments_[i + 1];
         arguments_.erase(arguments_.begin() + static_cast<std::ptrdiff_t>(i),
                          arguments_.begin() + static_cast<std::ptrdiff_t>(i + 2));
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool take_bool_flag(const std::string& name) {
+    for (std::size_t i = 0; i < arguments_.size(); ++i) {
+      if (arguments_[i] == name) {
+        arguments_.erase(arguments_.begin() + static_cast<std::ptrdiff_t>(i));
         return true;
       }
     }
@@ -175,6 +192,8 @@ int fail_request(const std::string& command, const yori::ipc::IpcResponse& respo
 int command_submit(const std::string& socket_path, std::vector<std::string> arguments) {
   yori::ipc::IpcSubmitRequest submit;
   std::uint32_t gpus = 1;
+  bool inherit_env = false;
+  std::vector<std::string> capture_extra;
 
   CommandLine parser(std::move(arguments));
   std::string value;
@@ -199,14 +218,18 @@ int command_submit(const std::string& socket_path, std::vector<std::string> argu
   while (parser.take_flag("--cwd", value)) {
     submit.cwd = value;
   }
-  std::map<std::string, std::string> env;
+  while (parser.take_flag("--capture-env", value)) {
+    capture_extra.push_back(value);
+  }
+  inherit_env = parser.take_bool_flag("--inherit-env");
+  std::map<std::string, std::string> explicit_env;
   while (parser.take_flag("--env", value)) {
     const std::size_t separator = value.find('=');
     if (separator == std::string::npos || separator == 0) {
       std::fprintf(stderr, "yori: --env expects K=V\n");
       return kExitUsage;
     }
-    env.emplace(value.substr(0, separator), value.substr(separator + 1));
+    explicit_env[value.substr(0, separator)] = value.substr(separator + 1);
   }
 
   const std::vector<std::string>& rest = parser.remaining();
@@ -227,7 +250,62 @@ int command_submit(const std::string& socket_path, std::vector<std::string> argu
     }
     submit.cwd = cwd.data();
   }
-  submit.env = std::move(env);
+
+  // ---- 执行上下文捕获（DEC-011）--------------------------------------------
+  // 显式 --env 的保留键本地拒绝（fail-fast；daemon 侧 launch 校验仍为权威）。
+  for (const auto& [name, entry_value] : explicit_env) {
+    static_cast<void>(entry_value);
+    if (yori::launch::is_reserved_environment_key(name)) {
+      std::fprintf(stderr, "yori: --env may not set reserved key %s\n", name.c_str());
+      return kExitUsage;
+    }
+  }
+
+  yori::launch::EnvironmentCapturePolicy policy;
+  policy.inherit_all = inherit_env;
+  policy.extra_keys = std::move(capture_extra);
+  std::vector<yori::launch::EnvironmentEntry> source;
+  for (char** entry = environ; entry != nullptr && *entry != nullptr; ++entry) {
+    const std::string_view raw{*entry};
+    const std::size_t separator = raw.find('=');
+    if (separator == std::string_view::npos || separator == 0) {
+      continue;  // 畸形条目由捕获策略跳过
+    }
+    source.emplace_back(std::string{raw.substr(0, separator)},
+                        std::string{raw.substr(separator + 1)});
+  }
+  const yori::launch::EnvironmentCaptureResult captured =
+      yori::launch::capture_environment(source, policy);
+  if (!captured) {
+    std::fprintf(stderr, "yori: captured environment rejected: %s (%s)%s\n",
+                 yori::launch::to_string(captured.code), captured.offending_name.c_str(),
+                 inherit_env ? "; --inherit-env collects the full environment, unset what is"
+                               " not needed"
+                             : "");
+    return kExitUsage;
+  }
+  submit.env = captured.env;
+  for (auto& [name, entry_value] : explicit_env) {
+    submit.env[name] = std::move(entry_value);
+  }
+
+  // executable 提交时解析（fail-fast，DEC-011 决策 3）：以捕获后的 PATH。
+  const yori::launch::ExecutableResolveResult resolved =
+      yori::launch::resolve_executable(submit.argv.front(), submit.cwd, submit.env);
+  if (!resolved) {
+    std::fprintf(stderr, "yori: cannot resolve command '%s': %s%s%s\n", submit.argv.front().c_str(),
+                 yori::launch::to_string(resolved.code), resolved.message.empty() ? "" : ": ",
+                 resolved.message.c_str());
+    return kExitUsage;
+  }
+  submit.executable = resolved.executable;
+
+  // 环境来源元数据（判定基于最终提交环境）与可选 python 版本探测。
+  yori::ipc::IpcEnvMetadata metadata;
+  metadata.source = static_cast<std::uint8_t>(yori::launch::detect_environment_source(submit.env));
+  metadata.python_version = yori::launch::probe_python_version(resolved.executable);
+  submit.env_metadata = std::move(metadata);
+
   submit.gpu_request = 1;
 
   yori::ipc::IpcRequest request;
@@ -576,6 +654,93 @@ int command_logs(const std::string& socket_path, std::vector<std::string> argume
   return kExitOk;
 }
 
+const char* environment_source_name(std::uint8_t source) {
+  switch (static_cast<yori::job::EnvSource>(source)) {
+    case yori::job::EnvSource::kNone:
+      return "none";
+    case yori::job::EnvSource::kConda:
+      return "conda";
+    case yori::job::EnvSource::kVenv:
+      return "venv";
+  }
+  return "unknown";
+}
+
+int command_inspect(const std::string& socket_path, const std::string& job_text) {
+  std::uint64_t job_id = 0;
+  if (!parse_u64(job_text.c_str(), job_id) || job_id == 0) {
+    std::fprintf(stderr, "yori: inspect expects a numeric job id\n");
+    return kExitUsage;
+  }
+  yori::ipc::IpcRequest request;
+  request.kind = yori::ipc::IpcRequestKind::kInspect;
+  request.inspect.job_id = job_id;
+
+  yori::ipc::IpcResponse response;
+  const int status = call_daemon(socket_path, request, response);
+  if (status != kExitOk) {
+    if (status == kExitRequestFailed) {
+      return fail_request("inspect", response);
+    }
+    return status;
+  }
+
+  const yori::ipc::IpcInspectPayload& inspect = response.inspect;
+  const auto submitted_seconds = static_cast<std::time_t>(inspect.submit_time_unix_ns / 1000000000);
+  std::array<char, 32> submitted{};
+  const auto* broken = std::localtime(&submitted_seconds);
+  if (broken != nullptr) {
+    static_cast<void>(
+        std::strftime(submitted.data(), submitted.size(), "%Y-%m-%d %H:%M:%S", broken));
+  }
+
+  std::printf("job:         %llu\n", static_cast<unsigned long long>(inspect.job_id));
+  std::printf("state:       %s (revision %llu)\n", job_state_name(inspect.state),
+              static_cast<unsigned long long>(inspect.revision));
+  std::printf("owner uid:   %u\n", inspect.owner_uid);
+  std::printf("submitted:   %s\n", submitted.data());
+  std::printf("cwd:         %s\n", inspect.cwd.c_str());
+  std::printf("executable:  %s\n",
+              inspect.executable ? inspect.executable->c_str() : "(not captured)");
+  std::string command;
+  for (std::size_t i = 0; i < inspect.argv.size(); ++i) {
+    if (i > 0) {
+      command += " ";
+    }
+    command += inspect.argv[i];
+  }
+  std::printf("command:     %s\n", command.c_str());
+  if (inspect.env_metadata) {
+    std::printf("environment: %s", environment_source_name(inspect.env_metadata->source));
+    if (inspect.env_metadata->python_version) {
+      std::printf(" (python %s)", inspect.env_metadata->python_version->c_str());
+    }
+    std::printf("\n");
+  }
+  if (inspect.gpu_uuid) {
+    if (inspect.gpu_index) {
+      std::printf("assigned:    %s (index %u)\n", inspect.gpu_uuid->c_str(), *inspect.gpu_index);
+    } else {
+      std::printf("assigned:    %s\n", inspect.gpu_uuid->c_str());
+    }
+  } else {
+    std::printf("assigned:    (not scheduled yet)\n");
+  }
+  if (inspect.exit) {
+    std::printf("exit:        %s (%d)\n", inspect.exit->exited_normally ? "exited" : "signaled",
+                inspect.exit->code);
+  }
+  if (inspect.log_path) {
+    std::printf("logs:        %s\n", inspect.log_path->c_str());
+  }
+  std::printf("environment (%zu variables; sensitive values masked by daemon):\n",
+              inspect.env.size());
+  for (const yori::ipc::IpcEnvEntry& entry : inspect.env) {
+    std::printf("  %s=%s\n", entry.name.c_str(), entry.value.c_str());
+  }
+  return kExitOk;
+}
+
 // ---------------------------------------------------------------------------
 // yori tensorboard（DEC-003）：CLI 用户会话拉起，前台运行，CLI 退出即终止。
 // ---------------------------------------------------------------------------
@@ -816,6 +981,13 @@ int main(int argc, char* argv[]) {
   }
   if (command == "logs") {
     return command_logs(socket_path, std::move(command_args));
+  }
+  if (command == "inspect") {
+    if (command_args.size() != 1) {
+      std::fprintf(stderr, "yori: inspect requires exactly one job id\n");
+      return kExitUsage;
+    }
+    return command_inspect(socket_path, command_args.front());
   }
   if (command == "tensorboard") {
     return command_tensorboard(socket_path, std::move(command_args));

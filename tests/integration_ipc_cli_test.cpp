@@ -1,10 +1,16 @@
+#include <dirent.h>
+#include <fcntl.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <thread>
@@ -39,6 +45,20 @@ std::string make_directory() {
   return directory;
 }
 
+// 阶段标记（stderr 无缓冲）：CI 偶发超时时定位挂点（ctest --output-on-failure）。
+void phase(const char* marker) {
+  const auto now = std::chrono::system_clock::now();
+  const std::time_t seconds = std::chrono::system_clock::to_time_t(now);
+  struct ::tm broken {};
+  ::localtime_r(&seconds, &broken);
+  std::fprintf(
+      stderr, "[e2e %02d:%02d:%02d.%03d] %s\n", broken.tm_hour, broken.tm_min, broken.tm_sec,
+      static_cast<int>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() %
+          1000),
+      marker);
+}
+
 std::string read_file(const std::string& path) {
   FILE* file = std::fopen(path.c_str(), "rb");
   if (file == nullptr) {
@@ -52,6 +72,111 @@ std::string read_file(const std::string& path) {
   }
   std::fclose(file);
   return data;
+}
+
+// logs -f 的有界运行（看门狗）：偶发竞态导致 CLI 无限等待时（PR #18 复盘），
+// 转储诊断（daemon 跟随会话统计 + 卡住进程的内核等待点）后击杀并以失败
+// 返回，把 180s 静默超时变成有界、可定位的失败。参数不含空格（本测试的
+// logs -f 形态保证）。
+struct BoundedCliRun final {
+  bool stalled{false};
+  int exit_code{-1};
+  std::string out;
+  std::string err;
+};
+
+BoundedCliRun run_cli_bounded(const std::string& directory, const std::string& socket_path,
+                              const std::string& arguments, int stall_ms) {
+  BoundedCliRun result;
+  const std::string out_path = directory + "/bounded-out.txt";
+  const std::string err_path = directory + "/bounded-err.txt";
+
+  std::vector<std::string> words{YORI_CLI_BIN, "--socket", socket_path};
+  std::size_t begin = 0;
+  while (begin <= arguments.size()) {
+    const std::size_t end = arguments.find(' ', begin);
+    const std::size_t length = (end == std::string::npos ? arguments.size() : end) - begin;
+    if (length > 0) {
+      words.emplace_back(arguments.substr(begin, length));
+    }
+    if (end == std::string::npos) {
+      break;
+    }
+    begin = end + 1;
+  }
+  std::vector<char*> argv;
+  argv.reserve(words.size() + 1);
+  for (const std::string& word : words) {
+    argv.push_back(const_cast<char*>(word.c_str()));
+  }
+  argv.push_back(nullptr);
+
+  const pid_t child = ::fork();
+  if (child == 0) {
+    const int out_fd = ::open(out_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    const int err_fd = ::open(err_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (out_fd >= 0) {
+      static_cast<void>(::dup2(out_fd, STDOUT_FILENO));
+    }
+    if (err_fd >= 0) {
+      static_cast<void>(::dup2(err_fd, STDERR_FILENO));
+    }
+    ::execv(YORI_CLI_BIN, argv.data());
+    ::_exit(127);
+  }
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds{stall_ms};
+  int status = 0;
+  while (std::chrono::steady_clock::now() < deadline) {
+    const pid_t reaped = ::waitpid(child, &status, WNOHANG);
+    if (reaped == child) {
+      result.exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+      result.out = read_file(out_path);
+      result.err = read_file(err_path);
+      return result;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+  }
+
+  result.stalled = true;
+  std::fprintf(stderr, "e2e: CLI stalled for %dms (pid %d); diagnostics:\n", stall_ms,
+               static_cast<int>(child));
+  const auto dump_fd_table = [](const std::string& pid, const char* label) {
+    std::fprintf(stderr, "  %s fds:\n", label);
+    const std::string fd_dir = "/proc/" + pid + "/fd";
+    DIR* handle = ::opendir(fd_dir.c_str());
+    if (handle != nullptr) {
+      const dirent* entry = nullptr;
+      while ((entry = ::readdir(handle)) != nullptr) {
+        if (entry->d_name[0] == '.') {
+          continue;
+        }
+        char target[512] = {};
+        const std::string link = fd_dir + "/" + entry->d_name;
+        const ssize_t length = ::readlink(link.c_str(), target, sizeof(target) - 1);
+        if (length > 0) {
+          std::fprintf(stderr, "    %s -> %s\n", entry->d_name, target);
+        }
+      }
+      ::closedir(handle);
+    }
+    std::ifstream syscall_file("/proc/" + pid + "/syscall");
+    if (syscall_file.is_open()) {
+      std::string call;
+      std::getline(syscall_file, call);
+      std::fprintf(stderr, "  %s syscall: %s\n", label, call.c_str());
+    }
+  };
+  dump_fd_table(std::to_string(child), "cli");
+  dump_fd_table("self", "daemon(test)");
+  result.out = read_file(out_path);
+  result.err = read_file(err_path);
+  std::fprintf(stderr, "  cli stdout so far: [%s]\n  cli stderr so far: [%s]\n", result.out.c_str(),
+               result.err.c_str());
+  static_cast<void>(::kill(child, SIGKILL));
+  while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {
+  }
+  return result;
 }
 
 bool contains(const std::string& haystack, const std::string& needle) {
@@ -68,6 +193,44 @@ int run_cli(const std::string& directory, const std::string& socket_path,
   stdout_text = read_file(directory + "/out.txt");
   stderr_text = read_file(directory + "/err.txt");
   return code == -1 ? -1 : WEXITSTATUS(code);
+}
+
+// 以指定环境前缀运行真实 CLI（env -i 起步，模拟"已激活环境"的提交终端）。
+int run_cli_env(const std::string& directory, const std::string& socket_path,
+                const std::string& env_prefix, const std::string& arguments,
+                std::string& stdout_text, std::string& stderr_text) {
+  const std::string command = env_prefix + " " + YORI_CLI_BIN + " --socket " + socket_path + " " +
+                              arguments + " > " + directory + "/out.txt 2> " + directory +
+                              "/err.txt";
+  const int code = std::system(command.c_str());
+  stdout_text = read_file(directory + "/out.txt");
+  stderr_text = read_file(directory + "/err.txt");
+  return code == -1 ? -1 : WEXITSTATUS(code);
+}
+
+// 构造假 conda 环境（M8 语义一致性用）：bin/fake-python 打印执行上下文标记
+// 后短暂驻留，供运行中 inspect 与日志断言。
+std::string write_fake_conda_env(const std::string& directory) {
+  const std::string root = directory + "/fakeenv";
+  const std::string bin = root + "/bin";
+  YORI_CHECK(::mkdir(root.c_str(), 0755) == 0 || errno == EEXIST);
+  YORI_CHECK(::mkdir(bin.c_str(), 0755) == 0 || errno == EEXIST);
+  const std::string script = bin + "/fake-python";
+  FILE* file = std::fopen(script.c_str(), "w");
+  YORI_CHECK(file != nullptr);
+  static_cast<void>(
+      std::fputs("#!/bin/sh\n"
+                 "echo \"argv0=$0\"\n"
+                 "echo \"conda=$CONDA_PREFIX\"\n"
+                 "echo \"ldp=$LD_LIBRARY_PATH\"\n"
+                 "echo \"job=$YORI_JOB_ID\"\n"
+                 "echo \"gpu=$YORI_GPU_UUID\"\n"
+                 "echo \"token=$M8_TOKEN\"\n"
+                 "sleep 3\n",
+                 file));
+  static_cast<void>(std::fclose(file));
+  YORI_CHECK(::chmod(script.c_str(), 0755) == 0);
+  return root;
 }
 
 }  // namespace
@@ -122,12 +285,35 @@ int main() {
 
   // 守护总装（M7）下的全链路：submit -> FIFO 调度 -> 真实 spawn -> 日志 ->
   // 取消升级 -> lease 释放 -> 队首推进。
+  // ps 行级状态等待：按"行首 JobId + 状态列"匹配，避免他行 FINISHED 造成
+  // 子串误报（M8 场景中多 Job 并存时必须精确）。
+  const auto ps_state_of = [&](std::uint64_t job_id, std::string& line_out) {
+    code = run_cli(directory, socket_path, "ps", out, err);
+    YORI_CHECK(code == 0);
+    const std::string prefix = std::to_string(job_id) + " ";
+    std::size_t begin = 0;
+    while (begin < out.size()) {
+      const std::size_t end = out.find('\n', begin);
+      const std::size_t length = (end == std::string::npos ? out.size() : end) - begin;
+      const std::string line = out.substr(begin, length);
+      if (line.rfind(prefix, 0) == 0) {
+        line_out = line;
+        return true;
+      }
+      if (end == std::string::npos) {
+        break;
+      }
+      begin = end + 1;
+    }
+    return false;
+  };
+
   const auto wait_for_state = [&](std::uint64_t job_id, const char* state) {
+    phase(("wait job " + std::to_string(job_id) + " -> " + state).c_str());
     const auto deadline = std::chrono::steady_clock::now() + 15s;
     while (std::chrono::steady_clock::now() < deadline) {
-      code = run_cli(directory, socket_path, "ps", out, err);
-      YORI_CHECK(code == 0);
-      if (contains(out, std::to_string(job_id)) && contains(out, state)) {
+      std::string line;
+      if (ps_state_of(job_id, line) && contains(line, state)) {
         return true;
       }
       std::this_thread::sleep_for(100ms);
@@ -135,12 +321,14 @@ int main() {
     return false;
   };
 
+  phase("submit job1");
   // job 1：长驻训练占住唯一 FREE GPU。
   code = run_cli(directory, socket_path, "submit -- /bin/sh -c 'sleep 30'", out, err);
   YORI_CHECK(code == 0);
   YORI_CHECK(contains(out, "Submitted job 1"));
   YORI_CHECK(wait_for_state(1, "RUNNING"));
 
+  phase("submit job2");
   // job 2：无空闲 GPU，保持 QUEUED（FIFO 头部阻塞，不绕过）。
   code = run_cli(directory, socket_path,
                  "submit -- /bin/sh -c 'echo e2e-stdout; echo e2e-stderr 1>&2'", out, err);
@@ -164,6 +352,7 @@ int main() {
   YORI_CHECK(contains(out, "GPU-e2e-a") && contains(out, "ALLOCATED"));
   YORI_CHECK(contains(out, "GPU-e2e-b") && contains(out, "EXTERNAL_BUSY"));
 
+  phase("cancel job1");
   // 运行中 Job 的取消（SIGTERM -> 宽限 -> SIGKILL 路径）：响应 STOPPING，
   // 随后终态 CANCELLED 并释放 lease -> job 2 自动调度（队首推进）。
   code = run_cli(directory, socket_path, "cancel 1", out, err);
@@ -174,6 +363,7 @@ int main() {
   // FIFO 链式启动：前一个释放 GPU 后，后一个自动 RUNNING -> FINISHED。
   YORI_CHECK(wait_for_state(2, "FINISHED"));
 
+  phase("logs snapshot job2");
   // 日志快照：job 2 的两路输出落盘可见（stdout 走 CLI stdout、stderr 走
   // CLI stderr）。
   code = run_cli(directory, socket_path, "logs 2", out, err);
@@ -181,13 +371,136 @@ int main() {
   YORI_CHECK(contains(out, "e2e-stdout"));
   YORI_CHECK(contains(err, "e2e-stderr"));
 
+  phase("logs -f job2");
   // logs -f：对已终态 Job 以 since=0 回放全部窗口后 EOF，退出码与终态对齐
   // （FINISHED -> 0）；无 since 时按设计从订阅时刻的流末开始（空回放）。
-  code = run_cli(directory, socket_path, "logs -f 2 --since-stdout 0 --since-stderr 0", out, err);
-  YORI_CHECK(code == 0);
+  // 偶发竞态（PR #18 复盘）会让该调用无限等待：以 30s 看门狗有界化并转储
+  // daemon 侧会话统计，失败可见而非 180s 静默超时。
+  {
+    const BoundedCliRun followed = run_cli_bounded(
+        directory, socket_path, "logs -f 2 --since-stdout 0 --since-stderr 0", 30000);
+    if (followed.stalled) {
+      const yori::runtime::LogFollowStatistics stats = daemon.log_follow_statistics();
+      std::fprintf(stderr,
+                   "  daemon follow stats: started=%llu completed=%llu disconnected=%llu"
+                   " backpressure=%llu\n",
+                   static_cast<unsigned long long>(stats.sessions_started),
+                   static_cast<unsigned long long>(stats.sessions_completed),
+                   static_cast<unsigned long long>(stats.sessions_disconnected),
+                   static_cast<unsigned long long>(stats.sessions_backpressure));
+      const yori::runtime::JobManagerStats job_stats = daemon.job_manager_stats();
+      std::fprintf(stderr, "  daemon job stats: submitted=%llu launched=%llu finished=%llu\n",
+                   static_cast<unsigned long long>(job_stats.jobs_submitted),
+                   static_cast<unsigned long long>(job_stats.jobs_launched),
+                   static_cast<unsigned long long>(job_stats.jobs_finished));
+    }
+    YORI_CHECK(!followed.stalled);
+    YORI_CHECK(followed.exit_code == 0);
+    out = followed.out;
+    err = followed.err;
+  }
   YORI_CHECK(contains(out, "e2e-stdout"));
   YORI_CHECK(contains(err, "e2e-stderr"));
 
+  phase("M8 section begin");
+  // ---- M8（DEC-011）：执行上下文捕获的端到端语义一致性 -----------------------
+  {
+    const std::string fake_root = write_fake_conda_env(directory);
+    const std::string env_prefix = "env -i PATH=" + fake_root +
+                                   "/bin:/usr/bin:/bin CONDA_PREFIX=" + fake_root +
+                                   " LD_LIBRARY_PATH=" + fake_root + "/lib VIRTUAL_ENV=/old-venv";
+
+    // 已激活 conda 环境提交：白名单捕获 + executable 按捕获 PATH 解析。
+    code = run_cli_env(directory, socket_path, env_prefix,
+                       "submit --env M8_TOKEN=secret-e2e -- fake-python", out, err);
+    YORI_CHECK(code == 0);
+    YORI_CHECK(contains(out, "Submitted job 3"));
+    YORI_CHECK(wait_for_state(3, "RUNNING"));
+
+    phase("inspect job3 running");
+    // 运行中 inspect（owner）：来源 conda、executable 为解析出的绝对路径、
+    // 敏感值掩码（原值不出现在输出）、分配结果为 lease 的 GPU。
+    code = run_cli(directory, socket_path, "inspect 3", out, err);
+    YORI_CHECK(code == 0);
+    YORI_CHECK(contains(out, "environment: conda"));
+    YORI_CHECK(contains(out, (fake_root + "/bin/fake-python").c_str()));
+    YORI_CHECK(contains(out, "assigned:    GPU-e2e-a"));
+    YORI_CHECK(contains(out, "M8_TOKEN=***"));
+    YORI_CHECK(!contains(out, "secret-e2e"));
+
+    // 快照语义 + 四层合并 + 资源块注入：训练进程读到捕获值与 Yori 资源键。
+    YORI_CHECK(wait_for_state(3, "FINISHED"));
+    code = run_cli(directory, socket_path, "logs 3", out, err);
+    YORI_CHECK(code == 0);
+    // argv[0] 保持用户输入形式；#! 脚本经内核解释器承接时 $0 显示脚本路径
+    // （ELF 直 exec 的 argv[0] 语义由 unit_process_supervisor 锁定）。
+    YORI_CHECK(contains(out, "argv0=") && contains(out, "fake-python"));
+    YORI_CHECK(contains(out, ("conda=" + fake_root).c_str()));
+    YORI_CHECK(contains(out, ("ldp=" + fake_root + "/lib").c_str()));
+    YORI_CHECK(contains(out, "job=3"));
+    YORI_CHECK(contains(out, "gpu=GPU-e2e-a"));
+    YORI_CHECK(contains(out, "token=secret-e2e"));
+    // venv 与 conda 同时存在时判定 conda（unit 已覆盖；此处确认 env 元数据
+    // 不影响运行时环境的内容）。
+    code = run_cli(directory, socket_path, "inspect 3", out, err);
+    YORI_CHECK(code == 0);
+    YORI_CHECK(contains(out, "VIRTUAL_ENV=/old-venv"));
+    YORI_CHECK(contains(out, "LD_LIBRARY_PATH=" + fake_root + "/lib"));
+
+    phase("negative resolution/env tests");
+    // executable 解析失败：提交即拒（fail-fast，本地用法错误 2）。
+    code = run_cli_env(directory, socket_path, "env -i PATH=/nonexistent-dir",
+                       "submit -- no-such-cmd", out, err);
+    YORI_CHECK(code == 2);
+    YORI_CHECK(contains(err, "cannot resolve command"));
+
+    code = run_cli(directory, socket_path, "submit -- /nonexistent/binary", out, err);
+    YORI_CHECK(code == 2);
+    YORI_CHECK(contains(err, "cannot resolve command"));
+
+    // 显式 --env 保留键：本地拒绝（YORI_* 前缀与 GPU 管理键）。
+    code = run_cli(directory, socket_path, "submit --env YORI_JOB_ID=9 -- /bin/true", out, err);
+    YORI_CHECK(code == 2);
+    YORI_CHECK(contains(err, "reserved key"));
+    code = run_cli(directory, socket_path, "submit --env CUDA_VISIBLE_DEVICES=0 -- /bin/true", out,
+                   err);
+    YORI_CHECK(code == 2);
+    YORI_CHECK(contains(err, "reserved key"));
+    code =
+        run_cli(directory, socket_path, "submit --env LD_PRELOAD=/tmp/x.so -- /bin/true", out, err);
+    YORI_CHECK(code == 2);
+    YORI_CHECK(contains(err, "reserved key"));
+
+    // --inherit-env 超限显式失败：单值超出 JobSpec 上限（本地捕获拒绝）。
+    {
+      const std::string big = directory + "/big-var.txt";
+      FILE* file = std::fopen(big.c_str(), "w");
+      YORI_CHECK(file != nullptr);
+      for (int i = 0; i < 33 * 1024; ++i) {
+        static_cast<void>(std::fputc('x', file));
+      }
+      static_cast<void>(std::fclose(file));
+      code =
+          run_cli_env(directory, socket_path, "env -i PATH=/usr/bin:/bin BIGVAR=$(cat " + big + ")",
+                      "submit --inherit-env -- /bin/true", out, err);
+      YORI_CHECK(code == 2);
+      YORI_CHECK(contains(err, "captured environment rejected"));
+      YORI_CHECK(contains(err, "BIGVAR"));
+    }
+
+    // --capture-env 扩展键：非白名单变量经扩展捕获并进入训练环境。
+    code =
+        run_cli_env(directory, socket_path, "env -i PATH=/usr/bin:/bin M8_EXTRA=via-capture",
+                    "submit --capture-env M8_EXTRA -- /bin/sh -c 'echo extra=$M8_EXTRA'", out, err);
+    YORI_CHECK(code == 0);
+    YORI_CHECK(contains(out, "Submitted job 4"));
+    YORI_CHECK(wait_for_state(4, "FINISHED"));
+    code = run_cli(directory, socket_path, "logs 4", out, err);
+    YORI_CHECK(code == 0);
+    YORI_CHECK(contains(out, "extra=via-capture"));
+  }
+
+  phase("idempotent cancel + final queue");
   // 终态幂等（RULE-04）：重复取消已 CANCELLED 的 Job 成功；不存在显式失败。
   code = run_cli(directory, socket_path, "cancel 1", out, err);
   YORI_CHECK(code == 0);
@@ -214,6 +527,7 @@ int main() {
   code = run_cli(directory, directory + "/missing.sock", "ps", out, err);
   YORI_CHECK(code == 3);
 
+  phase("daemon stop");
   // daemon 停止后：端点清理，再连失败。
   YORI_CHECK(daemon.stop() == yori::runtime::DaemonStopCode::kStopped);
   {
@@ -223,7 +537,9 @@ int main() {
   code = run_cli(directory, socket_path, "ps", out, err);
   YORI_CHECK(code == 3);
 
+  phase("executor shutdown");
   YORI_CHECK(runtime.shutdown() == yori::runtime::ExecutorRuntimeShutdownResult::kCompleted);
+  phase("done");
 
   if (yori::testing::failure_count != 0) {
     std::fprintf(stderr, "ipc e2e: %d failure(s)\n", yori::testing::failure_count);

@@ -36,15 +36,17 @@ MAX_GLIBC=2.35
 MAX_GLIBCXX=3.4.30
 
 # 独立构建树：deb 前缀 /usr（unit 的 ExecStart 随此前缀固化）。
+# CI/本地排障需要真实输出：configure/build 的静默重定向曾让 ubuntu-22.04
+# 打包失败无任何诊断（PR #18 复盘）。失败可见优先于日志洁净。
 cmake -S "${SOURCE_DIR}" -B "${BUILD_DIR}" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_INSTALL_PREFIX=/usr -DYORI_FETCH_DEPENDENCIES=OFF >/dev/null
-cmake --build "${BUILD_DIR}" >/dev/null
+  -DCMAKE_INSTALL_PREFIX=/usr -DYORI_FETCH_DEPENDENCIES=OFF
+cmake --build "${BUILD_DIR}"
 
 STAGE=$(mktemp -d)
 trap 'rm -rf "${STAGE}"' EXIT
 
 # 安装到暂存区（--prefix 覆盖真实落点；内容前缀已是 /usr）。
-cmake --install "${BUILD_DIR}" --prefix "${STAGE}/usr" >/dev/null
+cmake --install "${BUILD_DIR}" --prefix "${STAGE}/usr"
 
 # 运行时包裁剪：移除开发产物（头文件、静态库、CMake 包配置）。
 rm -rf "${STAGE}/usr/include"
@@ -132,7 +134,7 @@ EOF
 
 chmod 0755 "${STAGE}/DEBIAN/postinst" "${STAGE}/DEBIAN/prerm" "${STAGE}/DEBIAN/postrm"
 
-dpkg-deb --build "${STAGE}" "${OUT_DIR}/${DEB_NAME}" >/dev/null
+dpkg-deb --build "${STAGE}" "${OUT_DIR}/${DEB_NAME}"
 echo "build-deb: ${OUT_DIR}/${DEB_NAME}"
 
 # 符号版本上限自检：每个二进制的最高 GLIBC/GLIBCXX 需求不得超过红线，

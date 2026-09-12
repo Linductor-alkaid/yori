@@ -1,7 +1,7 @@
 # Yori 实施总计划
 
 > 状态：Active
-> 版本：1.12
+> 版本：1.13
 > 更新日期：2026-09-12
 > 负责人：Linductor-alkaid
 > 设计依据：[Yori 项目设计文档](../design/yori-project-design.md)（v0.5）
@@ -73,13 +73,17 @@
   立项 M8（提交时执行上下文捕获与恢复，
   [DEC-011](../decisions/DEC-011-execution-context-capture.md)）与 M9（GPU
   placement 亲和调度，[DEC-012](../decisions/DEC-012-gpu-placement-policy.md)）。
-  两份决策记录状态 Proposed，冻结动作为负责人确认后改 Accepted；里程碑文档
-  在各自启动时创建。`v0.1.0` 发布（2026-09-10）：LICENSE
+  M8 已于 2026-09-12 启动：负责人确认依计划推进，DEC-011 随启动冻结为
+  Accepted，里程碑文档
+  [m8-execution-context.md](m8-execution-context.md) 已创建；DEC-012 维持
+  Proposed，M9 启动时冻结。`v0.1.0` 发布（2026-09-10）：LICENSE
   选定 MIT（第 6 节冻结）、仓库级 `README.md` 与 `CHANGELOG.md`、deb 运行时
   包（`packaging/deb/build-deb.sh`，安装即启用服务）与 Release 流水线
   （`.github/workflows/release.yml`：`v*` tag 构建 deb 并发布）。真机验收
   补跑条件见 M7 验收矩阵。
-- 当前里程碑：M8（Planned，执行上下文）；M9（Planned，GPU placement）排队。
+- 当前里程碑：M8（Implemented，执行上下文——代码与本地验证完成于
+  2026-09-12，分支 `feat/m8-execution-context`，GitHub CI 随 MR 收口后
+  关闭）；M9（Planned，GPU placement）排队。
 - MVP 端到端验收以设计文档第 19 节判据为准，由 M7 执行并记录证据（见第 10 节）。
 - 里程碑文档在各自启动时创建（工程规范第 2 节）；当前实体文件：M0-M7
   （M8/M9 文件在各自启动时创建）。
@@ -115,7 +119,7 @@ MVP 后已立项增强（2026-09-12，依据 issue #16/#10）：
 
 | 编号 | 增强内容 | 里程碑 | 决策依据 |
 | --- | --- | --- | --- |
-| `SCOPE-16` | 提交时执行上下文捕获与恢复：环境捕获白名单 + `--env`/`--inherit-env`、executable 提交时解析、四层环境合并（含 `LD_LIBRARY_PATH` 保留键修订）、`yori inspect` 与 env 脱敏、schema v2 | M8 | [DEC-011](../decisions/DEC-011-execution-context-capture.md)（Proposed） |
+| `SCOPE-16` | 提交时执行上下文捕获与恢复：环境捕获白名单 + `--env`/`--inherit-env`、executable 提交时解析、四层环境合并（含 `LD_LIBRARY_PATH` 保留键修订）、`yori inspect` 与 env 脱敏、schema v2 | M8 | [DEC-011](../decisions/DEC-011-execution-context-capture.md)（Accepted） |
 | `SCOPE-17` | GPU placement 亲和调度：`ANY`/`REQUIRED`、daemon 侧 index→UUID 解析、候选集过滤、FIFO 有界跳过（修订 DEC-005 队首条款）、`wait_reason` 展示、schema v3 | M9 | [DEC-012](../decisions/DEC-012-gpu-placement-policy.md)（Proposed） |
 
 ## 3. 不可破坏架构约束（RULE）
@@ -171,7 +175,7 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | M5 | IPC 与 CLI | M3、M4 | UDS 传输、`SO_PEERCRED` 鉴权、请求/响应协议与 owner/admin 授权、`submit`/`ps`/`queue`/`gpu`/`cancel`/`logs` 快照、IPC fuzz 起步 | 无 | Completed |
 | M6 | 观察面 | M5 | `logs -f` 流式帧（offset 续传、`GAP`/`EOF`/`BACKPRESSURE`）、日志轮转、`yori tensorboard` | 无 | Completed |
 | M7 | 打包与 MVP 端到端验收 | M6 | systemd unit、安装打包、设计 §19 判据逐项验收；前置：守护总装收口 | `v0.1.0`（MVP；tag/发布需负责人授权） | Completed |
-| M8 | 提交时执行上下文 | M7 | 环境捕获（白名单/`--env`/`--inherit-env`）、executable 提交时解析、环境合并 v2 与保留键修订、`yori inspect`（owner/admin + 脱敏）、IPC 协议 v2、schema v2 迁移；Conda/venv 语义一致性验证 | `v0.2.0` | Planned（DEC-011 Proposed，冻结于 M8 启动） |
+| M8 | 提交时执行上下文 | M7 | 环境捕获（白名单/`--env`/`--inherit-env`）、executable 提交时解析、环境合并 v2 与保留键修订、`yori inspect`（owner/admin + 脱敏）、IPC 协议 v2、schema v2 迁移；Conda/venv 语义一致性验证 | `v0.2.0` | Implemented（2026-09-12 实现完成、本地五预设全绿；CI 随 MR 收口） |
 | M9 | GPU placement 亲和调度 | M7（与 M8 无代码依赖，建议随后执行以共享迁移框架） | `GpuPlacement` Core 类型与校验、daemon 侧 `--gpu` 解析、Scheduler 候选集过滤与 FIFO 有界跳过、`wait_reason`、schema v3 与恢复一致性；issue #10 12 场景矩阵 | `v0.3.0` | Planned（DEC-012 Proposed，冻结于 M9 启动） |
 
 - M3 与 M4 在 M2 完成后可并行推进。
@@ -183,7 +187,8 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
   [M4 持久化与恢复](m4-persistence-recovery.md)、
   [M5 IPC 与 CLI](m5-ipc-cli.md)、
   [M6 观察面](m6-observability.md)、
-  [M7 打包与 MVP 端到端验收](m7-packaging-acceptance.md)。
+  [M7 打包与 MVP 端到端验收](m7-packaging-acceptance.md)、
+  [M8 提交时执行上下文](m8-execution-context.md)。
 
 ## 6. 暂定默认值与未决问题
 
@@ -200,7 +205,7 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | IPC 端点 | 已冻结：`/run/yori/yori.sock`、`root:yori 0660`、`yori` 系统组连接准入、admin 组双路径判定（[DEC-010](../decisions/DEC-010-uds-ipc-endpoint.md)） | Linductor-alkaid | M5 | 已于 2026-09-09 冻结；变更需新决策记录替代 DEC-010 |
 | 日志与跟随上限默认值 | 已冻结：落盘单文件 256 MiB / 保留 1 个历史文件（M2 `LogSink`）；跟随会话每 Job 8 / 全局 64、回看窗口 8 MiB/流（64 KiB ~ 64 MiB）、订阅队列 64 chunk、会话写出缓冲 2 MiB、单帧写截止 2 s（M6 `LogStreamer`/`LogFollowService`，全部配置化并有负向测试） | Linductor-alkaid | M6 | 已于 2026-09-10 冻结（配置定稿 + 测试）；变更走配置级评审 |
 | 仓库自身许可证 | 已冻结：MIT（2026-09-10 负责人选定，`v0.1.0` 发布）；与 Executor（MIT）兼容 | Linductor-alkaid | M7（发布前） | 已添加 `LICENSE` 并同步[供应链策略](../supply-chain/dependency-policy.md)与 `README.md` |
-| 执行上下文捕获策略 | Proposed：提交时白名单捕获 + `--env`/`--inherit-env`、executable 提交时解析、环境合并 v2（`LD_LIBRARY_PATH` 转白名单、`LD_PRELOAD`/`YORI_*` 维持拒绝）、无 `--shell`（用 `-- bash -c` 表达）（[DEC-011](../decisions/DEC-011-execution-context-capture.md)，issue #16） | Linductor-alkaid | M8 启动 | 负责人确认后 DEC-011 改 Accepted |
+| 执行上下文捕获策略 | 已冻结：提交时白名单捕获 + `--env`/`--inherit-env`、executable 提交时解析、环境合并 v2（`LD_LIBRARY_PATH` 转白名单、`LD_PRELOAD`/`YORI_*` 维持拒绝）、无 `--shell`（用 `-- bash -c` 表达）（[DEC-011](../decisions/DEC-011-execution-context-capture.md)，issue #16） | Linductor-alkaid | M8 启动 | 已于 2026-09-12 冻结（负责人确认启动 M8，DEC-011 改 Accepted）；变更需新决策记录 |
 | GPU placement 模型 | Proposed：M9 交付 `ANY`+`REQUIRED`（`--gpu N` = 硬亲和，与 `--gpus N` 计数互斥）；设备身份复用 `GpuUuid`，daemon 侧解析 index→UUID；FIFO 修订为有界跳过（默认扫描 32）；`PREFERRED`/GPU Set/tag/pool/项目级 profile/管理员静态映射延后（[DEC-012](../decisions/DEC-012-gpu-placement-policy.md)，issue #10） | Linductor-alkaid | M9 启动 | 负责人确认后 DEC-012 改 Accepted |
 
 ## 7. 跨里程碑完成定义（DOD）
@@ -273,7 +278,8 @@ CI 无法覆盖的项按工程规范第 4 节保持未勾选并记录原因与�
   [M4 持久化与恢复](m4-persistence-recovery.md)、
   [M5 IPC 与 CLI](m5-ipc-cli.md)、
   [M6 观察面](m6-observability.md)、
-  [M7 打包与 MVP 端到端验收](m7-packaging-acceptance.md)
+  [M7 打包与 MVP 端到端验收](m7-packaging-acceptance.md)、
+  [M8 提交时执行上下文](m8-execution-context.md)
 - 决策：[DEC-001 Executor 依赖引入与锁定](../decisions/DEC-001-executor-pinning.md)、
   [DEC-002 MVP 纳入训练观察面](../decisions/DEC-002-mvp-observability.md)、
   [DEC-003 TensorBoard 由 CLI 拉起](../decisions/DEC-003-tensorboard-cli-hosting.md)、
@@ -284,7 +290,7 @@ CI 无法覆盖的项按工程规范第 4 节保持未勾选并记录原因与�
   [DEC-008 daemon 重启日志管道断裂语义](../decisions/DEC-008-daemon-restart-log-continuity.md)、
   [DEC-009 SQLite StateStore 采用与 dlopen 绑定](../decisions/DEC-009-sqlite-state-store.md)、
   [DEC-010 UDS IPC 端点、权限与管理员判定](../decisions/DEC-010-uds-ipc-endpoint.md)、
-  [DEC-011 提交时执行上下文捕获与训练环境恢复](../decisions/DEC-011-execution-context-capture.md)（Proposed，M8）、
+  [DEC-011 提交时执行上下文捕获与训练环境恢复](../decisions/DEC-011-execution-context-capture.md)（Accepted，M8）、
   [DEC-012 GPU placement 约束与 FIFO 有界跳过语义](../decisions/DEC-012-gpu-placement-policy.md)（Proposed，M9）
 - 安全：[威胁模型（草案）](../security/threat-model.md)
 - 供应链：[依赖管理与供应链策略](../supply-chain/dependency-policy.md)

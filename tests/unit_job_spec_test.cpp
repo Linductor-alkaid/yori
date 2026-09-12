@@ -1,5 +1,6 @@
 #include <chrono>
 #include <string>
+#include <string_view>
 #include <yori/job/job.hpp>
 
 #include "yori_test.hpp"
@@ -132,6 +133,49 @@ int main() {
   spec = valid_spec();
   spec.launch_profile = std::string(JobSpecLimits::kMaxLaunchProfileBytes, 'x');
   YORI_CHECK(yori::job::validate(spec));
+
+  // ---- M8：executable 与 env_metadata（DEC-011）------------------------------
+  spec = valid_spec();
+  spec.executable = "/opt/conda/envs/train/bin/python";
+  spec.env_metadata = yori::job::EnvMetadata{yori::job::EnvSource::kConda, "3.11.5"};
+  YORI_CHECK(yori::job::validate(spec));
+
+  spec = valid_spec();
+  spec.executable = std::string("rel\0ative", 9);
+  check_error(spec, JobSpecErrorCode::kInvalidExecutable);
+
+  spec = valid_spec();
+  spec.executable = "relative/python";
+  check_error(spec, JobSpecErrorCode::kInvalidExecutable);
+
+  spec = valid_spec();
+  spec.executable = "";
+  check_error(spec, JobSpecErrorCode::kInvalidExecutable);
+
+  spec = valid_spec();
+  // 注意构造方式：gcc-12 对 "/" + std::string(... 形态有 -Wrestrict 误报
+  // （operator+(const char*, string&&) 的已知缺陷），以 insert 规避。
+  std::string oversized(JobSpecLimits::kMaxExecutableBytes, 'x');
+  oversized.insert(oversized.begin(), '/');
+  spec.executable = oversized;
+  check_error(spec, JobSpecErrorCode::kInvalidExecutable);
+
+  spec = valid_spec();
+  spec.env_metadata = yori::job::EnvMetadata{yori::job::EnvSource::kVenv, std::nullopt};
+  YORI_CHECK(yori::job::validate(spec));
+
+  spec = valid_spec();
+  spec.env_metadata = yori::job::EnvMetadata{yori::job::EnvSource::kVenv, ""};
+  check_error(spec, JobSpecErrorCode::kInvalidPythonVersion);
+
+  spec = valid_spec();
+  spec.env_metadata = yori::job::EnvMetadata{
+      yori::job::EnvSource::kNone, std::string(JobSpecLimits::kMaxPythonVersionBytes + 1, '3')};
+  check_error(spec, JobSpecErrorCode::kInvalidPythonVersion);
+
+  YORI_CHECK(std::string_view{"conda"} == yori::job::to_string(yori::job::EnvSource::kConda));
+  YORI_CHECK(std::string_view{"venv"} == yori::job::to_string(yori::job::EnvSource::kVenv));
+  YORI_CHECK(std::string_view{"none"} == yori::job::to_string(yori::job::EnvSource::kNone));
 
   return yori::testing::failure_count == 0 ? 0 : 1;
 }

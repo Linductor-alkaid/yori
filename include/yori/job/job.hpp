@@ -38,6 +38,27 @@ struct JobSpecLimits final {
   static constexpr std::size_t kMaxEnvironmentBytes = 256 * 1024;
   static constexpr std::size_t kMaxLaunchProfileBytes = 128;
   static constexpr std::size_t kMaxTensorboardLogdirBytes = 4096;
+  static constexpr std::size_t kMaxExecutableBytes = 4096;
+  static constexpr std::size_t kMaxPythonVersionBytes = 64;
+};
+
+// 提交环境的来源判定（DEC-011：由捕获到的 CONDA_PREFIX/VIRTUAL_ENV 推导，
+// 不作为调度或执行输入，仅用于展示与审计）。
+enum class EnvSource : std::uint8_t {
+  kNone = 0,
+  kConda = 1,
+  kVenv = 2,
+};
+
+[[nodiscard]] const char* to_string(EnvSource source) noexcept;
+
+// 提交时环境来源元数据（DEC-011 决策 1）。python_version 仅当 executable 为
+// Python 解释器时可选探测（best-effort，缺失不失败）。
+struct EnvMetadata final {
+  EnvSource source{EnvSource::kNone};
+  std::optional<std::string> python_version;
+
+  bool operator==(const EnvMetadata&) const noexcept = default;
 };
 
 struct JobSpec final {
@@ -45,7 +66,12 @@ struct JobSpec final {
   std::uint32_t owner_gid{0};
   std::vector<std::string> argv;
   std::string cwd;
+  // 提交时捕获的用户执行上下文（白名单 + 显式 --env 追加；DEC-011）。
   std::map<std::string, std::string> env;
+  // 提交时由 CLI 解析出的 argv[0] 绝对路径；空表示未捕获（v1 提交），daemon
+  // 启动时按既有 PATH 搜索语义执行。
+  std::optional<std::string> executable;
+  std::optional<EnvMetadata> env_metadata;
   std::uint32_t gpu_request{1};
   std::optional<std::string> launch_profile;
   std::optional<std::string> tensorboard_logdir;
@@ -70,6 +96,8 @@ enum class JobSpecErrorCode {
   kLaunchProfileTooLong,
   kInvalidTensorboardLogdir,
   kInvalidSubmitTime,
+  kInvalidExecutable,
+  kInvalidPythonVersion,
 };
 
 struct JobSpecValidationResult final {

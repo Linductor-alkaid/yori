@@ -209,13 +209,17 @@ constexpr std::uint8_t kUnderlyingJobStateMax = 7;
 constexpr std::uint8_t kUnderlyingGpuObservedStateMax = 2;
 constexpr std::uint8_t kUnderlyingGpuLogicalStateMax = 3;
 
-// 编码请求 kind body（不含 version/kind 头）。返回 false 表示字段越界。
-bool encode_request_body(const IpcRequest& request, Writer& writer) {
+// 编码请求 kind body（不含 version/kind 头）。返回 false 表示字段越界或
+// 版本与字段不一致（v1 帧不允许携带 v2 扩展字段）。
+bool encode_request_body(std::uint8_t version, const IpcRequest& request, Writer& writer) {
   switch (request.kind) {
     case IpcRequestKind::kSubmit: {
       const IpcSubmitRequest& submit = request.submit;
       if (submit.argv.size() > IpcProtocolLimits::kMaxItemCount ||
           submit.env.size() > IpcProtocolLimits::kMaxItemCount) {
+        return false;
+      }
+      if (version < 2 && (submit.executable || submit.env_metadata)) {
         return false;
       }
       writer.u32(static_cast<std::uint32_t>(submit.argv.size()));
@@ -236,6 +240,23 @@ bool encode_request_body(const IpcRequest& request, Writer& writer) {
       writer.u32(submit.gpu_request);
       if (writer.string(submit.launch_profile) || writer.string(submit.tensorboard_logdir)) {
         return false;
+      }
+      if (version >= 2) {
+        if (writer.string(submit.executable)) {
+          return false;
+        }
+        if (!submit.env_metadata) {
+          writer.u8(0);
+        } else {
+          writer.u8(1);
+          if (submit.env_metadata->source > 2) {
+            return false;
+          }
+          writer.u8(submit.env_metadata->source);
+          if (writer.string(submit.env_metadata->python_version)) {
+            return false;
+          }
+        }
       }
       return true;
     }
@@ -266,11 +287,14 @@ bool encode_request_body(const IpcRequest& request, Writer& writer) {
     case IpcRequestKind::kTensorboard:
       writer.u64(request.tensorboard.job_id);
       return true;
+    case IpcRequestKind::kInspect:
+      writer.u64(request.inspect.job_id);
+      return true;
   }
   return false;
 }
 
-bool encode_response_body(const IpcResponse& response, Writer& writer) {
+bool encode_response_body(std::uint8_t version, const IpcResponse& response, Writer& writer) {
   writer.u8(static_cast<std::uint8_t>(response.error));
   if (writer.string(response.detail)) {
     return false;
@@ -380,6 +404,74 @@ bool encode_response_body(const IpcResponse& response, Writer& writer) {
     case IpcRequestKind::kTensorboard:
       return !(writer.string(response.tensorboard.logdir) ||
                writer.string(response.tensorboard.cwd));
+    case IpcRequestKind::kInspect: {
+      if (version < 2) {
+        return false;
+      }
+      const IpcInspectPayload& inspect = response.inspect;
+      if (inspect.argv.size() > IpcProtocolLimits::kMaxItemCount ||
+          inspect.env.size() > IpcProtocolLimits::kMaxListItems) {
+        return false;
+      }
+      writer.u64(inspect.job_id);
+      writer.u8(inspect.state);
+      writer.u32(inspect.owner_uid);
+      writer.u64(inspect.revision);
+      if (writer.string(inspect.cwd) || writer.string(inspect.executable)) {
+        return false;
+      }
+      writer.u32(static_cast<std::uint32_t>(inspect.argv.size()));
+      for (const std::string& argument : inspect.argv) {
+        if (writer.string(argument)) {
+          return false;
+        }
+      }
+      if (!inspect.env_metadata) {
+        writer.u8(0);
+      } else {
+        if (inspect.env_metadata->source > 2) {
+          return false;
+        }
+        writer.u8(1);
+        writer.u8(inspect.env_metadata->source);
+        if (writer.string(inspect.env_metadata->python_version)) {
+          return false;
+        }
+      }
+      writer.u32(static_cast<std::uint32_t>(inspect.env.size()));
+      for (const IpcEnvEntry& entry : inspect.env) {
+        if (writer.string(entry.name)) {
+          return false;
+        }
+        writer.u8(entry.masked ? 1 : 0);
+        if (writer.string(entry.value)) {
+          return false;
+        }
+      }
+      if (inspect.gpu_uuid) {
+        writer.u8(1);
+        if (writer.string(*inspect.gpu_uuid)) {
+          return false;
+        }
+      } else {
+        writer.u8(0);
+      }
+      if (inspect.gpu_index) {
+        writer.u8(1);
+        writer.u32(*inspect.gpu_index);
+      } else {
+        writer.u8(0);
+      }
+      writer.u64(inspect.submit_time_unix_ns);
+      if (inspect.exit) {
+        writer.u8(1);
+        writer.u8(inspect.exit->exited_normally ? 1 : 0);
+        writer.i32(inspect.exit->code);
+      } else {
+        writer.u8(0);
+      }
+      return !writer.string(inspect.log_path);
+    }
   }
   return false;
 }
@@ -393,15 +485,20 @@ IpcDecodeError decode_request_body(Reader& reader, IpcRequest& out) {
   if (!reader.u8(kind)) {
     return IpcDecodeError::kTruncated;
   }
-  if (version != IpcProtocolLimits::kProtocolVersion) {
+  if (!ipc_version_supported(version)) {
     return IpcDecodeError::kBadVersion;
   }
   if (kind < static_cast<std::uint8_t>(IpcRequestKind::kSubmit) ||
-      kind > static_cast<std::uint8_t>(IpcRequestKind::kTensorboard)) {
+      kind > static_cast<std::uint8_t>(IpcRequestKind::kInspect)) {
+    return IpcDecodeError::kBadKind;
+  }
+  // INSPECT 是 v2 新 kind：v1 帧携带视为坏 kind。
+  if (kind == static_cast<std::uint8_t>(IpcRequestKind::kInspect) && version < 2) {
     return IpcDecodeError::kBadKind;
   }
   out = IpcRequest{};
   out.kind = static_cast<IpcRequestKind>(kind);
+  out.version = version;
 
   switch (out.kind) {
     case IpcRequestKind::kSubmit: {
@@ -448,7 +545,38 @@ IpcDecodeError decode_request_body(Reader& reader, IpcRequest& out) {
       if (error != IpcDecodeError::kNone) {
         return error;
       }
-      return reader.string(submit.tensorboard_logdir);
+      error = reader.string(submit.tensorboard_logdir);
+      if (error != IpcDecodeError::kNone) {
+        return error;
+      }
+      if (version >= 2) {
+        // v2 尾部追加（DEC-011）：可选 executable 与 env 元数据；v1 帧在此
+        // 结束（缺省 = 无捕获）。
+        error = reader.string(submit.executable);
+        if (error != IpcDecodeError::kNone) {
+          return error;
+        }
+        bool has_metadata = false;
+        error = reader.flag(has_metadata);
+        if (error != IpcDecodeError::kNone) {
+          return error;
+        }
+        if (has_metadata) {
+          IpcEnvMetadata metadata;
+          if (!reader.u8(metadata.source)) {
+            return IpcDecodeError::kTruncated;
+          }
+          if (metadata.source > 2) {
+            return IpcDecodeError::kInvalidValue;
+          }
+          error = reader.string(metadata.python_version);
+          if (error != IpcDecodeError::kNone) {
+            return error;
+          }
+          submit.env_metadata = std::move(metadata);
+        }
+      }
+      break;
     }
     case IpcRequestKind::kPs:
     case IpcRequestKind::kQueue:
@@ -500,6 +628,11 @@ IpcDecodeError decode_request_body(Reader& reader, IpcRequest& out) {
         return IpcDecodeError::kTruncated;
       }
       break;
+    case IpcRequestKind::kInspect:
+      if (!reader.u64(out.inspect.job_id)) {
+        return IpcDecodeError::kTruncated;
+      }
+      break;
   }
   if (!reader.exhausted()) {
     return IpcDecodeError::kTrailingBytes;
@@ -514,11 +647,14 @@ IpcDecodeError decode_response_body(Reader& reader, IpcResponse& out) {
   if (!reader.u8(version) || !reader.u8(kind)) {
     return IpcDecodeError::kTruncated;
   }
-  if (version != IpcProtocolLimits::kProtocolVersion) {
+  if (!ipc_version_supported(version)) {
     return IpcDecodeError::kBadVersion;
   }
   if (kind < static_cast<std::uint8_t>(IpcRequestKind::kSubmit) ||
-      kind > static_cast<std::uint8_t>(IpcRequestKind::kTensorboard)) {
+      kind > static_cast<std::uint8_t>(IpcRequestKind::kInspect)) {
+    return IpcDecodeError::kBadKind;
+  }
+  if (kind == static_cast<std::uint8_t>(IpcRequestKind::kInspect) && version < 2) {
     return IpcDecodeError::kBadKind;
   }
   if (!reader.u8(error_code)) {
@@ -529,6 +665,7 @@ IpcDecodeError decode_response_body(Reader& reader, IpcResponse& out) {
   }
   out = IpcResponse{};
   out.kind = static_cast<IpcRequestKind>(kind);
+  out.version = version;
   out.error = static_cast<IpcError>(error_code);
 
   IpcDecodeError error = reader.string(out.detail);
@@ -750,6 +887,133 @@ IpcDecodeError decode_response_body(Reader& reader, IpcResponse& out) {
       }
       break;
     }
+    case IpcRequestKind::kInspect: {
+      IpcInspectPayload& inspect = out.inspect;
+      if (!reader.u64(inspect.job_id) || !reader.u8(inspect.state) ||
+          !reader.u32(inspect.owner_uid) || !reader.u64(inspect.revision)) {
+        return IpcDecodeError::kTruncated;
+      }
+      if (inspect.state > kUnderlyingJobStateMax) {
+        return IpcDecodeError::kInvalidValue;
+      }
+      error = reader.string(inspect.cwd);
+      if (error != IpcDecodeError::kNone) {
+        return error;
+      }
+      error = reader.string(inspect.executable);
+      if (error != IpcDecodeError::kNone) {
+        return error;
+      }
+      std::uint32_t argv_count = 0;
+      error = reader.count(IpcProtocolLimits::kMaxItemCount, argv_count);
+      if (error != IpcDecodeError::kNone) {
+        return error;
+      }
+      inspect.argv.reserve(argv_count);
+      for (std::uint32_t i = 0; i < argv_count; ++i) {
+        inspect.argv.emplace_back();
+        error = reader.string(inspect.argv.back());
+        if (error != IpcDecodeError::kNone) {
+          return error;
+        }
+      }
+      bool has_metadata = false;
+      error = reader.flag(has_metadata);
+      if (error != IpcDecodeError::kNone) {
+        return error;
+      }
+      if (has_metadata) {
+        IpcEnvMetadata metadata;
+        if (!reader.u8(metadata.source)) {
+          return IpcDecodeError::kTruncated;
+        }
+        if (metadata.source > 2) {
+          return IpcDecodeError::kInvalidValue;
+        }
+        error = reader.string(metadata.python_version);
+        if (error != IpcDecodeError::kNone) {
+          return error;
+        }
+        inspect.env_metadata = std::move(metadata);
+      }
+      std::uint32_t env_count = 0;
+      error = reader.count(IpcProtocolLimits::kMaxListItems, env_count);
+      if (error != IpcDecodeError::kNone) {
+        return error;
+      }
+      inspect.env.reserve(env_count);
+      for (std::uint32_t i = 0; i < env_count; ++i) {
+        IpcEnvEntry entry;
+        error = reader.string(entry.name);
+        if (error != IpcDecodeError::kNone) {
+          return error;
+        }
+        bool masked = false;
+        error = reader.flag(masked);
+        if (error != IpcDecodeError::kNone) {
+          return error;
+        }
+        entry.masked = masked;
+        error = reader.string(entry.value);
+        if (error != IpcDecodeError::kNone) {
+          return error;
+        }
+        inspect.env.push_back(std::move(entry));
+      }
+      bool has_gpu_uuid = false;
+      error = reader.flag(has_gpu_uuid);
+      if (error != IpcDecodeError::kNone) {
+        return error;
+      }
+      if (has_gpu_uuid) {
+        std::string uuid;
+        error = reader.string(uuid);
+        if (error != IpcDecodeError::kNone) {
+          return error;
+        }
+        inspect.gpu_uuid = std::move(uuid);
+      }
+      bool has_gpu_index = false;
+      error = reader.flag(has_gpu_index);
+      if (error != IpcDecodeError::kNone) {
+        return error;
+      }
+      if (has_gpu_index) {
+        std::uint32_t index = 0;
+        if (!reader.u32(index)) {
+          return IpcDecodeError::kTruncated;
+        }
+        inspect.gpu_index = index;
+      }
+      if (!reader.u64(inspect.submit_time_unix_ns)) {
+        return IpcDecodeError::kTruncated;
+      }
+      bool has_exit = false;
+      error = reader.flag(has_exit);
+      if (error != IpcDecodeError::kNone) {
+        return error;
+      }
+      if (has_exit) {
+        std::uint8_t normal = 0;
+        if (!reader.u8(normal)) {
+          return IpcDecodeError::kTruncated;
+        }
+        if (normal > 1) {
+          return IpcDecodeError::kInvalidValue;
+        }
+        IpcExitStatus exit_status;
+        exit_status.exited_normally = normal == 1;
+        if (!reader.i32(exit_status.code)) {
+          return IpcDecodeError::kTruncated;
+        }
+        inspect.exit = exit_status;
+      }
+      error = reader.string(inspect.log_path);
+      if (error != IpcDecodeError::kNone) {
+        return error;
+      }
+      break;
+    }
   }
   if (!reader.exhausted()) {
     return IpcDecodeError::kTrailingBytes;
@@ -757,15 +1021,21 @@ IpcDecodeError decode_response_body(Reader& reader, IpcResponse& out) {
   return IpcDecodeError::kNone;
 }
 
-// 编码公共骨架：写 [version][kind][body]；失败保持 out 不变。
+// 编码公共骨架：写 [version][kind][body]；失败保持 out 不变。version 取自
+// 消息（缺省当前版本；服务端回显请求版本）。
 template <typename Message>
 bool encode_payload(IpcRequestKind kind, const Message& message,
-                    bool (*encode_body)(const Message&, Writer&), std::vector<std::uint8_t>& out) {
+                    bool (*encode_body)(std::uint8_t, const Message&, Writer&),
+                    std::vector<std::uint8_t>& out) {
+  if (!ipc_version_supported(message.version)) {
+    return false;
+  }
   std::vector<std::uint8_t> payload;
   Writer writer(payload);
-  writer.u8(static_cast<std::uint8_t>(IpcProtocolLimits::kProtocolVersion));
+  writer.u8(message.version);
   writer.u8(static_cast<std::uint8_t>(kind));
-  if (!encode_body(message, writer) || payload.size() > IpcProtocolLimits::kMaxPayloadBytes) {
+  if (!encode_body(message.version, message, writer) ||
+      payload.size() > IpcProtocolLimits::kMaxPayloadBytes) {
     return false;
   }
   out.insert(out.end(), payload.begin(), payload.end());
@@ -828,7 +1098,8 @@ IpcDecodeError decode_stream_frame_body(Reader& reader, IpcStreamFrame& out) {
   if (!reader.u8(version) || !reader.u8(kind)) {
     return IpcDecodeError::kTruncated;
   }
-  if (version != IpcProtocolLimits::kProtocolVersion) {
+  // 流式帧族冻结于 v1（M6）。
+  if (version != IpcProtocolLimits::kStreamFrameVersion) {
     return IpcDecodeError::kBadVersion;
   }
   if (kind < static_cast<std::uint8_t>(IpcStreamFrameKind::kLogData) ||
@@ -930,6 +1201,8 @@ const char* to_string(IpcRequestKind kind) noexcept {
       return "logs-follow";
     case IpcRequestKind::kTensorboard:
       return "tensorboard";
+    case IpcRequestKind::kInspect:
+      return "inspect";
   }
   return "unknown";
 }
@@ -1057,7 +1330,8 @@ IpcResponseDecodeResult decode_response_payload(const std::uint8_t* data, std::s
 bool encode_stream_frame_payload(const IpcStreamFrame& frame, std::vector<std::uint8_t>& out) {
   std::vector<std::uint8_t> payload;
   Writer writer(payload);
-  writer.u8(static_cast<std::uint8_t>(IpcProtocolLimits::kProtocolVersion));
+  // 流式帧族冻结于 v1（M6），不随请求/响应 v2 变化。
+  writer.u8(IpcProtocolLimits::kStreamFrameVersion);
   writer.u8(static_cast<std::uint8_t>(frame.kind));
   if (!encode_stream_frame_body(frame, writer) ||
       payload.size() > IpcProtocolLimits::kMaxPayloadBytes) {
