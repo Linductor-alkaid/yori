@@ -2,6 +2,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -70,6 +71,45 @@ int run_cli(const std::string& directory, const std::string& socket_path,
   return code == -1 ? -1 : WEXITSTATUS(code);
 }
 
+
+// 以指定环境前缀运行真实 CLI（env -i 起步，模拟"已激活环境"的提交终端）。
+int run_cli_env(const std::string& directory, const std::string& socket_path,
+                const std::string& env_prefix, const std::string& arguments,
+                std::string& stdout_text, std::string& stderr_text) {
+  const std::string command = env_prefix + " " + YORI_CLI_BIN + " --socket " + socket_path + " " +
+                              arguments + " > " + directory + "/out.txt 2> " + directory +
+                              "/err.txt";
+  const int code = std::system(command.c_str());
+  stdout_text = read_file(directory + "/out.txt");
+  stderr_text = read_file(directory + "/err.txt");
+  return code == -1 ? -1 : WEXITSTATUS(code);
+}
+
+// 构造假 conda 环境（M8 语义一致性用）：bin/fake-python 打印执行上下文标记
+// 后短暂驻留，供运行中 inspect 与日志断言。
+std::string write_fake_conda_env(const std::string& directory) {
+  const std::string root = directory + "/fakeenv";
+  const std::string bin = root + "/bin";
+  YORI_CHECK(::mkdir(root.c_str(), 0755) == 0 || errno == EEXIST);
+  YORI_CHECK(::mkdir(bin.c_str(), 0755) == 0 || errno == EEXIST);
+  const std::string script = bin + "/fake-python";
+  FILE* file = std::fopen(script.c_str(), "w");
+  YORI_CHECK(file != nullptr);
+  static_cast<void>(std::fputs(
+      "#!/bin/sh\n"
+      "echo \"argv0=$0\"\n"
+      "echo \"conda=$CONDA_PREFIX\"\n"
+      "echo \"ldp=$LD_LIBRARY_PATH\"\n"
+      "echo \"job=$YORI_JOB_ID\"\n"
+      "echo \"gpu=$YORI_GPU_UUID\"\n"
+      "echo \"token=$M8_TOKEN\"\n"
+      "sleep 3\n",
+      file));
+  static_cast<void>(std::fclose(file));
+  YORI_CHECK(::chmod(script.c_str(), 0755) == 0);
+  return root;
+}
+
 }  // namespace
 
 int main() {
@@ -122,12 +162,34 @@ int main() {
 
   // 守护总装（M7）下的全链路：submit -> FIFO 调度 -> 真实 spawn -> 日志 ->
   // 取消升级 -> lease 释放 -> 队首推进。
+  // ps 行级状态等待：按"行首 JobId + 状态列"匹配，避免他行 FINISHED 造成
+  // 子串误报（M8 场景中多 Job 并存时必须精确）。
+  const auto ps_state_of = [&](std::uint64_t job_id, std::string& line_out) {
+    code = run_cli(directory, socket_path, "ps", out, err);
+    YORI_CHECK(code == 0);
+    const std::string prefix = std::to_string(job_id) + " ";
+    std::size_t begin = 0;
+    while (begin < out.size()) {
+      const std::size_t end = out.find('\n', begin);
+      const std::size_t length = (end == std::string::npos ? out.size() : end) - begin;
+      const std::string line = out.substr(begin, length);
+      if (line.rfind(prefix, 0) == 0) {
+        line_out = line;
+        return true;
+      }
+      if (end == std::string::npos) {
+        break;
+      }
+      begin = end + 1;
+    }
+    return false;
+  };
+
   const auto wait_for_state = [&](std::uint64_t job_id, const char* state) {
     const auto deadline = std::chrono::steady_clock::now() + 15s;
     while (std::chrono::steady_clock::now() < deadline) {
-      code = run_cli(directory, socket_path, "ps", out, err);
-      YORI_CHECK(code == 0);
-      if (contains(out, std::to_string(job_id)) && contains(out, state)) {
+      std::string line;
+      if (ps_state_of(job_id, line) && contains(line, state)) {
         return true;
       }
       std::this_thread::sleep_for(100ms);
@@ -187,6 +249,101 @@ int main() {
   YORI_CHECK(code == 0);
   YORI_CHECK(contains(out, "e2e-stdout"));
   YORI_CHECK(contains(err, "e2e-stderr"));
+
+  // ---- M8（DEC-011）：执行上下文捕获的端到端语义一致性 -----------------------
+  {
+    const std::string fake_root = write_fake_conda_env(directory);
+    const std::string env_prefix = "env -i PATH=" + fake_root +
+                                   "/bin:/usr/bin:/bin CONDA_PREFIX=" + fake_root +
+                                   " LD_LIBRARY_PATH=" + fake_root + "/lib VIRTUAL_ENV=/old-venv";
+
+    // 已激活 conda 环境提交：白名单捕获 + executable 按捕获 PATH 解析。
+    code = run_cli_env(directory, socket_path, env_prefix,
+                       "submit --env M8_TOKEN=secret-e2e -- fake-python", out, err);
+    YORI_CHECK(code == 0);
+    YORI_CHECK(contains(out, "Submitted job 3"));
+    YORI_CHECK(wait_for_state(3, "RUNNING"));
+
+    // 运行中 inspect（owner）：来源 conda、executable 为解析出的绝对路径、
+    // 敏感值掩码（原值不出现在输出）、分配结果为 lease 的 GPU。
+    code = run_cli(directory, socket_path, "inspect 3", out, err);
+    YORI_CHECK(code == 0);
+    YORI_CHECK(contains(out, "environment: conda"));
+    YORI_CHECK(contains(out, (fake_root + "/bin/fake-python").c_str()));
+    YORI_CHECK(contains(out, "assigned:    GPU-e2e-a"));
+    YORI_CHECK(contains(out, "M8_TOKEN=***"));
+    YORI_CHECK(!contains(out, "secret-e2e"));
+
+    // 快照语义 + 四层合并 + 资源块注入：训练进程读到捕获值与 Yori 资源键。
+    YORI_CHECK(wait_for_state(3, "FINISHED"));
+    code = run_cli(directory, socket_path, "logs 3", out, err);
+    YORI_CHECK(code == 0);
+    // argv[0] 保持用户输入形式；#! 脚本经内核解释器承接时 $0 显示脚本路径
+    // （ELF 直 exec 的 argv[0] 语义由 unit_process_supervisor 锁定）。
+    YORI_CHECK(contains(out, "argv0=") && contains(out, "fake-python"));
+    YORI_CHECK(contains(out, ("conda=" + fake_root).c_str()));
+    YORI_CHECK(contains(out, ("ldp=" + fake_root + "/lib").c_str()));
+    YORI_CHECK(contains(out, "job=3"));
+    YORI_CHECK(contains(out, "gpu=GPU-e2e-a"));
+    YORI_CHECK(contains(out, "token=secret-e2e"));
+    // venv 与 conda 同时存在时判定 conda（unit 已覆盖；此处确认 env 元数据
+    // 不影响运行时环境的内容）。
+    code = run_cli(directory, socket_path, "inspect 3", out, err);
+    YORI_CHECK(code == 0);
+    YORI_CHECK(contains(out, "VIRTUAL_ENV=/old-venv"));
+    YORI_CHECK(contains(out, "LD_LIBRARY_PATH=" + fake_root + "/lib"));
+
+    // executable 解析失败：提交即拒（fail-fast，本地用法错误 2）。
+    code = run_cli_env(directory, socket_path, "env -i PATH=/nonexistent-dir",
+                       "submit -- no-such-cmd", out, err);
+    YORI_CHECK(code == 2);
+    YORI_CHECK(contains(err, "cannot resolve command"));
+
+    code = run_cli(directory, socket_path, "submit -- /nonexistent/binary", out, err);
+    YORI_CHECK(code == 2);
+    YORI_CHECK(contains(err, "cannot resolve command"));
+
+    // 显式 --env 保留键：本地拒绝（YORI_* 前缀与 GPU 管理键）。
+    code = run_cli(directory, socket_path, "submit --env YORI_JOB_ID=9 -- /bin/true", out, err);
+    YORI_CHECK(code == 2);
+    YORI_CHECK(contains(err, "reserved key"));
+    code = run_cli(directory, socket_path,
+                   "submit --env CUDA_VISIBLE_DEVICES=0 -- /bin/true", out, err);
+    YORI_CHECK(code == 2);
+    YORI_CHECK(contains(err, "reserved key"));
+    code = run_cli(directory, socket_path, "submit --env LD_PRELOAD=/tmp/x.so -- /bin/true",
+                   out, err);
+    YORI_CHECK(code == 2);
+    YORI_CHECK(contains(err, "reserved key"));
+
+    // --inherit-env 超限显式失败：单值超出 JobSpec 上限（本地捕获拒绝）。
+    {
+      const std::string big = directory + "/big-var.txt";
+      FILE* file = std::fopen(big.c_str(), "w");
+      YORI_CHECK(file != nullptr);
+      for (int i = 0; i < 33 * 1024; ++i) {
+        static_cast<void>(std::fputc('x', file));
+      }
+      static_cast<void>(std::fclose(file));
+      code = run_cli_env(directory, socket_path,
+                         "env -i PATH=/usr/bin:/bin BIGVAR=$(cat " + big + ")",
+                         "submit --inherit-env -- /bin/true", out, err);
+      YORI_CHECK(code == 2);
+      YORI_CHECK(contains(err, "captured environment rejected"));
+      YORI_CHECK(contains(err, "BIGVAR"));
+    }
+
+    // --capture-env 扩展键：非白名单变量经扩展捕获并进入训练环境。
+    code = run_cli_env(directory, socket_path, "env -i PATH=/usr/bin:/bin M8_EXTRA=via-capture",
+                       "submit --capture-env M8_EXTRA -- /bin/sh -c 'echo extra=$M8_EXTRA'",
+                       out, err);
+    YORI_CHECK(code == 0);
+    YORI_CHECK(contains(out, "Submitted job 4"));
+    YORI_CHECK(wait_for_state(4, "FINISHED"));
+    code = run_cli(directory, socket_path, "logs 4", out, err);
+    YORI_CHECK(code == 0);
+    YORI_CHECK(contains(out, "extra=via-capture"));
+  }
 
   // 终态幂等（RULE-04）：重复取消已 CANCELLED 的 Job 成功；不存在显式失败。
   code = run_cli(directory, socket_path, "cancel 1", out, err);

@@ -37,6 +37,45 @@ std::vector<std::vector<std::uint8_t>> seed_corpus() {
   YORI_CHECK(append_request_frame(submit, frame));
   corpus.push_back(frame);
 
+  // M8（DEC-011）：v2 SUBMIT（捕获 executable + env 元数据）、v1 SUBMIT、
+  // INSPECT 请求与响应。
+  IpcRequest submit_v2 = submit;
+  submit_v2.submit.executable = std::string("/opt/conda/envs/t/bin/python");
+  submit_v2.submit.env_metadata = IpcEnvMetadata{1, std::string("3.11.5")};
+  frame.clear();
+  YORI_CHECK(append_request_frame(submit_v2, frame));
+  corpus.push_back(frame);
+
+  IpcRequest submit_v1 = submit;
+  submit_v1.version = 1;
+  frame.clear();
+  YORI_CHECK(append_request_frame(submit_v1, frame));
+  corpus.push_back(frame);
+
+  IpcRequest inspect_request;
+  inspect_request.kind = IpcRequestKind::kInspect;
+  inspect_request.inspect.job_id = 9;
+  frame.clear();
+  YORI_CHECK(append_request_frame(inspect_request, frame));
+  corpus.push_back(frame);
+
+  IpcResponse inspect_response;
+  inspect_response.kind = IpcRequestKind::kInspect;
+  inspect_response.inspect.job_id = 9;
+  inspect_response.inspect.cwd = "/srv/training";
+  inspect_response.inspect.executable = std::string("/opt/conda/bin/python");
+  inspect_response.inspect.argv = {"python", "train.py"};
+  inspect_response.inspect.env_metadata = IpcEnvMetadata{2, std::string("3.12.1")};
+  inspect_response.inspect.env = {IpcEnvEntry{"PATH", false, "/x"},
+                                  IpcEnvEntry{"HF_TOKEN", true, "***"}};
+  inspect_response.inspect.gpu_uuid = std::string("GPU-fuzz");
+  inspect_response.inspect.gpu_index = std::uint32_t{2};
+  inspect_response.inspect.submit_time_unix_ns = std::uint64_t{1757600000} * 1000000000ULL;
+  inspect_response.inspect.log_path = std::string("/var/lib/yori/jobs/9");
+  frame.clear();
+  YORI_CHECK(append_response_frame(inspect_response, frame));
+  corpus.push_back(frame);
+
   for (const IpcRequestKind kind :
        {IpcRequestKind::kPs, IpcRequestKind::kQueue, IpcRequestKind::kGpu}) {
     IpcRequest request;

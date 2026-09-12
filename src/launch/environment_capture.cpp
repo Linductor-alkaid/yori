@@ -4,9 +4,9 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstring>
-#include <ctime>
 #include <string>
 #include <utility>
 #include <vector>
@@ -289,9 +289,9 @@ std::optional<std::string> probe_python_version(const std::string& executable) {
   static_cast<void>(::close(pipe_fds[1]));
   std::string output;
   char buffer[512];
-  // 有界读取 + 有界等待（3s）：卡死的解释器不得阻塞提交。
-  const auto deadline = std::clock() + 3 * CLOCKS_PER_SEC;
-  while (std::clock() < deadline) {
+  // 有界读取 + 有界等待（3s 墙钟）：卡死/长驻的解释器不得阻塞提交。
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{3};
+  while (std::chrono::steady_clock::now() < deadline) {
     const ssize_t n = ::read(pipe_fds[0], buffer, sizeof(buffer));
     if (n > 0) {
       output.append(buffer, static_cast<std::size_t>(n));
@@ -311,7 +311,7 @@ std::optional<std::string> probe_python_version(const std::string& executable) {
 
   int status = 0;
   bool exited = false;
-  while (std::clock() < deadline) {
+  while (std::chrono::steady_clock::now() < deadline) {
     const pid_t reaped = ::waitpid(child, &status, WNOHANG);
     if (reaped == child) {
       exited = true;
