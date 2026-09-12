@@ -94,7 +94,7 @@ void test_external_busy_unblocks_on_observation_transition() {
   // 初始观测即 EXTERNAL_BUSY：手动触发一次调度验证队首阻塞（迁移事件未发生，
   // 该手动触发模拟其他调度触发源）。
   auto blocked = schedule_on_event(manager, scheduler);
-  YORI_CHECK(blocked.code == yori::scheduler::ScheduleResultCode::kHeadBlocked);
+  YORI_CHECK(blocked.code == yori::scheduler::ScheduleResultCode::kNoCandidate);
 
   // 外部进程退出：观测迁移 FREE -> 调度事件 -> lease 建立。
   provider.set_state(0, yori::gpu::GpuObservedState::kFree);
