@@ -108,7 +108,7 @@ class RawSql final {
     close_ = reinterpret_cast<decltype(&::sqlite3_close_v2)>(::dlsym(library_, "sqlite3_close_v2"));
     exec_ = reinterpret_cast<decltype(&::sqlite3_exec)>(::dlsym(library_, "sqlite3_exec"));
     YORI_CHECK(open_ != nullptr && close_ != nullptr && exec_ != nullptr);
-    YORI_CHECK(open_(path.c_str(), &db_, SQLITE_OPEN_READWRITE, nullptr) == SQLITE_OK);
+    YORI_CHECK(open_(path.c_str(), &db_, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr) == SQLITE_OK);
   }
 
   ~RawSql() {
@@ -141,6 +141,70 @@ SqliteStateStoreConfig config_for(const std::string& path) {
   config.max_jobs = 4;
   config.max_leases = 2;
   return config;
+}
+
+
+// ---------------------------------------------------------------------------
+// M8（DEC-011）：schema v2 执行上下文列、v1 -> v2 增量迁移与兼容读。
+// ---------------------------------------------------------------------------
+
+// 构造手工 blob：count(LE32) + [len(LE32) + bytes]...（与适配器编码一致）。
+std::string encoded_list(const std::vector<std::string>& items) {
+  std::string blob;
+  const auto put_u32 = [&blob](std::uint32_t value) {
+    for (int shift = 0; shift < 32; shift += 8) {
+      blob.push_back(static_cast<char>((value >> shift) & 0xFF));
+    }
+  };
+  put_u32(static_cast<std::uint32_t>(items.size()));
+  for (const std::string& item : items) {
+    put_u32(static_cast<std::uint32_t>(item.size()));
+    blob += item;
+  }
+  return blob;
+}
+
+std::string hex_blob(const std::string& blob) {
+  static const char* digits = "0123456789abcdef";
+  std::string hex = "X'";
+  for (const unsigned char c : blob) {
+    hex += digits[c >> 4];
+    hex += digits[c & 0xF];
+  }
+  hex += "'";
+  return hex;
+}
+
+// 以 v1 schema（无执行上下文列、schema_version=1）建库并写入一行手工编码的
+// QUEUED Job，模拟升级前的旧库。
+void create_v1_database(const std::string& path) {
+  RawSql sql(path);
+  sql.run(
+      "CREATE TABLE yori_meta(key TEXT PRIMARY KEY, value INTEGER NOT NULL) WITHOUT ROWID;"
+      "CREATE TABLE yori_jobs("
+      " job_id INTEGER PRIMARY KEY, state INTEGER NOT NULL, revision INTEGER NOT NULL,"
+      " owner_uid INTEGER NOT NULL, owner_gid INTEGER NOT NULL, argv BLOB NOT NULL,"
+      " cwd TEXT NOT NULL, env BLOB NOT NULL, gpu_request INTEGER NOT NULL,"
+      " launch_profile TEXT, tensorboard_logdir TEXT, submit_time_nanos INTEGER NOT NULL,"
+      " pid INTEGER NOT NULL, pgid INTEGER NOT NULL, start_ticks INTEGER NOT NULL,"
+      " has_start_time INTEGER NOT NULL, start_time_nanos INTEGER NOT NULL,"
+      " has_end_time INTEGER NOT NULL, end_time_nanos INTEGER NOT NULL,"
+      " has_exit INTEGER NOT NULL, exit_reason INTEGER NOT NULL, exit_code INTEGER NOT NULL,"
+      " exit_signal INTEGER NOT NULL, failure_reason TEXT, log_path TEXT);"
+      "CREATE TABLE yori_leases(gpu_uuid TEXT PRIMARY KEY, job_id INTEGER NOT NULL UNIQUE)"
+      " WITHOUT ROWID;"
+      "INSERT INTO yori_meta(key, value) VALUES ('schema_version', 1);"
+      "INSERT INTO yori_meta(key, value) VALUES ('revision', 0);");
+  const std::string insert =
+      "INSERT INTO yori_jobs(job_id, state, revision, owner_uid, owner_gid, argv, cwd, env,"
+      " gpu_request, launch_profile, tensorboard_logdir, submit_time_nanos, pid, pgid,"
+      " start_ticks, has_start_time, start_time_nanos, has_end_time, end_time_nanos,"
+      " has_exit, exit_reason, exit_code, exit_signal, failure_reason, log_path)"
+      " VALUES(1, 0, 0, 1000, 1000, " +
+      hex_blob(encoded_list({"/usr/bin/python3", "train.py"})) + ", '/srv', " +
+      hex_blob(encoded_list({"LC_ALL", "C"})) +
+      ", 1, NULL, NULL, 10000000000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL);";
+  sql.run(insert.c_str());
 }
 
 }  // namespace
@@ -447,6 +511,122 @@ int main() {
       SqliteStateStore store{config_for(tampered)};
       YORI_CHECK(store.open().ok());
       YORI_CHECK(store.load().code == StateStoreErrorCode::kInvalidJob);
+    }
+  }
+
+
+  // ---- M8：v2 执行上下文列 roundtrip ----------------------------------------
+  {
+    const std::string path = directory + "/v2-fields.db";
+    {
+      SqliteStateStore store{config_for(path)};
+      YORI_CHECK(store.open().ok());
+      auto captured = queued(1);
+      captured.spec.executable = "/opt/conda/envs/train/bin/python";
+      captured.spec.env_metadata =
+          yori::job::EnvMetadata{yori::job::EnvSource::kConda, "3.11.5"};
+      StateMutation create;
+      create.create_jobs.push_back(std::move(captured));
+      YORI_CHECK(store.apply(create).ok());
+    }
+    {
+      SqliteStateStore store{config_for(path)};
+      YORI_CHECK(store.open().ok());
+      const auto load = store.load();
+      YORI_CHECK(load.ok());
+      const auto& spec = require_job(load.snapshot, 1).spec;
+      YORI_CHECK(spec.executable == std::string("/opt/conda/envs/train/bin/python"));
+      YORI_CHECK(spec.env_metadata.has_value());
+      if (spec.env_metadata) {
+        YORI_CHECK(spec.env_metadata->source == yori::job::EnvSource::kConda);
+        YORI_CHECK(spec.env_metadata->python_version == std::string("3.11.5"));
+      }
+    }
+  }
+
+  // ---- M8：v1 库打开时增量迁移，v1 行按缺省补全读取 -------------------------
+  {
+    const std::string path = directory + "/v1-migrate.db";
+    create_v1_database(path);
+    {
+      SqliteStateStore store{config_for(path)};
+      YORI_CHECK(store.open().ok());
+      const auto load = store.load();
+      YORI_CHECK(load.ok());
+      YORI_CHECK(load.snapshot.jobs.size() == 1);
+      const auto& record = require_job(load.snapshot, 1);
+      YORI_CHECK(record.state == JobState::kQueued);
+      YORI_CHECK(record.spec.argv ==
+                 std::vector<std::string>({"/usr/bin/python3", "train.py"}));
+      YORI_CHECK(record.spec.cwd == "/srv");
+      YORI_CHECK(!record.spec.executable.has_value());
+      YORI_CHECK(!record.spec.env_metadata.has_value());
+      YORI_CHECK(load.snapshot.revision == 0);
+    }
+    // 迁移后 schema_version=2：再次打开不重复迁移，新写入带捕获字段。
+    {
+      RawSql sql(path);
+      // 版本断言经再次打开隐式覆盖（3 将被拒绝）；此处仅确认可继续写入。
+      static_cast<void>(sql);
+    }
+    {
+      SqliteStateStore store{config_for(path)};
+      YORI_CHECK(store.open().ok());
+      auto captured = queued(2);
+      captured.spec.executable = "/usr/bin/python3";
+      captured.spec.env_metadata =
+          yori::job::EnvMetadata{yori::job::EnvSource::kVenv, std::nullopt};
+      StateMutation create;
+      create.expected_revision = 0;
+      create.create_jobs.push_back(std::move(captured));
+      YORI_CHECK(store.apply(create).ok());
+      const auto load = store.load();
+      YORI_CHECK(load.ok());
+      YORI_CHECK(load.snapshot.jobs.size() == 2);
+      const auto& migrated = require_job(load.snapshot, 2);
+      YORI_CHECK(migrated.spec.executable == std::string("/usr/bin/python3"));
+      YORI_CHECK(migrated.spec.env_metadata.has_value() &&
+                 migrated.spec.env_metadata->source == yori::job::EnvSource::kVenv &&
+                 !migrated.spec.env_metadata->python_version.has_value());
+    }
+  }
+
+  // ---- M8：篡改 environment_type / 未来 schema 版本显式失败 -----------------
+  {
+    const std::string path = directory + "/tampered-env-type.db";
+    {
+      SqliteStateStore store{config_for(path)};
+      YORI_CHECK(store.open().ok());
+      StateMutation create;
+      create.create_jobs.push_back(queued(1));
+      YORI_CHECK(store.apply(create).ok());
+    }
+    {
+      RawSql sql(path);
+      sql.run("UPDATE yori_jobs SET environment_type = 'bogus' WHERE job_id = 1;");
+    }
+    {
+      SqliteStateStore store{config_for(path)};
+      YORI_CHECK(store.open().ok());
+      const auto load = store.load();
+      YORI_CHECK(load.code == StateStoreErrorCode::kInvalidJob);
+    }
+  }
+  {
+    const std::string path = directory + "/orphan-version.db";
+    {
+      SqliteStateStore store{config_for(path)};
+      YORI_CHECK(store.open().ok());
+    }
+    {
+      RawSql sql(path);
+      sql.run("UPDATE yori_meta SET value = 3 WHERE key = 'schema_version';");
+    }
+    {
+      SqliteStateStore store{config_for(path)};
+      const auto result = store.open();
+      YORI_CHECK(result.code == SqliteStoreOpenCode::kSchemaInitFailed);
+      YORI_CHECK(result.detail.find("unsupported schema version") != std::string::npos);
     }
   }
 

@@ -55,9 +55,11 @@ std::string truncate_detail(const char* raw) {
   return detail;
 }
 
-// 首版 schema（DEC-009 的持久化格式承诺；兼容性变更需决策记录）。argv/env 以
+// schema v2（DEC-011 的持久化格式承诺；兼容性变更需决策记录）。argv/env 以
 // length-prefixed blob 编码，时间以 Unix epoch 纳秒编码，可空字段以独立
-// has_* 标志或 SQL NULL 表示。
+// has_* 标志或 SQL NULL 表示。v2 新增执行上下文列（executable/
+// environment_type/python_version，均 NULL = 未捕获）；v1 库打开时按
+// migrate_schema_v1_to_v2 单事务增量迁移。
 constexpr const char* kSchemaSql =
     "BEGIN IMMEDIATE;"
     "CREATE TABLE IF NOT EXISTS yori_meta("
@@ -88,12 +90,25 @@ constexpr const char* kSchemaSql =
     "  exit_code INTEGER NOT NULL,"
     "  exit_signal INTEGER NOT NULL,"
     "  failure_reason TEXT,"
-    "  log_path TEXT);"
+    "  log_path TEXT,"
+    "  executable TEXT,"
+    "  environment_type TEXT,"
+    "  python_version TEXT);"
     "CREATE TABLE IF NOT EXISTS yori_leases("
     "  gpu_uuid TEXT PRIMARY KEY,"
     "  job_id INTEGER NOT NULL UNIQUE) WITHOUT ROWID;"
-    "INSERT OR IGNORE INTO yori_meta(key, value) VALUES ('schema_version', 1);"
+    "INSERT OR IGNORE INTO yori_meta(key, value) VALUES ('schema_version', 2);"
     "INSERT OR IGNORE INTO yori_meta(key, value) VALUES ('revision', 0);"
+    "COMMIT;";
+
+// v1 -> v2 增量迁移（单事务；DEC-009 原子性纪律）：仅追加可空列，v1 行按
+// NULL（未捕获）补全。
+constexpr const char* kMigrationV1ToV2Sql =
+    "BEGIN IMMEDIATE;"
+    "ALTER TABLE yori_jobs ADD COLUMN executable TEXT;"
+    "ALTER TABLE yori_jobs ADD COLUMN environment_type TEXT;"
+    "ALTER TABLE yori_jobs ADD COLUMN python_version TEXT;"
+    "UPDATE yori_meta SET value = 2 WHERE key = 'schema_version';"
     "COMMIT;";
 
 void put_u32_le(std::string& out, std::uint32_t value) {
@@ -354,6 +369,30 @@ SqliteStoreOpenResult SqliteStateStore::Impl::open() {
     return {SqliteStoreOpenCode::kSchemaInitFailed, detail};
   }
 
+  // schema 版本核验与增量迁移（DEC-011）：v1 -> v2 单事务追加可空列；更高
+  // 版本（来自更新 daemon 的库）显式拒绝，不静默误读。
+  {
+    StmtGuard version_stmt(symbols, db,
+                           "SELECT value FROM yori_meta WHERE key = 'schema_version';");
+    if (!version_stmt.prepared() || symbols.step(version_stmt.get()) != SQLITE_ROW) {
+      const std::string detail = describe_error();
+      close();
+      return {SqliteStoreOpenCode::kSchemaInitFailed, detail};
+    }
+    const sqlite3_int64 schema_version = symbols.column_int64(version_stmt.get(), 0);
+    if (schema_version == 1) {
+      if (!exec_simple(kMigrationV1ToV2Sql)) {
+        const std::string detail = describe_error();
+        close();
+        return {SqliteStoreOpenCode::kSchemaInitFailed, "v1->v2 migration failed: " + detail};
+      }
+    } else if (schema_version != 2) {
+      close();
+      return {SqliteStoreOpenCode::kSchemaInitFailed,
+              "unsupported schema version " + std::to_string(schema_version)};
+    }
+  }
+
   // 状态文件仅 daemon（root）读写：尽力收敛权限，失败不阻断打开（记录于
   // DEC-009 的部署约束）。
   static_cast<void>(::chmod(config.database_path.c_str(), 0600));
@@ -402,7 +441,8 @@ bool SqliteStateStore::Impl::decode_jobs(DecodedState& state, StateStoreErrorCod
                  " cwd, env, gpu_request, launch_profile, tensorboard_logdir,"
                  " submit_time_nanos, pid, pgid, start_ticks, has_start_time,"
                  " start_time_nanos, has_end_time, end_time_nanos, has_exit,"
-                 " exit_reason, exit_code, exit_signal, failure_reason, log_path"
+                 " exit_reason, exit_code, exit_signal, failure_reason, log_path,"
+                 " executable, environment_type, python_version"
                  " FROM yori_jobs ORDER BY job_id;");
   if (!stmt.prepared()) {
     error = StateStoreErrorCode::kBackendUnavailable;
@@ -511,6 +551,28 @@ bool SqliteStateStore::Impl::decode_jobs(DecodedState& state, StateStoreErrorCod
     record.execution.failure_reason = nullable_text(symbols, stmt.get(), 23);
     record.execution.log_path = nullable_text(symbols, stmt.get(), 24);
 
+    // v2 执行上下文列（DEC-011）：environment_type 取值受控；python_version
+    // 仅在 environment_type 存在时合法（篡改/损坏数据显式失败）。
+    record.spec.executable = nullable_text(symbols, stmt.get(), 25);
+    if (const auto environment_type = nullable_text(symbols, stmt.get(), 26)) {
+      job::EnvMetadata metadata;
+      if (*environment_type == "conda") {
+        metadata.source = job::EnvSource::kConda;
+      } else if (*environment_type == "venv") {
+        metadata.source = job::EnvSource::kVenv;
+      } else if (*environment_type == "none") {
+        metadata.source = job::EnvSource::kNone;
+      } else {
+        error = StateStoreErrorCode::kInvalidJob;
+        return false;
+      }
+      metadata.python_version = nullable_text(symbols, stmt.get(), 27);
+      record.spec.env_metadata = std::move(metadata);
+    } else if (nullable_text(symbols, stmt.get(), 27).has_value()) {
+      error = StateStoreErrorCode::kInvalidJob;
+      return false;
+    }
+
     if (!record.id.valid() || !job::validate(record.spec)) {
       error = StateStoreErrorCode::kInvalidJob;
       return false;
@@ -604,9 +666,10 @@ bool SqliteStateStore::Impl::write_job_row(const StoredJob& record) {
                  " gpu_request, launch_profile, tensorboard_logdir, submit_time_nanos,"
                  " pid, pgid, start_ticks, has_start_time, start_time_nanos,"
                  " has_end_time, end_time_nanos, has_exit, exit_reason, exit_code,"
-                 " exit_signal, failure_reason, log_path)"
+                 " exit_signal, failure_reason, log_path, executable,"
+                 " environment_type, python_version)"
                  " VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,"
-                 " ?17,?18,?19,?20,?21,?22,?23,?24,?25);");
+                 " ?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28);");
   if (!stmt.prepared()) {
     return false;
   }
@@ -657,7 +720,15 @@ bool SqliteStateStore::Impl::write_job_row(const StoredJob& record) {
       !bind_i64(22, record.execution.exit.has_value() ? record.execution.exit->exit_code : 0) ||
       !bind_i64(23, record.execution.exit.has_value() ? record.execution.exit->signal_number : 0) ||
       !bind_nullable_text(24, record.execution.failure_reason) ||
-      !bind_nullable_text(25, record.execution.log_path)) {
+      !bind_nullable_text(25, record.execution.log_path) ||
+      !bind_nullable_text(26, record.spec.executable) ||
+      !bind_nullable_text(27, record.spec.env_metadata
+                                        ? std::optional<std::string>{
+                                              job::to_string(record.spec.env_metadata->source)}
+                                        : std::nullopt) ||
+      !bind_nullable_text(28, record.spec.env_metadata
+                                        ? record.spec.env_metadata->python_version
+                                        : std::nullopt)) {
     return false;
   }
 
