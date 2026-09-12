@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <memory>
 #include <string>
 #include <thread>
@@ -38,6 +39,20 @@ std::string make_directory() {
   char* directory = ::mkdtemp(pattern);
   YORI_CHECK(directory != nullptr);
   return directory;
+}
+
+// 阶段标记（stderr 无缓冲）：CI 偶发超时时定位挂点（ctest --output-on-failure）。
+void phase(const char* marker) {
+  const auto now = std::chrono::system_clock::now();
+  const std::time_t seconds = std::chrono::system_clock::to_time_t(now);
+  struct ::tm broken {};
+  ::localtime_r(&seconds, &broken);
+  std::fprintf(
+      stderr, "[e2e %02d:%02d:%02d.%03d] %s\n", broken.tm_hour, broken.tm_min, broken.tm_sec,
+      static_cast<int>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() %
+          1000),
+      marker);
 }
 
 std::string read_file(const std::string& path) {
@@ -185,6 +200,7 @@ int main() {
   };
 
   const auto wait_for_state = [&](std::uint64_t job_id, const char* state) {
+    phase(("wait job " + std::to_string(job_id) + " -> " + state).c_str());
     const auto deadline = std::chrono::steady_clock::now() + 15s;
     while (std::chrono::steady_clock::now() < deadline) {
       std::string line;
@@ -196,12 +212,14 @@ int main() {
     return false;
   };
 
+  phase("submit job1");
   // job 1：长驻训练占住唯一 FREE GPU。
   code = run_cli(directory, socket_path, "submit -- /bin/sh -c 'sleep 30'", out, err);
   YORI_CHECK(code == 0);
   YORI_CHECK(contains(out, "Submitted job 1"));
   YORI_CHECK(wait_for_state(1, "RUNNING"));
 
+  phase("submit job2");
   // job 2：无空闲 GPU，保持 QUEUED（FIFO 头部阻塞，不绕过）。
   code = run_cli(directory, socket_path,
                  "submit -- /bin/sh -c 'echo e2e-stdout; echo e2e-stderr 1>&2'", out, err);
@@ -225,6 +243,7 @@ int main() {
   YORI_CHECK(contains(out, "GPU-e2e-a") && contains(out, "ALLOCATED"));
   YORI_CHECK(contains(out, "GPU-e2e-b") && contains(out, "EXTERNAL_BUSY"));
 
+  phase("cancel job1");
   // 运行中 Job 的取消（SIGTERM -> 宽限 -> SIGKILL 路径）：响应 STOPPING，
   // 随后终态 CANCELLED 并释放 lease -> job 2 自动调度（队首推进）。
   code = run_cli(directory, socket_path, "cancel 1", out, err);
@@ -235,6 +254,7 @@ int main() {
   // FIFO 链式启动：前一个释放 GPU 后，后一个自动 RUNNING -> FINISHED。
   YORI_CHECK(wait_for_state(2, "FINISHED"));
 
+  phase("logs snapshot job2");
   // 日志快照：job 2 的两路输出落盘可见（stdout 走 CLI stdout、stderr 走
   // CLI stderr）。
   code = run_cli(directory, socket_path, "logs 2", out, err);
@@ -242,6 +262,7 @@ int main() {
   YORI_CHECK(contains(out, "e2e-stdout"));
   YORI_CHECK(contains(err, "e2e-stderr"));
 
+  phase("logs -f job2");
   // logs -f：对已终态 Job 以 since=0 回放全部窗口后 EOF，退出码与终态对齐
   // （FINISHED -> 0）；无 since 时按设计从订阅时刻的流末开始（空回放）。
   code = run_cli(directory, socket_path, "logs -f 2 --since-stdout 0 --since-stderr 0", out, err);
@@ -249,6 +270,7 @@ int main() {
   YORI_CHECK(contains(out, "e2e-stdout"));
   YORI_CHECK(contains(err, "e2e-stderr"));
 
+  phase("M8 section begin");
   // ---- M8（DEC-011）：执行上下文捕获的端到端语义一致性 -----------------------
   {
     const std::string fake_root = write_fake_conda_env(directory);
@@ -263,6 +285,7 @@ int main() {
     YORI_CHECK(contains(out, "Submitted job 3"));
     YORI_CHECK(wait_for_state(3, "RUNNING"));
 
+    phase("inspect job3 running");
     // 运行中 inspect（owner）：来源 conda、executable 为解析出的绝对路径、
     // 敏感值掩码（原值不出现在输出）、分配结果为 lease 的 GPU。
     code = run_cli(directory, socket_path, "inspect 3", out, err);
@@ -292,6 +315,7 @@ int main() {
     YORI_CHECK(contains(out, "VIRTUAL_ENV=/old-venv"));
     YORI_CHECK(contains(out, "LD_LIBRARY_PATH=" + fake_root + "/lib"));
 
+    phase("negative resolution/env tests");
     // executable 解析失败：提交即拒（fail-fast，本地用法错误 2）。
     code = run_cli_env(directory, socket_path, "env -i PATH=/nonexistent-dir",
                        "submit -- no-such-cmd", out, err);
@@ -344,6 +368,7 @@ int main() {
     YORI_CHECK(contains(out, "extra=via-capture"));
   }
 
+  phase("idempotent cancel + final queue");
   // 终态幂等（RULE-04）：重复取消已 CANCELLED 的 Job 成功；不存在显式失败。
   code = run_cli(directory, socket_path, "cancel 1", out, err);
   YORI_CHECK(code == 0);
@@ -370,6 +395,7 @@ int main() {
   code = run_cli(directory, directory + "/missing.sock", "ps", out, err);
   YORI_CHECK(code == 3);
 
+  phase("daemon stop");
   // daemon 停止后：端点清理，再连失败。
   YORI_CHECK(daemon.stop() == yori::runtime::DaemonStopCode::kStopped);
   {
@@ -379,7 +405,9 @@ int main() {
   code = run_cli(directory, socket_path, "ps", out, err);
   YORI_CHECK(code == 3);
 
+  phase("executor shutdown");
   YORI_CHECK(runtime.shutdown() == yori::runtime::ExecutorRuntimeShutdownResult::kCompleted);
+  phase("done");
 
   if (yori::testing::failure_count != 0) {
     std::fprintf(stderr, "ipc e2e: %d failure(s)\n", yori::testing::failure_count);

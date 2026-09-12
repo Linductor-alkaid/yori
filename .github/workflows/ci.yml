@@ -78,7 +78,9 @@ jobs:
       - name: build
         run: cmake --build --preset ${{ matrix.preset }}
       - name: test
-        run: ctest --preset ${{ matrix.preset }}
+        # --output-on-failure：超时/失败用例的输出（含 e2e 阶段标记）必须可见，
+        # 否则偶发超时无法定位（PR #18 复盘）。
+        run: ctest --preset ${{ matrix.preset }} --output-on-failure
       - name: 测试标签与显式 skip 演示（M0-06）
         run: |
           ctest --test-dir build/${{ matrix.preset }} -N --print-labels
