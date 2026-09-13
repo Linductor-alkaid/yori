@@ -240,8 +240,7 @@ int main() {
     const auto* missing_skip = find_skip(result.evaluation, 4);
     YORI_CHECK(external_skip != nullptr &&
                external_skip->reason == WaitReason::kAffinityGpuExternal);
-    YORI_CHECK(missing_skip != nullptr &&
-               missing_skip->reason == WaitReason::kAffinityGpuState);
+    YORI_CHECK(missing_skip != nullptr && missing_skip->reason == WaitReason::kAffinityGpuState);
     auto state = scenario.store.load();
     YORI_CHECK(require_job(state.snapshot, 2).state == JobState::kQueued);
     YORI_CHECK(require_job(state.snapshot, 3).state == JobState::kQueued);
