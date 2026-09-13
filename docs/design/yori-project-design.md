@@ -4,7 +4,8 @@
 > **状态**：设计草案 v0.15（M8 执行上下文捕获已实现
 > [DEC-011](../decisions/DEC-011-execution-context-capture.md)、M9 GPU placement
 > 已实现 [DEC-012](../decisions/DEC-012-gpu-placement-policy.md)、M10 亲和感知
-> ANY 设备选择已实现 [DEC-013](../decisions/DEC-013-affinity-aware-any-placement.md)）\
+> ANY 设备选择已实现 [DEC-013](../decisions/DEC-013-affinity-aware-any-placement.md)、
+> M11 GPU Set 与 PREFERRED 已实现 [DEC-014](../decisions/DEC-014-preferred-gpu-set-placement.md)）\
 > **日期**：2026-09-13
 
 ## 1. 项目摘要
@@ -213,7 +214,7 @@ JobSpec
   executable                  # M8：提交时解析的 argv[0] 绝对路径（DEC-011）
   env_metadata                # M8：environment_type / python_version（可选）
   gpu_request                 # MVP 默认 1 GPU
-  gpu_placement               # M9：ANY / REQUIRED 亲和约束（DEC-012）
+  gpu_placement               # M9/M11：ANY / REQUIRED 集合 / PREFERRED（DEC-012/DEC-014）
   launch_profile              # 可选项目/框架适配器
   tensorboard_logdir          # 可选；相对 cwd 的指标目录，供 yori tensorboard 使用
   priority                    # 后续扩展
@@ -236,7 +237,7 @@ M5 从 IPC 建立 `JobSpec` 时，owner 字段只能取自 `SO_PEERCRED`，客�
 | `launch_profile` | 可选；存在时 1..128 bytes；不得含 NUL |
 | `tensorboard_logdir` | 可选；存在时为 cwd 下相对路径，1..4096 bytes，不得含 NUL、绝对路径或 `..` 路径分量 |
 | `executable`（M8） | 绝对路径；1..4096 bytes；不得含 NUL；由 CLI 在提交时解析，解析失败即拒绝提交 |
-| `gpu_placement`（M9） | `kAny`（默认，devices 为空）或 `kRequired`（devices 恰 1 个合法 GpuUuid）；UUID 由 daemon 在提交时解析，客户端索引不构成持久化身份 |
+| `gpu_placement`（M9/M11） | `kAny`（默认，devices 为空）、`kRequired`（1..8 个去重合法 GpuUuid，GPU Set）或 `kPreferred`（恰 1 个合法 GpuUuid，软偏好）；UUID 由 daemon 在提交时解析，客户端索引不构成持久化身份（DEC-012/DEC-014） |
 
 校验拒绝通过 `JobSpecValidationResult` 返回稳定错误码和可选条目下标；Job 创建
 失败通过 `JobCreationError` 区分无效 JobId 与无效 JobSpec，不以截断或静默修复
@@ -974,7 +975,7 @@ cwd
 必要 env
 executable                # M8（DEC-011，schema v2）
 env_metadata              # M8：environment_type / python_version
-gpu_placement             # M9（DEC-012，schema v3）
+gpu_placement             # M9/M11（DEC-012/DEC-014，schema v4）
 launch_profile
 
 requested_gpus
@@ -1114,6 +1115,8 @@ yori submit [--env K=V]... [--inherit-env] [--capture-env KEY]... -- CMD
                                                      # M8 已交付：执行上下文捕获（DEC-011）
 yori inspect <job-id>                                # M8 已交付：执行上下文与 provenance
 yori submit --gpu 2 -- CMD                           # M9 已交付：REQUIRED 硬亲和（DEC-012）
+yori submit --gpu-any-of 0,3 -- CMD                  # M11 已交付：GPU Set（DEC-014）
+yori submit --gpu-preferred 2 -- CMD                 # M11 已交付：PREFERRED 软偏好（DEC-014）
 ```
 
 ### 13.2 IPC 协议要点
@@ -1162,6 +1165,12 @@ M5 落地请求/响应族协议 v1，公开契约位于 `include/yori/ipc/`：
     （亲和目标 UUID，仅 owner/admin 视图由服务端填充，脱敏视图只有原因）；
     `INSPECT` 尾部追加 placement（mode + required 目标）。v1/v2 客户端行为
     不变（响应按请求版本编码，不携带 v3 字段）。
+-   **协议 v4（M11 已交付，DEC-014）**：`SUBMIT` 的 `gpu_spec` 允许逗号分隔
+    1..8 个条目（index/UUID 混用，daemon 解析为去重 UUID 集合，mode =
+    REQUIRED；v3 及更早帧单条目语义不变），body 尾部追加可选
+    `gpu_preferred_spec`（PREFERRED 软偏好，与 `gpu_spec` 互斥）；`INSPECT`
+    尾部追加 required 集合设备 UUID 列表，mode 值域扩展（2 = preferred）。
+    v1/v2/v3 客户端行为不变。
 -   **响应**：统一错误码（NONE/PROTOCOL/UNSUPPORTED/DENIED/INVALID_SPEC/
     QUEUE_REJECTED/STORE_FAILED/NOT_FOUND/INVALID_STATE/NOT_AVAILABLE/LIMIT/
     INTERNAL）+ detail + 按 kind 的结果体；错误响应携带可用上下文（如
@@ -1404,6 +1413,12 @@ MVP 后第一批增强已立项（2026-09-12，依据 issue #16/#10 真机反馈
     placement、稳定 UUID 身份、候选集过滤、FIFO 有界跳过（修订 DEC-005 队首
     语义）与等待原因展示。目标：用户声明"任务允许在哪些 GPU 运行"，Yori 在
     约束内调度，硬亲和不造成全局队头阻塞。
+-   **M11 GPU Set 与 PREFERRED**
+    （[DEC-014](../decisions/DEC-014-preferred-gpu-set-placement.md)，2026-09-13
+    收口 POST-11 余项）：`--gpu-any-of` GPU Set（REQUIRED 作用于 1..8 设备
+    集合，绝不 fallback 出集合）、`--gpu-preferred` 软偏好（目标不可用回退
+    kAny 亲和感知选择，`PREFERRED_FALLBACK` 可观察）；协议 v4 与 schema v4
+    增量迁移。目标：覆盖 issue #10 建议模型的三种基础形态。
 -   **M10 亲和感知 ANY 设备选择**
     （[DEC-013](../decisions/DEC-013-affinity-aware-any-placement.md)，2026-09-13
     依 issue #22 从 POST-11 提前）：`ANY` 多候选选择避开同扫描窗口内等待中
@@ -1435,9 +1450,10 @@ MVP 后第一批增强已立项（2026-09-12，依据 issue #16/#10 真机反馈
 -   Container backend。
 -   Job dependency。
 -   Reservation。
--   GPU Set / tag / pool、PREFERRED 模式与项目级 placement profile
-    （GPU affinity 基础能力已由 M9 承接，见 16.2 与
-    [DEC-012](../decisions/DEC-012-gpu-placement-policy.md)）。
+-   tag / pool、项目级 placement profile 与管理员静态映射
+    （GPU affinity 基础能力已由 M9/M11 承接，见 16.2 与
+    [DEC-012](../decisions/DEC-012-gpu-placement-policy.md)、
+    [DEC-014](../decisions/DEC-014-preferred-gpu-set-placement.md)）。
 -   MIG。
 -   Heyaki transport。
 -   Central Scheduler。

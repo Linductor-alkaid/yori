@@ -36,8 +36,9 @@ struct GpuPlacement {
 - `kAny`：现行为，全部 GPU 参与候选；
 - `kRequired`：只允许运行在指定 GPU 上，目标被 lease/`EXTERNAL_BUSY`/
   `UNAVAILABLE` 时保持 `QUEUED`，绝不 fallback 到其他 GPU；
-- `kPreferred`（优先指定、允许 fallback）**不进入 M9**，与 GPU Set
-  （`--gpu-any-of`）一同延后（POST-11）。
+- `kPreferred`（优先指定、允许 fallback）与 GPU Set（`--gpu-any-of`）
+  不进入 M9，延后至 POST-11；已于 2026-09-13 由
+  [DEC-014](DEC-014-preferred-gpu-set-placement.md)/M11 交付。
 
 Issue #10 开放问题的裁决：
 
@@ -152,5 +153,6 @@ index↔UUID 映射变化不错误迁移 REQUIRED Job；owner/admin/脱敏视图
 规则由其扩展为亲和感知软保护，M10）；
 [设计文档](../design/yori-project-design.md)第 6.1、7、9、13 节；
 M9 工作项（[总计划](../plans/yori-implementation-plan.md)第 5 节）；
-POST-11（PREFERRED/GPU Set；affinity-aware 选择已由 DEC-013 承接）、
-POST-12（tag/pool、项目级 profile、管理员静态映射）。
+POST-11 已由 DEC-013（affinity-aware ANY 选择）与
+[DEC-014](DEC-014-preferred-gpu-set-placement.md)（PREFERRED/GPU Set）全部
+承接；POST-12（tag/pool、项目级 profile、管理员静态映射）延后。
