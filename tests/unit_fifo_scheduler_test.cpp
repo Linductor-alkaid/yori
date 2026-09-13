@@ -37,6 +37,27 @@ yori::store::StoredJob queued_required(std::uint64_t id, std::chrono::seconds su
   return record;
 }
 
+// DEC-014：kRequired 集合（GPU Set）Job。
+yori::store::StoredJob queued_required_set(std::uint64_t id, std::chrono::seconds submitted_at,
+                                           std::uint32_t uid,
+                                           std::initializer_list<const char*> uuids) {
+  yori::store::StoredJob record = queued(id, submitted_at, uid);
+  record.spec.gpu_placement.mode = yori::job::GpuPlacementMode::kRequired;
+  for (const char* uuid : uuids) {
+    record.spec.gpu_placement.devices.push_back(yori::gpu::GpuUuid{uuid});
+  }
+  return record;
+}
+
+// DEC-014：kPreferred 软偏好 Job。
+yori::store::StoredJob queued_preferred(std::uint64_t id, std::chrono::seconds submitted_at,
+                                        std::uint32_t uid, const char* target_uuid) {
+  yori::store::StoredJob record = queued(id, submitted_at, uid);
+  record.spec.gpu_placement.mode = yori::job::GpuPlacementMode::kPreferred;
+  record.spec.gpu_placement.devices.push_back(yori::gpu::GpuUuid{target_uuid});
+  return record;
+}
+
 yori::gpu::GpuObservation gpu(const char* uuid, std::uint32_t index,
                               yori::gpu::GpuObservedState state) {
   return {yori::gpu::GpuUuid{uuid}, index, state, {}};
@@ -516,6 +537,124 @@ int main() {
     YORI_CHECK(result.event.job_id == JobId{1});
     YORI_CHECK(result.event.gpu_uuid == yori::gpu::GpuUuid{"GPU-0"});
     YORI_CHECK(result.event.selection_reason == GpuSelectionReason::kDefault);
+  }
+
+  // ---- M11（DEC-014）：集合 REQUIRED——集合内按 index 最小命中 -------------
+  {
+    Scenario scenario{1};
+    scenario.seed({queued_required_set(1, std::chrono::seconds{10}, 1001, {"GPU-B", "GPU-A"})});
+    yori::scheduler::FifoScheduler scheduler{*scenario.queue, scenario.store};
+    const auto observation = snapshot({gpu("GPU-A", 0, GpuObservedState::kFree),
+                                       gpu("GPU-B", 3, GpuObservedState::kFree),
+                                       gpu("GPU-C", 5, GpuObservedState::kFree)});
+    const auto result = scheduler.run_once(SchedulerTrigger::kJobSubmitted, observation);
+    // 集合外 GPU-C 即使 index 更小也不可选中（声明顺序无关，按物理 index）。
+    YORI_CHECK(result.scheduled());
+    YORI_CHECK(result.event.gpu_uuid == yori::gpu::GpuUuid{"GPU-A"});
+    YORI_CHECK(result.event.selection_reason == GpuSelectionReason::kDefault);
+  }
+
+  // ---- M11：集合 REQUIRED——部分可用按 index 取可用者，绝不 fallback 出集合
+  {
+    Scenario scenario{1};
+    scenario.seed({queued_required_set(1, std::chrono::seconds{10}, 1001, {"GPU-B", "GPU-C"})});
+    yori::scheduler::FifoScheduler scheduler{*scenario.queue, scenario.store};
+    const auto observation = snapshot({gpu("GPU-B", 3, GpuObservedState::kExternalBusy),
+                                       gpu("GPU-C", 5, GpuObservedState::kFree),
+                                       gpu("GPU-FREE", 0, GpuObservedState::kFree)});
+    const auto result = scheduler.run_once(SchedulerTrigger::kJobSubmitted, observation);
+    YORI_CHECK(result.scheduled());
+    YORI_CHECK(result.event.gpu_uuid == yori::gpu::GpuUuid{"GPU-C"});
+  }
+
+  // ---- M11：集合 REQUIRED——全忙跳过，等待原因聚合与代表设备 --------------
+  {
+    Scenario scenario{3};
+    scenario.seed({queued_required_set(1, std::chrono::seconds{1}, 1001, {"GPU-A", "GPU-X"}),
+                   queued_required_set(2, std::chrono::seconds{2}, 1002, {"GPU-U", "GPU-MISS"}),
+                   queued_required_set(3, std::chrono::seconds{3}, 1003, {"GPU-F", "GPU-MISS2"})});
+    yori::scheduler::FifoScheduler scheduler{*scenario.queue, scenario.store};
+    const auto observation = snapshot({gpu("GPU-F", 4, GpuObservedState::kUnavailable),
+                                       gpu("GPU-A", 0, GpuObservedState::kExternalBusy),
+                                       gpu("GPU-X", 1, GpuObservedState::kUnavailable),
+                                       gpu("GPU-U", 2, GpuObservedState::kUnavailable),
+                                       gpu("GPU-MISS2", 9, GpuObservedState::kUnavailable)});
+    const auto result = scheduler.run_once(SchedulerTrigger::kGpuStateChanged, observation);
+    YORI_CHECK(result.code == ScheduleResultCode::kNoCandidate);
+    YORI_CHECK(result.evaluation.skipped.size() == 3);
+    // J1：无 lease、有 EXTERNAL_BUSY → EXTERNAL；代表 = 集合内最小 index 观测设备。
+    const auto* external = find_skip(result.evaluation, 1);
+    YORI_CHECK(external != nullptr && external->reason == WaitReason::kAffinityGpuExternal);
+    YORI_CHECK(external->target == yori::gpu::GpuUuid{"GPU-A"});
+    // J2：UNAVAILABLE + 观测缺失 → STATE；代表 = GPU-U（MISS 无观测）。
+    const auto* state_skip = find_skip(result.evaluation, 2);
+    YORI_CHECK(state_skip != nullptr && state_skip->reason == WaitReason::kAffinityGpuState);
+    YORI_CHECK(state_skip->target == yori::gpu::GpuUuid{"GPU-U"});
+    // J3：GPU-F UNAVAILABLE（观测存在）→ STATE；代表 = GPU-F（MISS2 无观测）。
+    const auto* free_skip = find_skip(result.evaluation, 3);
+    YORI_CHECK(free_skip != nullptr && free_skip->reason == WaitReason::kAffinityGpuState);
+    YORI_CHECK(free_skip->target == yori::gpu::GpuUuid{"GPU-F"});
+  }
+
+  // ---- M11：集合 REQUIRED 参与 DEC-013 软保护（全部集合设备） -------------
+  {
+    Scenario scenario{2};
+    scenario.seed({queued(1, std::chrono::seconds{10}, 1001),
+                   queued_required_set(2, std::chrono::seconds{20}, 1002, {"GPU-0", "GPU-1"})});
+    yori::scheduler::FifoScheduler scheduler{*scenario.queue, scenario.store};
+    const auto observation = snapshot({gpu("GPU-0", 0, GpuObservedState::kFree),
+                                       gpu("GPU-1", 1, GpuObservedState::kFree),
+                                       gpu("GPU-2", 2, GpuObservedState::kFree)});
+    const auto result = scheduler.run_once(SchedulerTrigger::kJobSubmitted, observation);
+    // 集合两卡都被保护：J1 选择集合外 GPU-2。
+    YORI_CHECK(result.scheduled());
+    YORI_CHECK(result.event.gpu_uuid == yori::gpu::GpuUuid{"GPU-2"});
+    YORI_CHECK(result.event.selection_reason == GpuSelectionReason::kAvoidRequiredAffinity);
+  }
+
+  // ---- M11：PREFERRED 目标可用——优先命中（kDefault） ----------------------
+  {
+    Scenario scenario{1};
+    scenario.seed({queued_preferred(1, std::chrono::seconds{10}, 1001, "GPU-B")});
+    yori::scheduler::FifoScheduler scheduler{*scenario.queue, scenario.store};
+    const auto observation = snapshot(
+        {gpu("GPU-A", 0, GpuObservedState::kFree), gpu("GPU-B", 3, GpuObservedState::kFree)});
+    const auto result = scheduler.run_once(SchedulerTrigger::kJobSubmitted, observation);
+    YORI_CHECK(result.scheduled());
+    YORI_CHECK(result.event.gpu_uuid == yori::gpu::GpuUuid{"GPU-B"});
+    YORI_CHECK(result.event.selection_reason == GpuSelectionReason::kDefault);
+  }
+
+  // ---- M11：PREFERRED 目标被 lease——回退 kAny 亲和感知选择 ----------------
+  {
+    Scenario scenario{3};
+    scenario.seed({queued_required(1, std::chrono::seconds{1}, 1001, "GPU-B"),
+                   queued_preferred(2, std::chrono::seconds{2}, 1002, "GPU-B")});
+    yori::scheduler::FifoScheduler scheduler{*scenario.queue, scenario.store};
+    // 先把 J1 调度到 GPU-B，J2 的 preferred 目标随即被 lease。
+    const auto setup = scheduler.run_once(SchedulerTrigger::kJobSubmitted,
+                                          snapshot({gpu("GPU-B", 3, GpuObservedState::kFree),
+                                                    gpu("GPU-C", 5, GpuObservedState::kFree)}));
+    YORI_CHECK(setup.scheduled() && setup.event.gpu_uuid == yori::gpu::GpuUuid{"GPU-B"});
+    const auto result = scheduler.run_once(SchedulerTrigger::kJobSubmitted,
+                                           snapshot({gpu("GPU-C", 5, GpuObservedState::kFree)}));
+    YORI_CHECK(result.scheduled());
+    YORI_CHECK(result.event.job_id == JobId{2});
+    YORI_CHECK(result.event.gpu_uuid == yori::gpu::GpuUuid{"GPU-C"});
+    YORI_CHECK(result.event.selection_reason == GpuSelectionReason::kPreferredFallback);
+  }
+
+  // ---- M11：PREFERRED 全局无空闲——保持 QUEUED（kNoFreeGpu） ---------------
+  {
+    Scenario scenario{1};
+    scenario.seed({queued_preferred(1, std::chrono::seconds{10}, 1001, "GPU-B")});
+    yori::scheduler::FifoScheduler scheduler{*scenario.queue, scenario.store};
+    const auto observation = snapshot({gpu("GPU-B", 3, GpuObservedState::kExternalBusy)});
+    const auto result = scheduler.run_once(SchedulerTrigger::kGpuStateChanged, observation);
+    YORI_CHECK(result.code == ScheduleResultCode::kNoCandidate);
+    const auto* skip = find_skip(result.evaluation, 1);
+    YORI_CHECK(skip != nullptr && skip->reason == WaitReason::kNoFreeGpu);
+    YORI_CHECK(scenario.queue->size() == 1);
   }
 
   // ---- 队列一致性核对：store 与派生队列分歧显式失败 -----------------------

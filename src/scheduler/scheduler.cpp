@@ -26,9 +26,10 @@ bool leased(const store::StateSnapshot& snapshot, const gpu::GpuUuid& uuid) noex
                      [&uuid](const gpu::GpuLease& lease) { return lease.gpu_uuid == uuid; });
 }
 
-// DEC-013：扫描窗口内等待中 REQUIRED Job 的目标集合（软保护）。全部信息由
-// authoritative 队列 + JobSpec 派生，不持久化、不建立 lease；窗口外 Job 的
-// 目标不参与本轮保护（与有界跳过的可观察范围一致）。
+// DEC-013/DEC-014：扫描窗口内等待中 REQUIRED Job 声明的全部集合设备（软
+// 保护）。全部信息由 authoritative 队列 + JobSpec 派生，不持久化、不建立
+// lease；窗口外 Job 的设备不参与本轮保护（与有界跳过的可观察范围一致）。
+// kPreferred 目标不参与保护（DEC-014：允许迁移，不构成硬依赖）。
 std::set<gpu::GpuUuid> collect_affinity_targets(
     const std::vector<queue::QueueEntry>& entries, std::size_t window,
     const std::map<job::JobId, const store::StoredJob*>& queued_records) {
@@ -36,7 +37,9 @@ std::set<gpu::GpuUuid> collect_affinity_targets(
   for (std::size_t index = 0; index < window; ++index) {
     const store::StoredJob* record = queued_records.at(entries[index].job_id);
     if (record->spec.gpu_placement.mode == job::GpuPlacementMode::kRequired) {
-      targets.insert(record->spec.gpu_placement.devices.front());
+      for (const gpu::GpuUuid& device : record->spec.gpu_placement.devices) {
+        targets.insert(device);
+      }
     }
   }
   return targets;
@@ -91,24 +94,61 @@ const gpu::GpuObservation* find_device(const gpu::GpuObservationSnapshot& gpu_sn
   return nullptr;
 }
 
-// kRequired 目标不可用时的等待原因（DEC-012 决策 5）。lease 是调度事实，
-// 优先于观测（RULE-05）；观测缺失与 UNAVAILABLE 同归 AFFINITY_GPU_STATE。
-WaitReason affinity_wait_reason(const gpu::GpuObservation* target,
-                                const store::StateSnapshot& state_snapshot) noexcept {
-  if (target == nullptr) {
-    return WaitReason::kAffinityGpuState;
+// kRequired 集合选择（DEC-014）：集合内 FREE 且未被 lease 的设备按物理
+// index 升序取第一张；集合内无可用设备返回 nullptr（保持 QUEUED，绝不
+// fallback 到集合外）。
+const gpu::GpuObservation* select_required_gpu(const gpu::GpuObservationSnapshot& gpu_snapshot,
+                                               const store::StateSnapshot& state_snapshot,
+                                               const std::vector<gpu::GpuUuid>& devices) noexcept {
+  const gpu::GpuObservation* selected = nullptr;
+  for (const gpu::GpuUuid& uuid : devices) {
+    const gpu::GpuObservation* observation = find_device(gpu_snapshot, uuid);
+    if (observation == nullptr || observation->state != gpu::GpuObservedState::kFree ||
+        leased(state_snapshot, uuid)) {
+      continue;
+    }
+    if (selected == nullptr || observation->index < selected->index) {
+      selected = observation;
+    }
   }
-  if (leased(state_snapshot, target->uuid)) {
+  return selected;
+}
+
+// kRequired 集合不可用时的等待原因聚合（DEC-014 决策 2）：lease 是调度
+// 事实优先于观测（RULE-05），其次外部占用，最后观测状态/缺失。target 返回
+// 集合中按物理 index 最先出现的非可用观测设备（观测缺失的设备无 index，
+// 全部缺失时省略）。
+WaitReason required_wait_reason(const gpu::GpuObservationSnapshot& gpu_snapshot,
+                                const store::StateSnapshot& state_snapshot,
+                                const std::vector<gpu::GpuUuid>& devices,
+                                std::optional<gpu::GpuUuid>& target) noexcept {
+  bool any_leased = false;
+  bool any_external = false;
+  const gpu::GpuObservation* representative = nullptr;
+  for (const gpu::GpuUuid& uuid : devices) {
+    if (leased(state_snapshot, uuid)) {
+      any_leased = true;
+    }
+    const gpu::GpuObservation* observation = find_device(gpu_snapshot, uuid);
+    if (observation == nullptr) {
+      continue;
+    }
+    if (observation->state == gpu::GpuObservedState::kExternalBusy) {
+      any_external = true;
+    }
+    // FREE 且未被 lease 在跳过路径不可达（会被选中）；到达此处的观测设备
+    // 均为非可用代表候选。
+    if (representative == nullptr || observation->index < representative->index) {
+      representative = observation;
+    }
+  }
+  target =
+      representative == nullptr ? std::nullopt : std::optional<gpu::GpuUuid>{representative->uuid};
+  if (any_leased) {
     return WaitReason::kAffinityGpuAllocated;
   }
-  switch (target->state) {
-    case gpu::GpuObservedState::kExternalBusy:
-      return WaitReason::kAffinityGpuExternal;
-    case gpu::GpuObservedState::kUnavailable:
-    case gpu::GpuObservedState::kFree:
-      // kFree 但被 lease 在上方已排除；到达此处意味着 lease 排查与观测矛盾，
-      // 保守归入状态类（不一致事实由 lease 矩阵校验兜底）。
-      return WaitReason::kAffinityGpuState;
+  if (any_external) {
+    return WaitReason::kAffinityGpuExternal;
   }
   return WaitReason::kAffinityGpuState;
 }
@@ -157,6 +197,8 @@ const char* to_string(GpuSelectionReason reason) noexcept {
       return "AVOID_REQUIRED_AFFINITY";
     case GpuSelectionReason::kAffinityFallback:
       return "AFFINITY_FALLBACK";
+    case GpuSelectionReason::kPreferredFallback:
+      return "PREFERRED_FALLBACK";
   }
   return "UNKNOWN";
 }
@@ -283,11 +325,19 @@ ScheduleResult FifoScheduler::run_once(SchedulerTrigger trigger,
     const gpu::GpuObservation* selected = nullptr;
     GpuSelectionReason selection_reason = GpuSelectionReason::kDefault;
     if (placement.mode == job::GpuPlacementMode::kRequired) {
+      // 集合内按物理 index 取第一张可用设备；集合内无可用设备保持 QUEUED
+      // （DEC-014：绝不 fallback 到集合外）。
+      selected = select_required_gpu(gpu_snapshot, loaded.snapshot, placement.devices);
+    } else if (placement.mode == job::GpuPlacementMode::kPreferred) {
       const gpu::GpuUuid& target = placement.devices.front();
       const gpu::GpuObservation* observation = find_device(gpu_snapshot, target);
       if (observation != nullptr && observation->state == gpu::GpuObservedState::kFree &&
           !leased(loaded.snapshot, target)) {
         selected = observation;
+      } else if (any_candidate != nullptr) {
+        // 目标不可用：回退 kAny 亲和感知选择（DEC-014 决策 2），结论可观察。
+        selected = any_candidate;
+        selection_reason = GpuSelectionReason::kPreferredFallback;
       }
     } else {
       selected = any_candidate;
@@ -327,13 +377,14 @@ ScheduleResult FifoScheduler::run_once(SchedulerTrigger trigger,
                     written.revision, std::move(evaluation), selection_reason);
     }
 
-    // 跳过：保持 QUEUED 与原队列位置，记录携带原因的结构化事件。
+    // 跳过：保持 QUEUED 与原队列位置，记录携带原因的结构化事件。集合
+    // REQUIRED 的等待原因为聚合结论（DEC-014 决策 2）；kAny/kPreferred 均
+    // 为全局无空闲（PREFERRED 允许 fallback，等待只发生在无 FREE 候选）。
     ScheduleSkip skip;
     skip.job = entry.job_id;
     if (placement.mode == job::GpuPlacementMode::kRequired) {
-      skip.reason = affinity_wait_reason(find_device(gpu_snapshot, placement.devices.front()),
-                                         loaded.snapshot);
-      skip.target = placement.devices.front();
+      skip.reason =
+          required_wait_reason(gpu_snapshot, loaded.snapshot, placement.devices, skip.target);
     } else {
       skip.reason = WaitReason::kNoFreeGpu;
     }
