@@ -22,6 +22,10 @@ yori::job::JobSpec valid_spec() {
 void check_error(const yori::job::JobSpec& spec, yori::job::JobSpecErrorCode expected) {
   const auto result = yori::job::validate(spec);
   YORI_CHECK(!result);
+  if (result.code != expected) {
+    std::fprintf(stderr, "  expected %s, got %s (ok=%d)\n", yori::job::to_string(expected),
+                 yori::job::to_string(result.code), result.ok() ? 1 : 0);
+  }
   YORI_CHECK(result.code == expected);
   YORI_CHECK(std::string(yori::job::to_string(result.code)) != "UNKNOWN");
 }
@@ -192,7 +196,7 @@ int main() {
   spec.gpu_placement.devices.push_back(yori::gpu::GpuUuid{"GPU-abc-123"});
   check_error(spec, JobSpecErrorCode::kInvalidGpuPlacement);
 
-  // kRequired 缺设备 / 多设备非法（单 GPU Job 约束）。
+  // kRequired 缺设备非法；多设备（GPU Set，DEC-014）合法。
   spec = valid_spec();
   spec.gpu_placement.mode = yori::job::GpuPlacementMode::kRequired;
   check_error(spec, JobSpecErrorCode::kInvalidGpuPlacement);
@@ -201,7 +205,46 @@ int main() {
   spec.gpu_placement.mode = yori::job::GpuPlacementMode::kRequired;
   spec.gpu_placement.devices.push_back(yori::gpu::GpuUuid{"GPU-abc"});
   spec.gpu_placement.devices.push_back(yori::gpu::GpuUuid{"GPU-def"});
+  YORI_CHECK(yori::job::validate(spec));
+
+  // kRequired 集合上限（DEC-014：kMaxPlacementDevices）与重复设备非法。
+  spec = valid_spec();
+  spec.gpu_placement.mode = yori::job::GpuPlacementMode::kRequired;
+  for (std::size_t index = 0; index < yori::job::JobSpecLimits::kMaxPlacementDevices; ++index) {
+    spec.gpu_placement.devices.push_back(yori::gpu::GpuUuid{"GPU-abc-" + std::to_string(index)});
+  }
+  YORI_CHECK(yori::job::validate(spec));
+  spec.gpu_placement.devices.push_back(yori::gpu::GpuUuid{"GPU-overflow"});
   check_error(spec, JobSpecErrorCode::kInvalidGpuPlacement);
+
+  spec = valid_spec();
+  spec.gpu_placement.mode = yori::job::GpuPlacementMode::kRequired;
+  spec.gpu_placement.devices.push_back(yori::gpu::GpuUuid{"GPU-abc"});
+  spec.gpu_placement.devices.push_back(yori::gpu::GpuUuid{"GPU-abc"});
+  check_error(spec, JobSpecErrorCode::kInvalidGpuPlacement);
+
+  // kPreferred（DEC-014）：恰 1 个合法 UUID；缺设备/多设备拒绝；与
+  // gpu_request 计数互斥。
+  spec = valid_spec();
+  spec.gpu_placement.mode = yori::job::GpuPlacementMode::kPreferred;
+  spec.gpu_placement.devices.push_back(yori::gpu::GpuUuid{"GPU-abc-123"});
+  YORI_CHECK(yori::job::validate(spec));
+
+  spec = valid_spec();
+  spec.gpu_placement.mode = yori::job::GpuPlacementMode::kPreferred;
+  check_error(spec, JobSpecErrorCode::kInvalidGpuPlacement);
+
+  spec = valid_spec();
+  spec.gpu_placement.mode = yori::job::GpuPlacementMode::kPreferred;
+  spec.gpu_placement.devices.push_back(yori::gpu::GpuUuid{"GPU-abc"});
+  spec.gpu_placement.devices.push_back(yori::gpu::GpuUuid{"GPU-def"});
+  check_error(spec, JobSpecErrorCode::kInvalidGpuPlacement);
+
+  spec = valid_spec();
+  spec.gpu_placement.mode = yori::job::GpuPlacementMode::kPreferred;
+  spec.gpu_placement.devices.push_back(yori::gpu::GpuUuid{"GPU-abc"});
+  spec.gpu_request = 2;
+  check_error(spec, JobSpecErrorCode::kPlacementGpuRequestConflict);
 
   // kRequired 设备身份非法（空/超长/含 NUL）。
   spec = valid_spec();
