@@ -1,14 +1,16 @@
 # M9：GPU placement 亲和调度
 
-> 状态：In Progress（实现完成，本地五预设验证通过；待 PR 合并后收口 Completed）
+> 状态：Completed（2026-09-13 PR
+> [#20](https://github.com/Linductor-alkaid/yori/pull/20) 合并于 master
+> `87292a5`；随 `v0.3.0` 发布）
 > 负责人：Linductor-alkaid
 > 所属计划：[Yori 实施总计划](yori-implementation-plan.md)
 > 前置：M7（打包与 MVP 端到端验收，PR [#11](https://github.com/Linductor-alkaid/yori/pull/11)）；与 M8 无代码依赖
 > 决策依据：[DEC-012](../decisions/DEC-012-gpu-placement-policy.md)（Accepted，2026-09-13 随 M9 启动冻结；部分修订
 > [DEC-005](../decisions/DEC-005-global-fifo-scheduling.md) 队首不跳过条款）
 > 需求来源：[Issue #10](https://github.com/Linductor-alkaid/yori/issues/10)
-> 建议发布点：`v0.3.0`（tag 与发布动作需负责人明确授权后执行）
-> 更新日期：2026-09-13（实现完成，本地五预设验证 + tidy/format 清洁）
+> 建议发布点：`v0.3.0`（2026-09-13 发布，负责人授权）
+> 更新日期：2026-09-13（PR #20 合并，v0.3.0 发布收口）
 
 ## 目标
 
@@ -205,3 +207,11 @@
 冒烟（ubuntu-22.04 / gcc-12 符号版本红线）、依赖锁定校验、clang-format、
 clang-tidy。首轮 run 34710065418 仅 clang-format 失败（GCC -O3 误报修复晚于
 本地格式化轮；补跑 `clang-format` 后修复，见提交 `497e738`）。
+
+2026-09-13（合并与发布）：负责人授权合并与发版。PR
+[#20](https://github.com/Linductor-alkaid/yori/pull/20) 经 merge commit
+合入 master（`87292a5`，负责人授权）；随发版 PR 定稿 `v0.3.0`
+（CHANGELOG 定稿、project VERSION 0.3.0、README M9 文档）。tag `v0.3.0`
+打在发版合并提交上（gh API 核对远端 SHA 后创建），release 流水线
+（`.github/workflows/release.yml`，`v*` tag 触发）构建并发布 deb 包。
+M9 关闭；真实 NVML 多卡 `--gpu` 端到端补跑条件沿用 M7 真机矩阵。
