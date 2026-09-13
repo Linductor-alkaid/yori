@@ -1,7 +1,7 @@
 # Yori 实施总计划
 
 > 状态：Active
-> 版本：1.16
+> 版本：1.17
 > 更新日期：2026-09-13
 > 负责人：Linductor-alkaid
 > 设计依据：[Yori 项目设计文档](../design/yori-project-design.md)（v0.5）
@@ -95,16 +95,18 @@
   队首条款）、`wait_reason` 视图、协议 v3、schema v3 迁移；issue #10 场景
   矩阵 10/12 项覆盖（PREFERRED 两项属 POST-11）。证据见
   [M9 验证记录](m9-gpu-placement.md)。
-- MVP 后第二批增强立项（2026-09-13）：依据真机反馈
-  [#22](https://github.com/Linductor-alkaid/yori/issues/22)（目标卡被 ANY 占用
-  的 placement 碎片）将 POST-11 的"affinity-aware ANY 设备选择"子项提前立项为
-  M10（[m10-affinity-placement.md](m10-affinity-placement.md)，决策
-  [DEC-013](../decisions/DEC-013-affinity-aware-any-placement.md) 随启动冻结为
-  Accepted）：软保护 + 选择结论可观察，契约零变更。
-- 当前里程碑：M10（In Progress）；POST-11 余项（PREFERRED/GPU Set）与
-  POST-12～14 延后项按触发条件评估。
+- M10 已合并（2026-09-13 负责人授权；依 issue #22 将 POST-11 的
+  "affinity-aware ANY 设备选择"子项提前立项，DEC-013）：PR
+  [#23](https://github.com/Linductor-alkaid/yori/pull/23)（merge commit
+  `dbdd0d0`，3 实现 + 1 证据提交；CI run 34748713087/34749537335 均 9/9
+  全绿），随发版 PR 交付 `v0.4.0`，issue #22 随交付关闭。交付：`kAny`
+  候选亲和 ranking（窗口内等待 REQUIRED 目标软保护 + 无替代回退）、
+  `selection_reason` 可观察与 `JobManagerStats` 计数；契约零变更。证据见
+  [M10 验证记录](m10-affinity-placement.md)。
+- 当前里程碑：无（M10 已随 `v0.4.0` 收口；POST-11 余项（PREFERRED/GPU
+  Set）与 POST-12～14 延后项按触发条件评估）。
 - MVP 端到端验收以设计文档第 19 节判据为准，由 M7 执行并记录证据（见第 10 节）。
-- 里程碑文档在各自启动时创建（工程规范第 2 节）；当前实体文件：M0-M9。
+- 里程碑文档在各自启动时创建（工程规范第 2 节）；当前实体文件：M0-M10。
 
 ## 2. 交付边界（SCOPE）
 
@@ -196,7 +198,7 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | M7 | 打包与 MVP 端到端验收 | M6 | systemd unit、安装打包、设计 §19 判据逐项验收；前置：守护总装收口 | `v0.1.0`（MVP；tag/发布需负责人授权） | Completed |
 | M8 | 提交时执行上下文 | M7 | 环境捕获（白名单/`--env`/`--inherit-env`）、executable 提交时解析、环境合并 v2 与保留键修订、`yori inspect`（owner/admin + 脱敏）、IPC 协议 v2、schema v2 迁移；Conda/venv 语义一致性验证 | `v0.2.0` | Completed（2026-09-12，PR [#18](https://github.com/Linductor-alkaid/yori/pull/18)，`v0.2.0` 发布） |
 | M9 | GPU placement 亲和调度 | M7（与 M8 无代码依赖，建议随后执行以共享迁移框架） | `GpuPlacement` Core 类型与校验、daemon 侧 `--gpu` 解析、Scheduler 候选集过滤与 FIFO 有界跳过、`wait_reason`、schema v3 与恢复一致性；issue #10 12 场景矩阵 | `v0.3.0` | Completed（2026-09-13，PR [#20](https://github.com/Linductor-alkaid/yori/pull/20)，`v0.3.0` 发布） |
-| M10 | 亲和感知 ANY 设备选择 | M9 | `kAny` 候选亲和 ranking（窗口内等待 REQUIRED 目标软保护 + 无替代回退）、`selection_reason` 可观察与 `JobManagerStats` 计数；issue #22 10 场景矩阵；契约零变更 | `v0.4.0`（未定） | In Progress（2026-09-13 立项，issue #22） |
+| M10 | 亲和感知 ANY 设备选择 | M9 | `kAny` 候选亲和 ranking（窗口内等待 REQUIRED 目标软保护 + 无替代回退）、`selection_reason` 可观察与 `JobManagerStats` 计数；issue #22 10 场景矩阵；契约零变更 | `v0.4.0` | Completed（2026-09-13，PR [#23](https://github.com/Linductor-alkaid/yori/pull/23)，`v0.4.0` 发布） |
 
 - M3 与 M4 在 M2 完成后可并行推进。
 - 里程碑文件命名 `m<N>-<scope>.md`，在该里程碑启动时创建；当前实体文件：
