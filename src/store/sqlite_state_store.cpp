@@ -638,16 +638,21 @@ bool SqliteStateStore::Impl::decode_jobs(DecodedState& state, StateStoreErrorCod
       }
       record.spec.gpu_placement.mode = job::GpuPlacementMode::kAny;
     } else if (*placement_mode == "required") {
-      if (!placement_devices || placement_devices->empty() ||
-          placement_devices->size() > kMaxPlacementDevicesTextLength) {
+      if (!placement_devices || !placement_device) {
+        error = StateStoreErrorCode::kInvalidJob;
+        return false;
+      }
+      const std::string& devices_text = *placement_devices;
+      const std::string& device_text = *placement_device;
+      if (devices_text.empty() || devices_text.size() > kMaxPlacementDevicesTextLength) {
         error = StateStoreErrorCode::kInvalidJob;
         return false;
       }
       std::vector<gpu::GpuUuid> devices;
       std::size_t begin = 0;
-      while (begin <= placement_devices->size()) {
-        const auto comma = placement_devices->find(',', begin);
-        const std::string entry = placement_devices->substr(
+      while (begin <= devices_text.size()) {
+        const auto comma = devices_text.find(',', begin);
+        const std::string entry = devices_text.substr(
             begin, comma == std::string::npos ? std::string::npos : comma - begin);
         if (entry.empty()) {
           error = StateStoreErrorCode::kInvalidJob;
@@ -664,8 +669,7 @@ bool SqliteStateStore::Impl::decode_jobs(DecodedState& state, StateStoreErrorCod
         }
         begin = comma + 1;
       }
-      if (!placement_device || placement_device->empty() ||
-          *placement_device != devices.front().value()) {
+      if (device_text.empty() || device_text != devices.front().value()) {
         error = StateStoreErrorCode::kInvalidJob;
         return false;
       }
