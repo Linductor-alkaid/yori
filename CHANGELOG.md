@@ -3,6 +3,25 @@
 本文件记录 Yori 的版本化变更（工程规范第 10.5 节）。日期为 YYYY-MM-DD；
 条目按版本倒序排列。未发布条目置于 `## Unreleased`。
 
+## Unreleased
+
+### 新增（M10：亲和感知 ANY 设备选择，DEC-013）
+
+- **ANY 任务避开等待中 REQUIRED 的目标 GPU（软保护）**：`kAny` Job 在多个
+  空闲 GPU 之间选择时，优先选择当前调度扫描窗口内没有被等待中 REQUIRED
+  Job 指定的 GPU（先最小化亲和冲突、再按物理 index 升序决胜）；仅当全部
+  空闲候选均为等待中 REQUIRED 的目标时才回退使用其一，不为等待者人为空闲
+  GPU。消除"ANY 占据后续 REQUIRED 唯一目标 + 其余 GPU 空闲"的 placement
+  碎片。保护信息全部由队列 + JobSpec 派生：不持久化、不建立 lease、无
+  RESERVED 状态；REQUIRED 目标在扫描窗口外不参与保护；REQUIRED Job 被取消
+  后下一次调度自动重算。FIFO 服务顺序、有界跳过与 REQUIRED 绝不 fallback
+  的语义均不变。
+- **选择结论可观察**：调度事件携带 `selection_reason`
+  （`DEFAULT`/`AVOID_REQUIRED_AFFINITY`/`AFFINITY_FALLBACK`，仅诊断语义，
+  不进入 IPC 协议），`JobManagerStats` 新增
+  `scheduler_affinity_avoids`/`scheduler_affinity_fallbacks` 计数，用于分析
+  碎片改善与解释偏离 lowest-index 的选择。
+
 ## v0.3.0 - 2026-09-13
 
 ### 新增（M9：GPU placement 亲和调度，DEC-012）

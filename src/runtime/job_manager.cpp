@@ -191,6 +191,8 @@ struct AtomicStats final {
   std::atomic<std::uint64_t> scheduler_runs{0};
   std::atomic<std::uint64_t> scheduler_scheduled{0};
   std::atomic<std::uint64_t> scheduler_failed{0};
+  std::atomic<std::uint64_t> scheduler_affinity_avoids{0};
+  std::atomic<std::uint64_t> scheduler_affinity_fallbacks{0};
   std::atomic<std::uint64_t> store_write_failures{0};
   std::atomic<std::uint64_t> abandoned_at_stop{0};
   std::atomic<std::uint64_t> active_supervised{0};
@@ -710,6 +712,13 @@ class ManagerWorker final : public executor::IBlockingIoWorker {
     if (result.scheduled() && result.event.job_id.has_value() &&
         result.event.gpu_uuid.has_value()) {
       stats_.scheduler_scheduled.fetch_add(1, std::memory_order_relaxed);
+      // DEC-013：亲和感知选择结论计数（kAny 专用 reason；kRequired 恒 DEFAULT）。
+      if (result.event.selection_reason == scheduler::GpuSelectionReason::kAvoidRequiredAffinity) {
+        stats_.scheduler_affinity_avoids.fetch_add(1, std::memory_order_relaxed);
+      } else if (result.event.selection_reason ==
+                 scheduler::GpuSelectionReason::kAffinityFallback) {
+        stats_.scheduler_affinity_fallbacks.fetch_add(1, std::memory_order_relaxed);
+      }
       launch_scheduled(result.event.job_id.value().value(), result.event.gpu_uuid.value());
     } else if (result.failed()) {
       stats_.scheduler_failed.fetch_add(1, std::memory_order_relaxed);
@@ -1330,6 +1339,10 @@ JobManagerStats JobManager::stats() const {
   result.scheduler_runs = stats.scheduler_runs.load(std::memory_order_relaxed);
   result.scheduler_scheduled = stats.scheduler_scheduled.load(std::memory_order_relaxed);
   result.scheduler_failed = stats.scheduler_failed.load(std::memory_order_relaxed);
+  result.scheduler_affinity_avoids =
+      stats.scheduler_affinity_avoids.load(std::memory_order_relaxed);
+  result.scheduler_affinity_fallbacks =
+      stats.scheduler_affinity_fallbacks.load(std::memory_order_relaxed);
   result.store_write_failures = stats.store_write_failures.load(std::memory_order_relaxed);
   result.abandoned_at_stop = stats.abandoned_at_stop.load(std::memory_order_relaxed);
   result.active_supervised = stats.active_supervised.load(std::memory_order_relaxed);

@@ -717,6 +717,92 @@ int run_test() {
     YORI_CHECK(runtime.shutdown() == runtime::ExecutorRuntimeShutdownResult::kCompleted);
   }
 
+  // ---- M10（DEC-013）：ANY 亲和回退——软保护不降低 GPU 利用率 ----------------
+  {
+    ExecutorRuntime runtime;
+    std::string error;
+    YORI_CHECK(runtime.initialize({}, error));
+    // 两卡初始均被外部占用：J1(ANY) 与 J2(REQUIRED GPU-m10-a) 全部排队。
+    testing::AtomicGpuProvider provider;
+    provider.set_uuid(0, "GPU-m10-a");
+    provider.set_present(0, true);
+    provider.set_state(0, gpu::GpuObservedState::kExternalBusy);
+    provider.set_uuid(1, "GPU-m10-b");
+    provider.set_present(1, true);
+    provider.set_state(1, gpu::GpuObservedState::kExternalBusy);
+
+    auto store = std::make_unique<runtime::SerialStateStore>(
+        std::make_unique<testing::InMemoryStateStore>());
+    queue::QueueErrorCode queue_error = queue::QueueErrorCode::kNone;
+    auto queue = GlobalJobQueue::create({}, queue_error);
+    runtime::GpuManager gpu_manager(runtime.executor(), provider, runtime::GpuManagerConfig{50ms});
+    YORI_CHECK(gpu_manager.start().ok());
+    runtime::LogStreamer streamer;
+    launch::PosixIdentityResolver resolver;
+    launch::DefaultLaunchAdapter adapter;
+    executor::comm::PhaseGate gate{"jm-m10-affinity"};
+    runtime::JobManagerConfig manager_config;
+    manager_config.log_root = make_root();
+    manager_config.daemon_environment = {{"PATH", "/usr/bin:/bin"}};
+    runtime::JobManager manager(runtime.executor(), *store, *queue, gpu_manager, streamer, resolver,
+                                adapter, gate, manager_config);
+    static_cast<void>(gate.advance_to(runtime::kPhaseSchedulingOpen));
+    YORI_CHECK(manager.start().ok());
+
+    // J1(ANY) 在前、J2(REQUIRED GPU-m10-a) 在后：两卡均忙时都保持 QUEUED。
+    const auto first = manager.submit_job(spec_for({"sleep", "30"}));
+    YORI_CHECK(first.ok());
+    job::JobSpec required_spec = spec_for({"true"});
+    required_spec.submit_time += 1s;
+    required_spec.gpu_placement.mode = job::GpuPlacementMode::kRequired;
+    required_spec.gpu_placement.devices.push_back(gpu::GpuUuid{"GPU-m10-a"});
+    const auto second = manager.submit_job(required_spec);
+    YORI_CHECK(second.ok());
+    {
+      const auto first_record = find_stored_simple(*store, first.job_id);
+      const auto second_record = find_stored_simple(*store, second.job_id);
+      YORI_CHECK(first_record.has_value() && first_record->state == job::JobState::kQueued);
+      YORI_CHECK(second_record.has_value() && second_record->state == job::JobState::kQueued);
+    }
+
+    // 释放唯一空闲候选 GPU-m10-a（恰为 J2 的硬亲和目标）：J1 以回退结论使用
+    // 它（不为 J2 人为空闲），J2 保持 QUEUED 等待 lease 释放。
+    provider.set_state(0, gpu::GpuObservedState::kFree);
+    YORI_CHECK(wait_state(*store, first.job_id, job::JobState::kRunning));
+    {
+      const auto second_record = find_stored_simple(*store, second.job_id);
+      YORI_CHECK(second_record.has_value() && second_record->state == job::JobState::kQueued);
+      store::StateSnapshot snapshot;
+      const store::StoredJob* record = find_stored(*store, first.job_id, snapshot);
+      YORI_CHECK(record != nullptr);
+      if (record != nullptr) {
+        bool leased_fallback_gpu = false;
+        for (const auto& held : snapshot.leases) {
+          if (held.job_id == record->id && held.gpu_uuid == gpu::GpuUuid{"GPU-m10-a"}) {
+            leased_fallback_gpu = true;
+          }
+        }
+        YORI_CHECK(leased_fallback_gpu);
+      }
+    }
+
+    // 选择结论计数（DEC-013 观察面）：本轮唯一一次成功调度归类为回退。
+    {
+      const auto stats = manager.stats();
+      YORI_CHECK(stats.scheduler_scheduled == 1);
+      YORI_CHECK(stats.scheduler_affinity_fallbacks == 1);
+      YORI_CHECK(stats.scheduler_affinity_avoids == 0);
+    }
+
+    // 清理：取消长跑的 J1，J2 随后仍等待目标卡（lease 释放前不抢跑）。
+    YORI_CHECK(manager.cancel_job(first.job_id).code == ipc::JobCancelOutcome::Code::kStopping);
+    YORI_CHECK(wait_state(*store, first.job_id, job::JobState::kCancelled, 20s));
+
+    static_cast<void>(manager.stop());
+    static_cast<void>(gpu_manager.stop());
+    YORI_CHECK(runtime.shutdown() == runtime::ExecutorRuntimeShutdownResult::kCompleted);
+  }
+
   if (yori::testing::failure_count != 0) {
     std::fprintf(stderr, "job manager: %d failure(s)\n", yori::testing::failure_count);
     return 1;

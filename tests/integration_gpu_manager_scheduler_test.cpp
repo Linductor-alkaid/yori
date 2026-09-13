@@ -35,6 +35,14 @@ yori::store::StoredJob queued_job(std::uint64_t id) {
   return {yori::job::JobId{id}, std::move(spec), yori::job::JobState::kQueued, 0};
 }
 
+// DEC-012：kRequired 硬亲和 Job（目标单卡）。
+yori::store::StoredJob queued_required_job(std::uint64_t id, const char* target_uuid) {
+  yori::store::StoredJob record = queued_job(id);
+  record.spec.gpu_placement.mode = yori::job::GpuPlacementMode::kRequired;
+  record.spec.gpu_placement.devices.push_back(yori::gpu::GpuUuid{target_uuid});
+  return record;
+}
+
 // 单次事件驱动调度：消费一条 GpuManager 事件并以最新快照运行调度器。
 yori::scheduler::ScheduleResult schedule_on_event(GpuManager& manager,
                                                   yori::scheduler::FifoScheduler& scheduler) {
@@ -129,10 +137,101 @@ void test_external_busy_unblocks_on_observation_transition() {
   YORI_CHECK(runtime.shutdown() == yori::runtime::ExecutorRuntimeShutdownResult::kCompleted);
 }
 
+// DEC-013：GpuManager 观测驱动下的 affinity-aware ANY 选择。J7(ANY) 在队首、
+// J8(REQUIRED GPU-int-a) 在其后：两张卡同时回到 FREE 时，J7 避开 J8 的唯一
+// 目标选择 GPU-int-b，J8 随后获得 GPU-int-a——软保护消除 placement 碎片，
+// lease 事实与观测分离不被破坏。
+void test_affinity_aware_any_selection() {
+  ExecutorRuntime runtime;
+  ExecutorRuntimeConfig runtime_config;
+  std::string error;
+  if (!runtime.initialize(runtime_config, error)) {
+    std::fprintf(stderr, "executor initialize failed: %s\n", error.c_str());
+    std::exit(1);
+  }
+
+  yori::testing::AtomicGpuProvider provider;
+  provider.set_uuid(0, "GPU-int-a");
+  provider.set_present(0, true);
+  provider.set_state(0, yori::gpu::GpuObservedState::kExternalBusy);
+  provider.set_uuid(1, "GPU-int-b");
+  provider.set_present(1, true);
+  provider.set_state(1, yori::gpu::GpuObservedState::kExternalBusy);
+
+  yori::queue::QueueErrorCode queue_error{};
+  auto queue = yori::queue::GlobalJobQueue::create({16}, queue_error);
+  if (!queue || queue_error != yori::queue::QueueErrorCode::kNone) {
+    std::fprintf(stderr, "failed to create queue\n");
+    std::exit(1);
+  }
+  yori::testing::InMemoryStateStore store;
+  yori::scheduler::FifoScheduler scheduler(*queue, store);
+
+  yori::store::StateMutation create;
+  create.create_jobs.push_back(queued_job(7));
+  create.create_jobs.push_back(queued_required_job(8, "GPU-int-a"));
+  if (!store.apply(create)) {
+    std::fprintf(stderr, "failed to seed store\n");
+    std::exit(1);
+  }
+  const auto state = store.load();
+  if (!state || !queue->restore(state.snapshot)) {
+    std::fprintf(stderr, "failed to restore queue\n");
+    std::exit(1);
+  }
+
+  GpuManagerConfig config;
+  config.sample_period = std::chrono::milliseconds{30};
+  GpuManager manager(runtime.executor(), provider, config);
+  const auto start_result = manager.start();
+  if (!start_result.ok()) {
+    std::fprintf(stderr, "gpu manager start failed: %s\n", start_result.message.c_str());
+    std::exit(1);
+  }
+
+  // 外部占用全部退出：等待最新快照呈现两张 FREE（与迁移事件如何跨 tick
+  // 合并无关），再驱动调度。
+  provider.set_state(0, yori::gpu::GpuObservedState::kFree);
+  provider.set_state(1, yori::gpu::GpuObservedState::kFree);
+  const auto both_free = yori::testing::wait_for(
+      [&manager] {
+        yori::gpu::GpuObservationSnapshot snapshot;
+        if (!manager.try_get_snapshot(snapshot) || snapshot.devices.size() != 2) {
+          return false;
+        }
+        return snapshot.devices[0].state == yori::gpu::GpuObservedState::kFree &&
+               snapshot.devices[1].state == yori::gpu::GpuObservedState::kFree;
+      },
+      std::chrono::milliseconds{5000});
+  YORI_CHECK(both_free);
+
+  const auto any_scheduled = schedule_on_event(manager, scheduler);
+  YORI_CHECK(any_scheduled.scheduled());
+  YORI_CHECK(any_scheduled.event.job_id == yori::job::JobId{7});
+  YORI_CHECK(any_scheduled.event.gpu_uuid == yori::gpu::GpuUuid{"GPU-int-b"});
+  YORI_CHECK(any_scheduled.event.selection_reason ==
+             yori::scheduler::GpuSelectionReason::kAvoidRequiredAffinity);
+
+  const auto required_scheduled = schedule_on_event(manager, scheduler);
+  YORI_CHECK(required_scheduled.scheduled());
+  YORI_CHECK(required_scheduled.event.job_id == yori::job::JobId{8});
+  YORI_CHECK(required_scheduled.event.gpu_uuid == yori::gpu::GpuUuid{"GPU-int-a"});
+  YORI_CHECK(required_scheduled.event.selection_reason ==
+             yori::scheduler::GpuSelectionReason::kDefault);
+
+  const auto after = store.load();
+  YORI_CHECK(after.ok());
+  YORI_CHECK(after.snapshot.leases.size() == 2);
+
+  YORI_CHECK(manager.stop().ok());
+  YORI_CHECK(runtime.shutdown() == yori::runtime::ExecutorRuntimeShutdownResult::kCompleted);
+}
+
 }  // namespace
 
 int main() {
   test_external_busy_unblocks_on_observation_transition();
+  test_affinity_aware_any_selection();
   if (yori::testing::failure_count != 0) {
     std::fprintf(stderr, "gpu manager scheduler integration failures: %d\n",
                  yori::testing::failure_count);

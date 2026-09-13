@@ -1,7 +1,7 @@
 # Yori 实施总计划
 
 > 状态：Active
-> 版本：1.15
+> 版本：1.16
 > 更新日期：2026-09-13
 > 负责人：Linductor-alkaid
 > 设计依据：[Yori 项目设计文档](../design/yori-project-design.md)（v0.5）
@@ -95,8 +95,14 @@
   队首条款）、`wait_reason` 视图、协议 v3、schema v3 迁移；issue #10 场景
   矩阵 10/12 项覆盖（PREFERRED 两项属 POST-11）。证据见
   [M9 验证记录](m9-gpu-placement.md)。
-- 当前里程碑：无（M9 已随 `v0.3.0` 收口；MVP 后第二批增强未立项，
-  POST-11～14 延后项按触发条件评估）。
+- MVP 后第二批增强立项（2026-09-13）：依据真机反馈
+  [#22](https://github.com/Linductor-alkaid/yori/issues/22)（目标卡被 ANY 占用
+  的 placement 碎片）将 POST-11 的"affinity-aware ANY 设备选择"子项提前立项为
+  M10（[m10-affinity-placement.md](m10-affinity-placement.md)，决策
+  [DEC-013](../decisions/DEC-013-affinity-aware-any-placement.md) 随启动冻结为
+  Accepted）：软保护 + 选择结论可观察，契约零变更。
+- 当前里程碑：M10（In Progress）；POST-11 余项（PREFERRED/GPU Set）与
+  POST-12～14 延后项按触发条件评估。
 - MVP 端到端验收以设计文档第 19 节判据为准，由 M7 执行并记录证据（见第 10 节）。
 - 里程碑文档在各自启动时创建（工程规范第 2 节）；当前实体文件：M0-M9。
 
@@ -127,12 +133,13 @@ MVP 明确不交付（依据设计第 2.2 节）：
 | `SCOPE-14` | 以 GPU utilization == 0 作为唯一空闲判据 |
 | `SCOPE-15` | 要求训练程序链接 Yori、Executor 或 Heyaki |
 
-MVP 后已立项增强（2026-09-12，依据 issue #16/#10）：
+MVP 后已立项增强（2026-09-12 第一批，依据 issue #16/#10；2026-09-13 第二批，依据 issue #22）：
 
 | 编号 | 增强内容 | 里程碑 | 决策依据 |
 | --- | --- | --- | --- |
 | `SCOPE-16` | 提交时执行上下文捕获与恢复：环境捕获白名单 + `--env`/`--inherit-env`、executable 提交时解析、四层环境合并（含 `LD_LIBRARY_PATH` 保留键修订）、`yori inspect` 与 env 脱敏、schema v2 | M8 | [DEC-011](../decisions/DEC-011-execution-context-capture.md)（Accepted） |
-| `SCOPE-17` | GPU placement 亲和调度：`ANY`/`REQUIRED`、daemon 侧 index→UUID 解析、候选集过滤、FIFO 有界跳过（修订 DEC-005 队首条款）、`wait_reason` 展示、schema v3 | M9 | [DEC-012](../decisions/DEC-012-gpu-placement-policy.md)（Proposed） |
+| `SCOPE-17` | GPU placement 亲和调度：`ANY`/`REQUIRED`、daemon 侧 index→UUID 解析、候选集过滤、FIFO 有界跳过（修订 DEC-005 队首条款）、`wait_reason` 展示、schema v3 | M9 | [DEC-012](../decisions/DEC-012-gpu-placement-policy.md)（Accepted） |
+| `SCOPE-18` | 亲和感知 `ANY` 设备选择：扫描窗口内等待 REQUIRED 目标的软保护（候选 ranking + 回退，不引入预留）、`selection_reason` 可观察与计数；无协议/schema 变化 | M10 | [DEC-013](../decisions/DEC-013-affinity-aware-any-placement.md)（Accepted） |
 
 ## 3. 不可破坏架构约束（RULE）
 
@@ -189,6 +196,7 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | M7 | 打包与 MVP 端到端验收 | M6 | systemd unit、安装打包、设计 §19 判据逐项验收；前置：守护总装收口 | `v0.1.0`（MVP；tag/发布需负责人授权） | Completed |
 | M8 | 提交时执行上下文 | M7 | 环境捕获（白名单/`--env`/`--inherit-env`）、executable 提交时解析、环境合并 v2 与保留键修订、`yori inspect`（owner/admin + 脱敏）、IPC 协议 v2、schema v2 迁移；Conda/venv 语义一致性验证 | `v0.2.0` | Completed（2026-09-12，PR [#18](https://github.com/Linductor-alkaid/yori/pull/18)，`v0.2.0` 发布） |
 | M9 | GPU placement 亲和调度 | M7（与 M8 无代码依赖，建议随后执行以共享迁移框架） | `GpuPlacement` Core 类型与校验、daemon 侧 `--gpu` 解析、Scheduler 候选集过滤与 FIFO 有界跳过、`wait_reason`、schema v3 与恢复一致性；issue #10 12 场景矩阵 | `v0.3.0` | Completed（2026-09-13，PR [#20](https://github.com/Linductor-alkaid/yori/pull/20)，`v0.3.0` 发布） |
+| M10 | 亲和感知 ANY 设备选择 | M9 | `kAny` 候选亲和 ranking（窗口内等待 REQUIRED 目标软保护 + 无替代回退）、`selection_reason` 可观察与 `JobManagerStats` 计数；issue #22 10 场景矩阵；契约零变更 | `v0.4.0`（未定） | In Progress（2026-09-13 立项，issue #22） |
 
 - M3 与 M4 在 M2 完成后可并行推进。
 - 里程碑文件命名 `m<N>-<scope>.md`，在该里程碑启动时创建；当前实体文件：
@@ -201,7 +209,8 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
   [M6 观察面](m6-observability.md)、
   [M7 打包与 MVP 端到端验收](m7-packaging-acceptance.md)、
   [M8 提交时执行上下文](m8-execution-context.md)、
-  [M9 GPU placement 亲和调度](m9-gpu-placement.md)。
+  [M9 GPU placement 亲和调度](m9-gpu-placement.md)、
+  [M10 亲和感知 ANY 设备选择](m10-affinity-placement.md)。
 
 ## 6. 暂定默认值与未决问题
 
@@ -220,6 +229,7 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | 仓库自身许可证 | 已冻结：MIT（2026-09-10 负责人选定，`v0.1.0` 发布）；与 Executor（MIT）兼容 | Linductor-alkaid | M7（发布前） | 已添加 `LICENSE` 并同步[供应链策略](../supply-chain/dependency-policy.md)与 `README.md` |
 | 执行上下文捕获策略 | 已冻结：提交时白名单捕获 + `--env`/`--inherit-env`、executable 提交时解析、环境合并 v2（`LD_LIBRARY_PATH` 转白名单、`LD_PRELOAD`/`YORI_*` 维持拒绝）、无 `--shell`（用 `-- bash -c` 表达）（[DEC-011](../decisions/DEC-011-execution-context-capture.md)，issue #16） | Linductor-alkaid | M8 启动 | 已于 2026-09-12 冻结（负责人确认启动 M8，DEC-011 改 Accepted）；变更需新决策记录 |
 | GPU placement 模型 | 已冻结：M9 交付 `ANY`+`REQUIRED`（`--gpu N` = 硬亲和，与 `--gpus N` 计数互斥）；设备身份复用 `GpuUuid`，daemon 侧解析 index→UUID；FIFO 修订为有界跳过（默认扫描 32）；`PREFERRED`/GPU Set/tag/pool/项目级 profile/管理员静态映射延后（[DEC-012](../decisions/DEC-012-gpu-placement-policy.md)，issue #10） | Linductor-alkaid | M9 启动 | 已于 2026-09-13 随 M9 启动冻结（负责人确认依计划推进，DEC-012 改 Accepted，部分修订 DEC-005 队首条款）；变更需新决策记录 |
+| 亲和感知 `ANY` 选择 | 已冻结：软保护——`kAny` 候选避开同扫描窗口内等待 REQUIRED 目标，无非冲突候选时回退（利用率优先）；以 `selection_reason` + JobManager 计数可观察；不引入 reservation/RESERVED 状态、不改协议与 schema（[DEC-013](../decisions/DEC-013-affinity-aware-any-placement.md)，issue #22） | Linductor-alkaid | M10 启动 | 已于 2026-09-13 随 M10 启动冻结（负责人以 issue #22 提出并确认提前实现，DEC-013 改 Accepted）；变更需新决策记录 |
 
 ## 7. 跨里程碑完成定义（DOD）
 
@@ -268,7 +278,7 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | `POST-08` | pidfd 进程生命周期增强 | 守护总装（M7）已确认 wait + 启动时间核验的不足：采纳进程（daemon 重启后恢复的 Job）非子进程，自然退出的状态不可得（FAILED + 显式原因），且退出发现有约 1 个探测周期的延迟；pidfd（`waitid(P_PIDFD)`）可消除两者 | §10.2、§6.2 |
 | `POST-09` | 拆分 `yori-launch-helper`（最小特权 launcher） | MVP 稳定后的安全演进 | §5、DEC-004 |
 | `POST-10` | daemon 托管常驻指标面板 | 用户提出常驻 TensorBoard 需求；届时必须新建设计与决策记录 | §11.6、DEC-003 |
-| `POST-11` | GPU placement 第二批：`PREFERRED` 模式、GPU Set（`--gpu-any-of`）、affinity-aware 的 `ANY` 设备选择（避开队列中 `REQUIRED` 目标） | M9 交付后出现软偏好或目标卡被 `ANY` 占用的运行记录 | DEC-012、issue #10 |
+| `POST-11` | GPU placement 第二批余项：`PREFERRED` 模式、GPU Set（`--gpu-any-of`）（原第三子项"affinity-aware 的 `ANY` 设备选择"已于 2026-09-13 依 issue #22 提前由 M10/[DEC-013](../decisions/DEC-013-affinity-aware-any-placement.md) 承接） | M9/M10 交付后出现软偏好需求 | DEC-012、DEC-013、issue #10、issue #22 |
 | `POST-12` | GPU tag/pool 资源池、项目级默认 placement profile、管理员静态 user/project→GPU 映射 | 团队规模化后"专卡专用"需要集中治理 | DEC-012、issue #10 |
 | `POST-13` | 独立 `--shell` 提交接口 | 用户普遍需要管道/`&&` 且 `-- bash -c` 表达被证明不足 | DEC-011 |
 | `POST-14` | 完整环境 provenance（git commit/dirty、PyTorch/CUDA 版本探测）与训练复现报告 | `yori inspect` 基础 provenance（M8）使用后出现复现/排障需求 | DEC-011、issue #16 |

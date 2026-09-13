@@ -126,7 +126,10 @@ owner/admin 视图附带目标 UUID；脱敏视图（非 owner 非 admin）不�
   保证行为可解释；公平性语义（配额/权重）仍留在 POST-02。
 - `kAny` Job 可能占用后队 `kRequired` Job 的目标卡（调度不做前瞻预留）：
   记录为已接受行为；affinity-aware 的 ANY 设备选择（避开队列中 REQUIRED 目标）
-  作为 POST-11 的可选优化。
+  原作为 POST-11 的可选优化，2026-09-13 依
+  [issue #22](https://github.com/Linductor-alkaid/yori/issues/22) 由
+  [DEC-013](DEC-013-affinity-aware-any-placement.md)（M10）提前承接为软保护，
+  本条"已接受行为"收敛为"无可替代资源时的回退行为"（AFFINITY_FALLBACK）。
 - 有界扫描窗口（默认 32）之后的 Job 本轮不被考察：窗口大小可配置，跳过
   事件携带"窗口截断"标记，不静默。
 - `wait_reason` 是最近一次评估的派生视图，事件间隙可能短暂过时——展示语义
@@ -145,7 +148,9 @@ index↔UUID 映射变化不错误迁移 REQUIRED Job；owner/admin/脱敏视图
 [Issue #10](https://github.com/Linductor-alkaid/yori/issues/10)；
 [DEC-005](DEC-005-global-fifo-scheduling.md)（部分修订）；
 [DEC-009](DEC-009-sqlite-state-store.md)；
+[DEC-013](DEC-013-affinity-aware-any-placement.md)（决策 3 的 kAny 选择
+规则由其扩展为亲和感知软保护，M10）；
 [设计文档](../design/yori-project-design.md)第 6.1、7、9、13 节；
 M9 工作项（[总计划](../plans/yori-implementation-plan.md)第 5 节）；
-POST-11（PREFERRED/GPU Set/affinity-aware 选择）、POST-12（tag/pool、项目级
-profile、管理员静态映射）。
+POST-11（PREFERRED/GPU Set；affinity-aware 选择已由 DEC-013 承接）、
+POST-12（tag/pool、项目级 profile、管理员静态映射）。

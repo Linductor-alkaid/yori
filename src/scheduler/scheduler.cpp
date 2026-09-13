@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <map>
+#include <set>
 #include <utility>
 #include <yori/scheduler/scheduler.hpp>
 
@@ -12,10 +13,11 @@ ScheduleResult result(SchedulerTrigger trigger, ScheduleResultCode code,
                       gpu::GpuObservationValidationResult gpu_validation = {},
                       store::StateStoreErrorCode store_error = store::StateStoreErrorCode::kNone,
                       queue::QueueErrorCode queue_error = queue::QueueErrorCode::kNone,
-                      std::uint64_t store_revision = 0, ScheduleEvaluation evaluation = {}) {
+                      std::uint64_t store_revision = 0, ScheduleEvaluation evaluation = {},
+                      GpuSelectionReason selection_reason = GpuSelectionReason::kDefault) {
   return {code,
-          {trigger, code, job_id, std::move(gpu_uuid), gpu_validation, store_error, queue_error,
-           store_revision},
+          {trigger, code, job_id, std::move(gpu_uuid), selection_reason, gpu_validation,
+           store_error, queue_error, store_revision},
           std::move(evaluation)};
 }
 
@@ -24,20 +26,59 @@ bool leased(const store::StateSnapshot& snapshot, const gpu::GpuUuid& uuid) noex
                      [&uuid](const gpu::GpuLease& lease) { return lease.gpu_uuid == uuid; });
 }
 
-// kAny 候选选择（与既有确定性规则一致）：FREE 且未被 lease 的设备中物理
-// index 最小者。候选集与具体 Job 无关，单次评估只计算一次。
+// DEC-013：扫描窗口内等待中 REQUIRED Job 的目标集合（软保护）。全部信息由
+// authoritative 队列 + JobSpec 派生，不持久化、不建立 lease；窗口外 Job 的
+// 目标不参与本轮保护（与有界跳过的可观察范围一致）。
+std::set<gpu::GpuUuid> collect_affinity_targets(
+    const std::vector<queue::QueueEntry>& entries, std::size_t window,
+    const std::map<job::JobId, const store::StoredJob*>& queued_records) {
+  std::set<gpu::GpuUuid> targets;
+  for (std::size_t index = 0; index < window; ++index) {
+    const store::StoredJob* record = queued_records.at(entries[index].job_id);
+    if (record->spec.gpu_placement.mode == job::GpuPlacementMode::kRequired) {
+      targets.insert(record->spec.gpu_placement.devices.front());
+    }
+  }
+  return targets;
+}
+
+// kAny 候选选择（DEC-013 亲和感知）：候选集过滤不变（FREE 且未被 lease），
+// 其上增加轻量 ranking——先最小化与等待中 REQUIRED 目标的冲突，再以物理
+// index 升序决胜（确定性不变）。保护是软性的：非冲突候选为空时回退完整
+// 候选集，不为后续 REQUIRED 人为空闲 GPU；候选为空返回 nullptr。
+// 候选集与具体 Job 无关，单次评估只计算一次。
 const gpu::GpuObservation* select_any_gpu(const gpu::GpuObservationSnapshot& gpu_snapshot,
-                                          const store::StateSnapshot& state_snapshot) noexcept {
-  const gpu::GpuObservation* selected = nullptr;
+                                          const store::StateSnapshot& state_snapshot,
+                                          const std::set<gpu::GpuUuid>& affinity_targets,
+                                          GpuSelectionReason& reason) noexcept {
+  const gpu::GpuObservation* preferred = nullptr;  // 非冲突候选中最小 index
+  const gpu::GpuObservation* fallback = nullptr;   // 完整候选中最小 index
   for (const auto& device : gpu_snapshot.devices) {
     if (device.state != gpu::GpuObservedState::kFree || leased(state_snapshot, device.uuid)) {
       continue;
     }
-    if (selected == nullptr || device.index < selected->index) {
-      selected = &device;
+    if (fallback == nullptr || device.index < fallback->index) {
+      fallback = &device;
+    }
+    if (!affinity_targets.contains(device.uuid) &&
+        (preferred == nullptr || device.index < preferred->index)) {
+      preferred = &device;
     }
   }
-  return selected;
+  if (preferred != nullptr) {
+    // 全局最小 index 候选未被保护时选择与默认规则一致（DEFAULT）；否则本次
+    // 选择实际避开了被保护设备（AVOID_REQUIRED_AFFINITY）。
+    reason = preferred == fallback ? GpuSelectionReason::kDefault
+                                   : GpuSelectionReason::kAvoidRequiredAffinity;
+    return preferred;
+  }
+  if (fallback != nullptr) {
+    // 全部 FREE 候选均为等待中 REQUIRED 目标：保持利用率优先，回退使用其一。
+    reason = GpuSelectionReason::kAffinityFallback;
+    return fallback;
+  }
+  reason = GpuSelectionReason::kDefault;
+  return nullptr;
 }
 
 const gpu::GpuObservation* find_device(const gpu::GpuObservationSnapshot& gpu_snapshot,
@@ -104,6 +145,18 @@ const char* to_string(WaitReason reason) noexcept {
       return "AFFINITY_GPU_EXTERNAL";
     case WaitReason::kAffinityGpuState:
       return "AFFINITY_GPU_STATE";
+  }
+  return "UNKNOWN";
+}
+
+const char* to_string(GpuSelectionReason reason) noexcept {
+  switch (reason) {
+    case GpuSelectionReason::kDefault:
+      return "DEFAULT";
+    case GpuSelectionReason::kAvoidRequiredAffinity:
+      return "AVOID_REQUIRED_AFFINITY";
+    case GpuSelectionReason::kAffinityFallback:
+      return "AFFINITY_FALLBACK";
   }
   return "UNKNOWN";
 }
@@ -214,8 +267,13 @@ ScheduleResult FifoScheduler::run_once(SchedulerTrigger trigger,
   ScheduleEvaluation evaluation;
   evaluation.window_truncated = entries.size() > window;
 
-  // kAny 候选与具体 Job 无关，单次评估计算一次。
-  const gpu::GpuObservation* any_candidate = select_any_gpu(gpu_snapshot, loaded.snapshot);
+  // kAny 候选与具体 Job 无关，单次评估计算一次；亲和保护集合同样按当前
+  // 扫描窗口预计算一次（DEC-013）。
+  const std::set<gpu::GpuUuid> affinity_targets =
+      collect_affinity_targets(entries, window, queued_records);
+  GpuSelectionReason any_reason = GpuSelectionReason::kDefault;
+  const gpu::GpuObservation* any_candidate =
+      select_any_gpu(gpu_snapshot, loaded.snapshot, affinity_targets, any_reason);
 
   for (std::size_t index = 0; index < window; ++index) {
     const queue::QueueEntry& entry = entries[index];
@@ -223,6 +281,7 @@ ScheduleResult FifoScheduler::run_once(SchedulerTrigger trigger,
     const job::GpuPlacement& placement = record->spec.gpu_placement;
 
     const gpu::GpuObservation* selected = nullptr;
+    GpuSelectionReason selection_reason = GpuSelectionReason::kDefault;
     if (placement.mode == job::GpuPlacementMode::kRequired) {
       const gpu::GpuUuid& target = placement.devices.front();
       const gpu::GpuObservation* observation = find_device(gpu_snapshot, target);
@@ -232,6 +291,7 @@ ScheduleResult FifoScheduler::run_once(SchedulerTrigger trigger,
       }
     } else {
       selected = any_candidate;
+      selection_reason = any_reason;
     }
 
     if (selected != nullptr) {
@@ -264,7 +324,7 @@ ScheduleResult FifoScheduler::run_once(SchedulerTrigger trigger,
 
       return result(trigger, ScheduleResultCode::kScheduled, record->id, selected->uuid, {},
                     store::StateStoreErrorCode::kNone, queue::QueueErrorCode::kNone,
-                    written.revision, std::move(evaluation));
+                    written.revision, std::move(evaluation), selection_reason);
     }
 
     // 跳过：保持 QUEUED 与原队列位置，记录携带原因的结构化事件。

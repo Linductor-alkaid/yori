@@ -1,9 +1,10 @@
 # Yori 项目设计文档
 
 > **定位**：单节点多用户 GPU 训练任务排队、调度与进程守护系统\
-> **状态**：设计草案 v0.14（M8 执行上下文捕获已实现
+> **状态**：设计草案 v0.15（M8 执行上下文捕获已实现
 > [DEC-011](../decisions/DEC-011-execution-context-capture.md)、M9 GPU placement
-> 已实现 [DEC-012](../decisions/DEC-012-gpu-placement-policy.md)）\
+> 已实现 [DEC-012](../decisions/DEC-012-gpu-placement-policy.md)、M10 亲和感知
+> ANY 设备选择已实现 [DEC-013](../decisions/DEC-013-affinity-aware-any-placement.md)）\
 > **日期**：2026-09-13
 
 ## 1. 项目摘要
@@ -658,6 +659,21 @@ M9（DEC-012）在该骨架上引入 GPU placement 约束与 FIFO 有界跳过�
   `AFFINITY_GPU_STATE`），owner/admin 附带目标 UUID；daemon 重启后 placement
   随 Job 恢复，UUID 枚举变化不得迁移 `kRequired` Job（目标消失则保持
   `QUEUED` 并以 `AFFINITY_GPU_STATE` 解释）。
+
+M10（DEC-013）在 `kAny` 的候选集过滤之后增加**亲和感知 ranking**（软保护，
+不改变任何既有契约）：
+
+- 一次 `run_once` 按当前扫描窗口预计算 `affinity_targets`（窗口内 QUEUED 的
+  `kRequired` Job 目标集合；全部由 authoritative 队列 + JobSpec 派生，不
+  持久化、不建立 lease、无 RESERVED 状态）。`kAny` 候选按
+  `min(与等待 REQUIRED 目标的冲突, 物理 index)` 选择：先避开被保护设备，
+  非冲突候选为空时回退完整候选集，不为等待者人为空闲 GPU。
+- 选择结论进入 `SchedulerEvent.selection_reason`
+  （`DEFAULT`/`AVOID_REQUIRED_AFFINITY`/`AFFINITY_FALLBACK`，仅诊断语义，
+  不进 IPC 协议），`JobManagerStats` 对后两者计数。
+- 不改变：FIFO 服务顺序、bounded skip、`kRequired` 绝不 fallback、lease
+  权威性、观测与 lease 分离。真正的 reservation/backfill 留给多资源组合
+  调度阶段统一设计（见第 16.3 节）。
 
 ------------------------------------------------------------------------
 
@@ -1376,7 +1392,7 @@ MVP 采用：
 
 ### 16.2 第二阶段（MVP 后增强）
 
-MVP 后第一批增强已立项（2026-09-12，依据 issue #16/#10 真机反馈；M8 于 2026-09-12、M9 于 2026-09-13 交付）：
+MVP 后第一批增强已立项（2026-09-12，依据 issue #16/#10 真机反馈；M8 于 2026-09-12、M9 于 2026-09-13 交付；2026-09-13 又依 issue #22 将 POST-11 的 affinity-aware ANY 选择提前立项为 M10）：
 
 -   **M8 执行上下文捕获与恢复**
     （[DEC-011](../decisions/DEC-011-execution-context-capture.md)）：提交时
@@ -1388,6 +1404,12 @@ MVP 后第一批增强已立项（2026-09-12，依据 issue #16/#10 真机反馈
     placement、稳定 UUID 身份、候选集过滤、FIFO 有界跳过（修订 DEC-005 队首
     语义）与等待原因展示。目标：用户声明"任务允许在哪些 GPU 运行"，Yori 在
     约束内调度，硬亲和不造成全局队头阻塞。
+-   **M10 亲和感知 ANY 设备选择**
+    （[DEC-013](../decisions/DEC-013-affinity-aware-any-placement.md)，2026-09-13
+    依 issue #22 从 POST-11 提前）：`ANY` 多候选选择避开同扫描窗口内等待中
+    `REQUIRED` 的目标（软保护，无替代候选时回退），选择结论以
+    `selection_reason` 可观察。目标：消除"ANY 占据后续 REQUIRED 唯一目标 +
+    其余 GPU 空闲"的 placement 碎片，不降低利用率、不引入预留。
 
 后续增强（原第二阶段清单）：
 
