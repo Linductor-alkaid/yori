@@ -1133,13 +1133,11 @@ IpcDecodeError decode_response_body(Reader& reader, IpcResponse& out) {
         }
       }
       if (version >= 4) {
-        // v4 尾部追加（DEC-014）：required 集合设备列表。
+        // v4 尾部追加（DEC-014）：required 集合设备列表（u8 计数天然 ≤255，
+        // 低于 kMaxItemCount；语义上限由 daemon 侧 job::validate 承担）。
         std::uint8_t device_count = 0;
         if (!reader.u8(device_count)) {
           return IpcDecodeError::kTruncated;
-        }
-        if (device_count > IpcProtocolLimits::kMaxItemCount) {
-          return IpcDecodeError::kInvalidValue;
         }
         for (std::uint8_t index = 0; index < device_count; ++index) {
           std::string device;
