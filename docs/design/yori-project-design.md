@@ -1,10 +1,10 @@
 # Yori 项目设计文档
 
 > **定位**：单节点多用户 GPU 训练任务排队、调度与进程守护系统\
-> **状态**：设计草案 v0.13（M8 执行上下文捕获已实现
+> **状态**：设计草案 v0.14（M8 执行上下文捕获已实现
 > [DEC-011](../decisions/DEC-011-execution-context-capture.md)、M9 GPU placement
-> 立项 [DEC-012](../decisions/DEC-012-gpu-placement-policy.md)）\
-> **日期**：2026-09-12
+> 已实现 [DEC-012](../decisions/DEC-012-gpu-placement-policy.md)）\
+> **日期**：2026-09-13
 
 ## 1. 项目摘要
 
@@ -607,7 +607,8 @@ StateStore 仍是持久化权威。M1-05 的 JobManager/Scheduler 在同一个 E
 串行有限任务中协调队列修改与 StateStore mutation，并仅在持久化操作成功后发布
 候选队列事件；daemon 重启时始终通过 `load()` + `restore()` 重建派生索引。
 
-M1-05 的 `FifoScheduler::run_once()` 将每个调度事件实现为一个有界推进单元：
+M1-05 的 `FifoScheduler::run_once()` 将每个调度事件实现为一个有界推进单元
+（下列第 2/3 条的队首不跳过语义已由 M9 有界跳过修订替代，见本节末尾）：
 
 1. 校验最新 GPU observation snapshot，读取唯一全局队首和 StateStore 一致快照；
    每次核对 Store 中 `QUEUED` 数量和全局最早排序键，防止派生队列漏项后绕过
@@ -1090,13 +1091,13 @@ yori submit --priority high ...
 yori submit --gpus 2 ...
 ```
 
-MVP 后第一批增强（M8 已交付 / M9 已立项）：
+MVP 后第一批增强（M8/M9 已交付）：
 
 ``` bash
 yori submit [--env K=V]... [--inherit-env] [--capture-env KEY]... -- CMD
                                                      # M8 已交付：执行上下文捕获（DEC-011）
 yori inspect <job-id>                                # M8 已交付：执行上下文与 provenance
-yori submit --gpu 2 -- CMD                           # M9：REQUIRED 硬亲和（DEC-012）
+yori submit --gpu 2 -- CMD                           # M9 已交付：REQUIRED 硬亲和（DEC-012）
 ```
 
 ### 13.2 IPC 协议要点
@@ -1130,13 +1131,21 @@ M5 落地请求/响应族协议 v1，公开契约位于 `include/yori/ipc/`：
     演进"风险项的落地形态）。
     请求结构不携带任何身份字段——Job owner 只来自 `SO_PEERCRED`（第 5 节、
     DEC-010），客户端无从声明目标 UID。
--   **协议 v2（M8 已交付，DEC-011；placement 输入属 M9）**：`SUBMIT` 以 v2
+-   **协议 v2（M8 已交付，DEC-011）**：`SUBMIT` 以 v2
     在 body 尾部增量扩展可选字段（`executable`、env 元数据），daemon 同时接受
     v1 `SUBMIT`（缺省字段按无捕获处理；v1 帧携带 v2 字段在编码侧拒绝）；
     响应回显请求版本（v1 客户端在 v2 daemon 上保持可用）；新增请求 kind
     `INSPECT`（=9，仅 v2，owner/admin 的执行上下文与 provenance 查询，响应
     含 per-entry 掩码标记的 env、分配结果与 provenance）。流式帧族冻结于
     version=1，不随请求/响应 v2 变化。帧格式与全部边界纪律不变。
+-   **协议 v3（M9 已交付，DEC-012）**：`SUBMIT` 以 v3 在 body 尾部追加可选
+    placement 输入 `gpu_spec`（用户输入的 NVML index 或 UUID 字符串原样
+    传输，存在即 REQUIRED；由 daemon 以当前观测解析为稳定 `GpuUuid`，解析
+    失败拒绝提交；v1/v2 帧缺省 = kAny）；`PS`/`QUEUE` 条目尾部追加
+    `wait_reason`（QUEUED Job 的等待原因枚举，0 = 无）与可选 detail
+    （亲和目标 UUID，仅 owner/admin 视图由服务端填充，脱敏视图只有原因）；
+    `INSPECT` 尾部追加 placement（mode + required 目标）。v1/v2 客户端行为
+    不变（响应按请求版本编码，不携带 v3 字段）。
 -   **响应**：统一错误码（NONE/PROTOCOL/UNSUPPORTED/DENIED/INVALID_SPEC/
     QUEUE_REJECTED/STORE_FAILED/NOT_FOUND/INVALID_STATE/NOT_AVAILABLE/LIMIT/
     INTERNAL）+ detail + 按 kind 的结果体；错误响应携带可用上下文（如
@@ -1367,7 +1376,7 @@ MVP 采用：
 
 ### 16.2 第二阶段（MVP 后增强）
 
-MVP 后第一批增强已立项（2026-09-12，依据 issue #16/#10 真机反馈）：
+MVP 后第一批增强已立项（2026-09-12，依据 issue #16/#10 真机反馈；M8 于 2026-09-12、M9 于 2026-09-13 交付）：
 
 -   **M8 执行上下文捕获与恢复**
     （[DEC-011](../decisions/DEC-011-execution-context-capture.md)）：提交时

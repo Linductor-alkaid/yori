@@ -1,7 +1,7 @@
 # DEC-012：GPU placement 约束与 FIFO 有界跳过语义
 
-> 状态：Proposed
-> 日期：2026-09-12
+> 状态：Accepted（2026-09-13 随 M9 启动冻结；负责人确认依计划推进）
+> 日期：2026-09-12（Proposed），2026-09-13（Accepted）
 > 负责人：Linductor-alkaid
 > 冻结里程碑：M9
 > 替代/被替代：部分修订 [DEC-005](DEC-005-global-fifo-scheduling.md)（队首不跳过条款）；需求来源 [#10](https://github.com/Linductor-alkaid/yori/issues/10)

@@ -10,6 +10,7 @@
 #include <yori/ipc/ipc_protocol.hpp>
 #include <yori/ipc/ipc_transport.hpp>
 #include <yori/queue/job_queue.hpp>
+#include <yori/scheduler/scheduler.hpp>
 #include <yori/store/state_store.hpp>
 
 namespace yori::ipc {
@@ -45,6 +46,17 @@ class GpuStatusSource {
   virtual ~GpuStatusSource() = default;
 
   [[nodiscard]] virtual bool try_get_snapshot(gpu::GpuObservationSnapshot& out) = 0;
+};
+
+// 最近一次调度评估结论数据源（DEC-012 决策 5；daemon 以 JobManager 持有的
+// comm 最新值视图实现，测试注入）。返回 false 表示尚无评估（wait_reason 展示
+// 为空）。评估是派生视图：间隙内可能短暂过时，展示语义为"最近一次调度评估
+// 结论"。
+class ScheduleStatusSource {
+ public:
+  virtual ~ScheduleStatusSource() = default;
+
+  [[nodiscard]] virtual bool try_get_schedule_evaluation(scheduler::ScheduleEvaluation& out) = 0;
 };
 
 struct LogTailResult final {
@@ -119,7 +131,8 @@ class JobControl {
 class IpcService final : public IpcRequestHandler {
  public:
   IpcService(IpcServiceConfig config, store::StateStore& store, GpuStatusSource& gpu_source,
-             LogSnapshotReader& log_reader, JobControl& job_control);
+             LogSnapshotReader& log_reader, JobControl& job_control,
+             ScheduleStatusSource& schedule_source);
 
   IpcService(const IpcService&) = delete;
   IpcService& operator=(const IpcService&) = delete;
@@ -157,6 +170,7 @@ class IpcService final : public IpcRequestHandler {
   GpuStatusSource& gpu_source_;
   LogSnapshotReader& log_reader_;
   JobControl& job_control_;
+  ScheduleStatusSource& schedule_source_;
 };
 
 }  // namespace yori::ipc

@@ -3,6 +3,30 @@
 本文件记录 Yori 的版本化变更（工程规范第 10.5 节）。日期为 YYYY-MM-DD；
 条目按版本倒序排列。未发布条目置于 `## Unreleased`。
 
+## Unreleased
+
+### 新增（M9：GPU placement 亲和调度，DEC-012）
+
+- **`yori submit --gpu INDEX-or-UUID`（REQUIRED 硬亲和）**：Job 只允许运行
+  在指定 GPU 上，目标被 lease/外部占用/不可用时保持 `QUEUED`，绝不 fallback
+  到其他设备；与 `--gpus` 计数语义显式互斥。设备身份复用稳定 `GpuUuid`，
+  index/UUID 输入由 daemon 在提交时以当前观测解析（索引不构成持久化身份，
+  设备枚举顺序变化不错误迁移亲和目标），解析失败拒绝提交。
+- **FIFO 有界跳过（修订 DEC-005 队首条款）**：暂不可满足的亲和 Job 不再
+  阻塞全局队列——调度按 FIFO 顺序扫描队首窗口（默认 32 条，`yorid
+  --scheduler-scan-window` 可配，1..4096），跳过不可调度 Job 并继续考察
+  后续 Job；被跳过 Job 保持 `QUEUED` 与原队列位置，结论以结构化事件可观察。
+- **`wait_reason` 等待原因可见**：`yori ps`/`yori queue` 对 QUEUED Job 展示
+  最近一次调度评估的等待原因（`NO_FREE_GPU`/`AFFINITY_GPU_ALLOCATED`/
+  `AFFINITY_GPU_EXTERNAL`/`AFFINITY_GPU_STATE`），owner/admin 附带目标
+  UUID；脱敏视图只有原因本身。`yori inspect` 展示 placement 输入。
+- **协议 v3 与 schema v3**：SUBMIT 以 v3 追加可选 `gpu_spec`，PS/QUEUE 条目
+  追加 `wait_reason`+detail，INSPECT 追加 placement；daemon 同时接受 v1/v2
+  （响应回显请求版本，老客户端行为不变）。SQLite schema 2 -> 3 单事务增量
+  迁移（新增 `gpu_placement_mode`/`gpu_placement_device` 可空列），v1/v2 库
+  链式迁移兼容读、更高版本显式拒绝。daemon 重启后 placement 随 Job 恢复，
+  目标 GPU 从观测消失时保持 `QUEUED` 并以 `AFFINITY_GPU_STATE` 解释。
+
 ## v0.2.0 - 2026-09-12
 
 ### 修复

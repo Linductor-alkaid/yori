@@ -120,6 +120,23 @@ JobSpecValidationResult validate(const JobSpec& spec) noexcept {
     ++environment_index;
   }
 
+  // DEC-012：kAny 不携带设备；kRequired 恰 1 个合法 UUID（单 GPU Job 约束），
+  // 且与 gpu_request 计数语义互斥（--gpu 与 --gpus 组合输入在错误码上可区分）。
+  switch (spec.gpu_placement.mode) {
+    case GpuPlacementMode::kAny:
+      if (!spec.gpu_placement.devices.empty()) {
+        return {JobSpecErrorCode::kInvalidGpuPlacement, std::nullopt};
+      }
+      break;
+    case GpuPlacementMode::kRequired:
+      if (spec.gpu_placement.devices.size() != 1 || !spec.gpu_placement.devices.front().valid()) {
+        return {JobSpecErrorCode::kInvalidGpuPlacement, std::nullopt};
+      }
+      if (spec.gpu_request != 1) {
+        return {JobSpecErrorCode::kPlacementGpuRequestConflict, std::nullopt};
+      }
+      break;
+  }
   if (spec.gpu_request != 1) {
     return {JobSpecErrorCode::kUnsupportedGpuRequest, std::nullopt};
   }
@@ -179,6 +196,10 @@ const char* to_string(JobSpecErrorCode code) noexcept {
       return "ENVIRONMENT_TOO_LARGE";
     case JobSpecErrorCode::kUnsupportedGpuRequest:
       return "UNSUPPORTED_GPU_REQUEST";
+    case JobSpecErrorCode::kInvalidGpuPlacement:
+      return "INVALID_GPU_PLACEMENT";
+    case JobSpecErrorCode::kPlacementGpuRequestConflict:
+      return "PLACEMENT_GPU_REQUEST_CONFLICT";
     case JobSpecErrorCode::kLaunchProfileTooLong:
       return "LAUNCH_PROFILE_TOO_LONG";
     case JobSpecErrorCode::kInvalidTensorboardLogdir:

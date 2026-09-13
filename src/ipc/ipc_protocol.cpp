@@ -208,6 +208,8 @@ class Reader final {
 constexpr std::uint8_t kUnderlyingJobStateMax = 7;
 constexpr std::uint8_t kUnderlyingGpuObservedStateMax = 2;
 constexpr std::uint8_t kUnderlyingGpuLogicalStateMax = 3;
+constexpr std::uint8_t kUnderlyingWaitReasonMax = 4;
+constexpr std::uint8_t kUnderlyingGpuPlacementModeMax = 1;
 
 // 编码请求 kind body（不含 version/kind 头）。返回 false 表示字段越界或
 // 版本与字段不一致（v1 帧不允许携带 v2 扩展字段）。
@@ -220,6 +222,9 @@ bool encode_request_body(std::uint8_t version, const IpcRequest& request, Writer
         return false;
       }
       if (version < 2 && (submit.executable || submit.env_metadata)) {
+        return false;
+      }
+      if (version < 3 && submit.gpu_spec) {
         return false;
       }
       writer.u32(static_cast<std::uint32_t>(submit.argv.size()));
@@ -256,6 +261,13 @@ bool encode_request_body(std::uint8_t version, const IpcRequest& request, Writer
           if (writer.string(submit.env_metadata->python_version)) {
             return false;
           }
+        }
+      }
+      if (version >= 3) {
+        // v3 尾部追加（DEC-012）：可选 placement 输入；v2 帧在此结束
+        // （缺省 = kAny）。
+        if (writer.string(submit.gpu_spec)) {
+          return false;
         }
       }
       return true;
@@ -335,6 +347,17 @@ bool encode_response_body(std::uint8_t version, const IpcResponse& response, Wri
         } else {
           writer.u8(0);
         }
+        if (version >= 3) {
+          // v3（DEC-012）：QUEUED Job 的等待原因；detail（目标 UUID）仅
+          // owner/admin 视图由服务端填充。
+          if (summary.wait_reason > kUnderlyingWaitReasonMax) {
+            return false;
+          }
+          writer.u8(summary.wait_reason);
+          if (writer.string(summary.wait_detail)) {
+            return false;
+          }
+        }
       }
       return true;
     }
@@ -348,6 +371,15 @@ bool encode_response_body(std::uint8_t version, const IpcResponse& response, Wri
         writer.u32(entry.owner_uid);
         writer.u64(entry.submit_time_unix_ns);
         writer.u8(entry.state);
+        if (version >= 3) {
+          if (entry.wait_reason > kUnderlyingWaitReasonMax) {
+            return false;
+          }
+          writer.u8(entry.wait_reason);
+          if (writer.string(entry.wait_detail)) {
+            return false;
+          }
+        }
       }
       return true;
     }
@@ -470,7 +502,20 @@ bool encode_response_body(std::uint8_t version, const IpcResponse& response, Wri
       } else {
         writer.u8(0);
       }
-      return !writer.string(inspect.log_path);
+      if (writer.string(inspect.log_path)) {
+        return false;
+      }
+      if (version >= 3) {
+        // v3（DEC-012）：placement 输入（mode + required 时目标 UUID）。
+        if (inspect.gpu_placement_mode > kUnderlyingGpuPlacementModeMax) {
+          return false;
+        }
+        writer.u8(inspect.gpu_placement_mode);
+        if (writer.string(inspect.gpu_placement_device)) {
+          return false;
+        }
+      }
+      return true;
     }
   }
   return false;
@@ -574,6 +619,13 @@ IpcDecodeError decode_request_body(Reader& reader, IpcRequest& out) {
             return error;
           }
           submit.env_metadata = std::move(metadata);
+        }
+      }
+      if (version >= 3) {
+        // v3 尾部追加（DEC-012）：可选 placement 输入；v2 帧在此结束。
+        error = reader.string(submit.gpu_spec);
+        if (error != IpcDecodeError::kNone) {
+          return error;
         }
       }
       break;
@@ -744,6 +796,19 @@ IpcDecodeError decode_response_body(Reader& reader, IpcResponse& out) {
           }
           summary.exit = exit_status;
         }
+        if (version >= 3) {
+          // v3（DEC-012）：等待原因 + 可选目标明细。
+          if (!reader.u8(summary.wait_reason)) {
+            return IpcDecodeError::kTruncated;
+          }
+          if (summary.wait_reason > kUnderlyingWaitReasonMax) {
+            return IpcDecodeError::kInvalidValue;
+          }
+          error = reader.string(summary.wait_detail);
+          if (error != IpcDecodeError::kNone) {
+            return error;
+          }
+        }
         out.jobs.push_back(std::move(summary));
       }
       break;
@@ -764,7 +829,19 @@ IpcDecodeError decode_response_body(Reader& reader, IpcResponse& out) {
         if (entry.state > kUnderlyingJobStateMax) {
           return IpcDecodeError::kInvalidValue;
         }
-        out.queue.push_back(entry);
+        if (version >= 3) {
+          if (!reader.u8(entry.wait_reason)) {
+            return IpcDecodeError::kTruncated;
+          }
+          if (entry.wait_reason > kUnderlyingWaitReasonMax) {
+            return IpcDecodeError::kInvalidValue;
+          }
+          error = reader.string(entry.wait_detail);
+          if (error != IpcDecodeError::kNone) {
+            return error;
+          }
+        }
+        out.queue.push_back(std::move(entry));
       }
       break;
     }
@@ -1012,6 +1089,19 @@ IpcDecodeError decode_response_body(Reader& reader, IpcResponse& out) {
       if (error != IpcDecodeError::kNone) {
         return error;
       }
+      if (version >= 3) {
+        // v3（DEC-012）：placement 输入（mode + required 时目标 UUID）。
+        if (!reader.u8(inspect.gpu_placement_mode)) {
+          return IpcDecodeError::kTruncated;
+        }
+        if (inspect.gpu_placement_mode > kUnderlyingGpuPlacementModeMax) {
+          return IpcDecodeError::kInvalidValue;
+        }
+        error = reader.string(inspect.gpu_placement_device);
+        if (error != IpcDecodeError::kNone) {
+          return error;
+        }
+      }
       break;
     }
   }
@@ -1205,6 +1295,22 @@ const char* to_string(IpcRequestKind kind) noexcept {
       return "inspect";
   }
   return "unknown";
+}
+
+const char* to_string(IpcWaitReason reason) noexcept {
+  switch (reason) {
+    case IpcWaitReason::kNone:
+      return "NONE";
+    case IpcWaitReason::kNoFreeGpu:
+      return "NO_FREE_GPU";
+    case IpcWaitReason::kAffinityGpuAllocated:
+      return "AFFINITY_GPU_ALLOCATED";
+    case IpcWaitReason::kAffinityGpuExternal:
+      return "AFFINITY_GPU_EXTERNAL";
+    case IpcWaitReason::kAffinityGpuState:
+      return "AFFINITY_GPU_STATE";
+  }
+  return "UNKNOWN";
 }
 
 const char* to_string(IpcStreamFrameKind kind) noexcept {

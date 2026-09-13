@@ -108,6 +108,11 @@ class RawSql final {
     close_ = reinterpret_cast<decltype(&::sqlite3_close_v2)>(::dlsym(library_, "sqlite3_close_v2"));
     exec_ = reinterpret_cast<decltype(&::sqlite3_exec)>(::dlsym(library_, "sqlite3_exec"));
     YORI_CHECK(open_ != nullptr && close_ != nullptr && exec_ != nullptr);
+    // dlsym 失败路径下继续调用空函数指针（YORI_CHECK 不中止执行）是静态
+    // 分析器可探路径：显式早退消除。
+    if (open_ == nullptr || close_ == nullptr || exec_ == nullptr) {
+      return;
+    }
     YORI_CHECK(open_(path.c_str(), &db_, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr) ==
                SQLITE_OK);
   }
@@ -126,7 +131,15 @@ class RawSql final {
   RawSql(RawSql&&) = delete;
   RawSql& operator=(RawSql&&) = delete;
 
-  void run(const char* sql) { YORI_CHECK(exec_(db_, sql, nullptr, nullptr, nullptr) == SQLITE_OK); }
+  void run(const char* sql) {
+    // dlsym 失败路径下 exec_ 可能为空（YORI_CHECK 不中止执行）：显式守卫，
+    // 避免新增调用点触发静态分析器的空函数指针路径。
+    YORI_CHECK(exec_ != nullptr && db_ != nullptr);
+    if (exec_ == nullptr || db_ == nullptr) {
+      return;
+    }
+    YORI_CHECK(exec_(db_, sql, nullptr, nullptr, nullptr) == SQLITE_OK);
+  }
 
  private:
   void* library_{nullptr};
@@ -205,6 +218,18 @@ void create_v1_database(const std::string& path) {
       hex_blob(encoded_list({"LC_ALL", "C"})) +
       ", 1, NULL, NULL, 10000000000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL);";
   sql.run(insert.c_str());
+}
+
+// 以 v2 schema（含执行上下文列、无 placement 列、schema_version=2）建库并
+// 写入一行 QUEUED Job，模拟 M8 升级前 / M9 升级前的旧库。
+void create_v2_database(const std::string& path) {
+  create_v1_database(path);
+  RawSql sql(path);
+  sql.run(
+      "ALTER TABLE yori_jobs ADD COLUMN executable TEXT;"
+      "ALTER TABLE yori_jobs ADD COLUMN environment_type TEXT;"
+      "ALTER TABLE yori_jobs ADD COLUMN python_version TEXT;"
+      "UPDATE yori_meta SET value = 2 WHERE key = 'schema_version';");
 }
 
 }  // namespace
@@ -563,7 +588,7 @@ int main() {
     // 迁移后 schema_version=2：再次打开不重复迁移，新写入带捕获字段。
     {
       RawSql sql(path);
-      // 版本断言经再次打开隐式覆盖（3 将被拒绝）；此处仅确认可继续写入。
+      // 版本断言经再次打开隐式覆盖；此处仅确认可继续写入。
       static_cast<void>(sql);
     }
     {
@@ -617,13 +642,130 @@ int main() {
     }
     {
       RawSql sql(path);
-      sql.run("UPDATE yori_meta SET value = 3 WHERE key = 'schema_version';");
+      sql.run("UPDATE yori_meta SET value = 4 WHERE key = 'schema_version';");
     }
     {
       SqliteStateStore store{config_for(path)};
       const auto result = store.open();
       YORI_CHECK(result.code == SqliteStoreOpenCode::kSchemaInitFailed);
       YORI_CHECK(result.detail.find("unsupported schema version") != std::string::npos);
+    }
+  }
+
+  // ---- M9（DEC-012）：placement 列 roundtrip --------------------------------
+  {
+    const std::string path = directory + "/v3-placement.db";
+    {
+      SqliteStateStore store{config_for(path)};
+      YORI_CHECK(store.open().ok());
+      StateMutation create;
+      auto required = queued(1);
+      required.spec.gpu_placement.mode = yori::job::GpuPlacementMode::kRequired;
+      required.spec.gpu_placement.devices.push_back(yori::gpu::GpuUuid{"GPU-f3c1-roundtrip"});
+      create.create_jobs.push_back(std::move(required));
+      create.create_jobs.push_back(queued(2));
+      YORI_CHECK(store.apply(create).ok());
+    }
+    {
+      SqliteStateStore store{config_for(path)};
+      YORI_CHECK(store.open().ok());
+      const auto load = store.load();
+      YORI_CHECK(load.ok());
+      const auto& required_spec = require_job(load.snapshot, 1).spec;
+      YORI_CHECK(required_spec.gpu_placement.mode == yori::job::GpuPlacementMode::kRequired);
+      YORI_CHECK(required_spec.gpu_placement.devices.size() == 1);
+      YORI_CHECK(required_spec.gpu_placement.devices.front() ==
+                 yori::gpu::GpuUuid{"GPU-f3c1-roundtrip"});
+      const auto& any_spec = require_job(load.snapshot, 2).spec;
+      YORI_CHECK(any_spec.gpu_placement.mode == yori::job::GpuPlacementMode::kAny);
+      YORI_CHECK(any_spec.gpu_placement.devices.empty());
+    }
+  }
+
+  // ---- M9：v2 库打开时增量迁移，v2 行按 kAny 补全 ---------------------------
+  {
+    const std::string path = directory + "/v2-migrate.db";
+    create_v2_database(path);
+    {
+      SqliteStateStore store{config_for(path)};
+      YORI_CHECK(store.open().ok());
+      const auto load = store.load();
+      YORI_CHECK(load.ok());
+      const auto& record = require_job(load.snapshot, 1);
+      YORI_CHECK(record.state == JobState::kQueued);
+      YORI_CHECK(record.spec.gpu_placement.mode == yori::job::GpuPlacementMode::kAny);
+      YORI_CHECK(record.spec.gpu_placement.devices.empty());
+    }
+    // 迁移后新写入 REQUIRED 正常往返（schema_version 已到 3）。
+    {
+      SqliteStateStore store{config_for(path)};
+      YORI_CHECK(store.open().ok());
+      StateMutation create;
+      create.expected_revision = 0;
+      auto required = queued(2);
+      required.spec.gpu_placement.mode = yori::job::GpuPlacementMode::kRequired;
+      required.spec.gpu_placement.devices.push_back(yori::gpu::GpuUuid{"GPU-after-migration"});
+      create.create_jobs.push_back(std::move(required));
+      YORI_CHECK(store.apply(create).ok());
+      const auto load = store.load();
+      YORI_CHECK(load.ok());
+      const auto& spec = require_job(load.snapshot, 2).spec;
+      YORI_CHECK(spec.gpu_placement.mode == yori::job::GpuPlacementMode::kRequired);
+      YORI_CHECK(spec.gpu_placement.devices.front() == yori::gpu::GpuUuid{"GPU-after-migration"});
+    }
+  }
+
+  // ---- M9：v1 库经 v2 链式迁移到 v3，v1 行按 kAny 补全 ----------------------
+  {
+    const std::string path = directory + "/v1-migrate-v3.db";
+    create_v1_database(path);
+    SqliteStateStore store{config_for(path)};
+    YORI_CHECK(store.open().ok());
+    const auto load = store.load();
+    YORI_CHECK(load.ok());
+    const auto& record = require_job(load.snapshot, 1);
+    YORI_CHECK(record.spec.gpu_placement.mode == yori::job::GpuPlacementMode::kAny);
+    YORI_CHECK(record.spec.gpu_placement.devices.empty());
+  }
+
+  // ---- M9：placement 列篡改显式失败 -----------------------------------------
+  {
+    const std::string path = directory + "/tampered-placement.db";
+    {
+      SqliteStateStore store{config_for(path)};
+      YORI_CHECK(store.open().ok());
+      StateMutation create;
+      auto required = queued(1);
+      required.spec.gpu_placement.mode = yori::job::GpuPlacementMode::kRequired;
+      required.spec.gpu_placement.devices.push_back(yori::gpu::GpuUuid{"GPU-tamper"});
+      create.create_jobs.push_back(std::move(required));
+      YORI_CHECK(store.apply(create).ok());
+    }
+    // 非法 mode 值。
+    {
+      RawSql sql(path);
+      sql.run("UPDATE yori_jobs SET gpu_placement_mode = 'bogus' WHERE job_id = 1;");
+      SqliteStateStore store{config_for(path)};
+      YORI_CHECK(store.open().ok());
+      YORI_CHECK(store.load().code == StateStoreErrorCode::kInvalidJob);
+      sql.run("UPDATE yori_jobs SET gpu_placement_mode = 'required' WHERE job_id = 1;");
+    }
+    // required 缺 device。
+    {
+      RawSql sql(path);
+      sql.run("UPDATE yori_jobs SET gpu_placement_device = NULL WHERE job_id = 1;");
+      SqliteStateStore store{config_for(path)};
+      YORI_CHECK(store.open().ok());
+      YORI_CHECK(store.load().code == StateStoreErrorCode::kInvalidJob);
+      sql.run("UPDATE yori_jobs SET gpu_placement_device = 'GPU-tamper' WHERE job_id = 1;");
+    }
+    // device 脱离 required 单独出现（kAny + device）。
+    {
+      RawSql sql(path);
+      sql.run("UPDATE yori_jobs SET gpu_placement_mode = NULL WHERE job_id = 1;");
+      SqliteStateStore store{config_for(path)};
+      YORI_CHECK(store.open().ok());
+      YORI_CHECK(store.load().code == StateStoreErrorCode::kInvalidJob);
     }
   }
 

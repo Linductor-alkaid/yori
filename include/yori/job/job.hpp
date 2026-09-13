@@ -10,6 +10,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <yori/gpu/gpu_uuid.hpp>
 
 namespace yori::job {
 
@@ -61,6 +62,23 @@ struct EnvMetadata final {
   bool operator==(const EnvMetadata&) const noexcept = default;
 };
 
+// GPU placement 亲和约束（DEC-012）：kAny = 全部 GPU 候选（现行为）；
+// kRequired = 只允许运行在指定 GPU 上，目标不可用保持 QUEUED，绝不 fallback
+// 到其他设备。设备身份复用 gpu::GpuUuid（lease 与 StateStore 的稳定身份），
+// 由 daemon 在提交时从 index/UUID 输入解析。单 GPU Job 约束下 kRequired
+// 恰 1 个设备；kPREFERRED 与 GPU Set 延后（POST-11）。
+enum class GpuPlacementMode : std::uint8_t {
+  kAny = 0,
+  kRequired = 1,
+};
+
+struct GpuPlacement final {
+  GpuPlacementMode mode{GpuPlacementMode::kAny};
+  std::vector<gpu::GpuUuid> devices;  // kRequired 时恰 1 个
+
+  bool operator==(const GpuPlacement&) const = default;
+};
+
 struct JobSpec final {
   std::uint32_t owner_uid{0};
   std::uint32_t owner_gid{0};
@@ -73,6 +91,8 @@ struct JobSpec final {
   std::optional<std::string> executable;
   std::optional<EnvMetadata> env_metadata;
   std::uint32_t gpu_request{1};
+  // GPU 亲和约束（DEC-012）；缺省 kAny。
+  GpuPlacement gpu_placement;
   std::optional<std::string> launch_profile;
   std::optional<std::string> tensorboard_logdir;
   std::chrono::system_clock::time_point submit_time{};
@@ -93,6 +113,8 @@ enum class JobSpecErrorCode {
   kEnvironmentValueTooLong,
   kEnvironmentTooLarge,
   kUnsupportedGpuRequest,
+  kInvalidGpuPlacement,
+  kPlacementGpuRequestConflict,
   kLaunchProfileTooLong,
   kInvalidTensorboardLogdir,
   kInvalidSubmitTime,

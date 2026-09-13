@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cerrno>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <utility>
 #include <yori/ipc/ipc_service.hpp>
@@ -104,6 +105,67 @@ std::string to_lower_ascii(const std::string& text) {
   return lowered;
 }
 
+// scheduler::WaitReason -> IpcWaitReason 的 wire 映射（DEC-012：数值对齐）。
+static_assert(static_cast<int>(scheduler::WaitReason::kNone) ==
+                  static_cast<int>(IpcWaitReason::kNone),
+              "wait reason wire values must stay aligned");
+static_assert(static_cast<int>(scheduler::WaitReason::kNoFreeGpu) ==
+                  static_cast<int>(IpcWaitReason::kNoFreeGpu),
+              "wait reason wire values must stay aligned");
+static_assert(static_cast<int>(scheduler::WaitReason::kAffinityGpuAllocated) ==
+                  static_cast<int>(IpcWaitReason::kAffinityGpuAllocated),
+              "wait reason wire values must stay aligned");
+static_assert(static_cast<int>(scheduler::WaitReason::kAffinityGpuExternal) ==
+                  static_cast<int>(IpcWaitReason::kAffinityGpuExternal),
+              "wait reason wire values must stay aligned");
+static_assert(static_cast<int>(scheduler::WaitReason::kAffinityGpuState) ==
+                  static_cast<int>(IpcWaitReason::kAffinityGpuState),
+              "wait reason wire values must stay aligned");
+
+// placement 输入解析（DEC-012 决策 2）：全数字串按 NVML index、其余按 UUID
+// 在当前观测快照中解析。索引只是易用输入，解析结果写入 JobSpec 的稳定
+// GpuUuid；失败给出稳定原因（拒绝提交，不猜测）。
+std::optional<std::string> resolve_gpu_spec(const std::string& gpu_spec,
+                                            const gpu::GpuObservationSnapshot& snapshot,
+                                            gpu::GpuUuid& out) {
+  if (gpu_spec.empty()) {
+    return std::string{"GPU_SPEC_EMPTY"};
+  }
+  bool numeric = true;
+  for (const char c : gpu_spec) {
+    if (c < '0' || c > '9') {
+      numeric = false;
+      break;
+    }
+  }
+  if (numeric) {
+    errno = 0;
+    char* end = nullptr;
+    const unsigned long long index = std::strtoull(gpu_spec.c_str(), &end, 10);
+    if (errno != 0 || end == gpu_spec.c_str() || *end != '\0' || index > 0xFFFFFFFFULL) {
+      return std::string{"GPU_INDEX_NOT_FOUND: "} + gpu_spec;
+    }
+    for (const gpu::GpuObservation& device : snapshot.devices) {
+      if (device.index == static_cast<std::uint32_t>(index)) {
+        out = device.uuid;
+        return std::nullopt;
+      }
+    }
+    return std::string{"GPU_INDEX_NOT_FOUND: "} + gpu_spec;
+  }
+  const gpu::GpuUuid uuid{gpu_spec};
+  if (!uuid.valid()) {
+    return std::string{"GPU_UUID_INVALID"};
+  }
+  for (const gpu::GpuObservation& device : snapshot.devices) {
+    if (device.uuid == uuid) {
+      out = uuid;
+      return std::nullopt;
+    }
+  }
+  return std::string{"GPU_UUID_NOT_FOUND: "} + gpu_spec;
+}
+
 }  // namespace
 
 bool IpcServiceConfig::valid() const noexcept {
@@ -128,12 +190,13 @@ std::unique_ptr<LogSnapshotReader> file_log_snapshot_reader() {
 
 IpcService::IpcService(IpcServiceConfig config, store::StateStore& store,
                        GpuStatusSource& gpu_source, LogSnapshotReader& log_reader,
-                       JobControl& job_control)
+                       JobControl& job_control, ScheduleStatusSource& schedule_source)
     : config_(std::move(config)),
       store_(store),
       gpu_source_(gpu_source),
       log_reader_(log_reader),
-      job_control_(job_control) {}
+      job_control_(job_control),
+      schedule_source_(schedule_source) {}
 
 bool IpcService::is_admin(const PeerCredentials& peer) const noexcept {
   for (const std::uint32_t gid : config_.admin_gids) {
@@ -206,6 +269,25 @@ IpcResponse IpcService::handle_submit(const PeerCredentials& peer,
     metadata.python_version = request.env_metadata->python_version;
     spec.env_metadata = std::move(metadata);
   }
+  // v3 扩展（DEC-012）：placement 输入由 daemon 以当前观测解析为稳定 UUID
+  // 并写入 JobSpec；与 gpu_request 计数语义互斥。解析失败显式拒绝提交。
+  if (request.gpu_spec) {
+    if (request.gpu_request != 1) {
+      return error_response(IpcRequestKind::kSubmit, IpcError::kInvalidSpec,
+                            job::to_string(job::JobSpecErrorCode::kPlacementGpuRequestConflict));
+    }
+    gpu::GpuObservationSnapshot snapshot;
+    if (!gpu_source_.try_get_snapshot(snapshot)) {
+      return error_response(IpcRequestKind::kSubmit, IpcError::kNotAvailable,
+                            "no gpu observation available for placement resolution");
+    }
+    gpu::GpuUuid target;
+    if (const auto failure = resolve_gpu_spec(*request.gpu_spec, snapshot, target)) {
+      return error_response(IpcRequestKind::kSubmit, IpcError::kInvalidSpec, *failure);
+    }
+    spec.gpu_placement.mode = job::GpuPlacementMode::kRequired;
+    spec.gpu_placement.devices.push_back(std::move(target));
+  }
   spec.submit_time = std::chrono::system_clock::now();
 
   const job::JobSpecValidationResult validation = job::validate(spec);
@@ -247,6 +329,10 @@ IpcResponse IpcService::handle_ps(const PeerCredentials& peer) {
   const bool admin = is_admin(peer);
   const bool truncate = load.snapshot.jobs.size() > config_.max_listed_jobs;
 
+  // 最近一次调度评估（DEC-012）：QUEUED Job 的 wait_reason 派生视图。
+  scheduler::ScheduleEvaluation evaluation;
+  const bool have_evaluation = schedule_source_.try_get_schedule_evaluation(evaluation);
+
   IpcResponse response;
   response.kind = IpcRequestKind::kPs;
   response.error = truncate ? IpcError::kLimit : IpcError::kNone;
@@ -280,6 +366,18 @@ IpcResponse IpcService::handle_ps(const PeerCredentials& peer) {
                         record.execution.exit->exited() ? record.execution.exit->exit_code
                                                         : record.execution.exit->signal_number};
     }
+    if (record.state == job::JobState::kQueued && have_evaluation) {
+      for (const scheduler::ScheduleSkip& skip : evaluation.skipped) {
+        if (skip.job == record.id) {
+          summary.wait_reason = static_cast<std::uint8_t>(skip.reason);
+          // placement 明细（目标 UUID）仅 owner/admin；脱敏视图只有原因本身。
+          if (!masked && skip.target) {
+            summary.wait_detail = skip.target->value();
+          }
+          break;
+        }
+      }
+    }
     response.jobs.push_back(std::move(summary));
   }
   return response;
@@ -310,7 +408,10 @@ IpcResponse IpcService::handle_queue(const PeerCredentials& peer) {
               return lhs->id < rhs->id;
             });
 
+  const bool admin = is_admin(peer);
   const bool truncate = queued.size() > config_.max_listed_jobs;
+  scheduler::ScheduleEvaluation evaluation;
+  const bool have_evaluation = schedule_source_.try_get_schedule_evaluation(evaluation);
 
   IpcResponse response;
   response.kind = IpcRequestKind::kQueue;
@@ -329,7 +430,18 @@ IpcResponse IpcService::handle_queue(const PeerCredentials& peer) {
     entry.owner_uid = record->spec.owner_uid;
     entry.submit_time_unix_ns = unix_ns(record->spec.submit_time);
     entry.state = job_state_wire(record->state);
-    response.queue.push_back(entry);
+    if (have_evaluation) {
+      for (const scheduler::ScheduleSkip& skip : evaluation.skipped) {
+        if (skip.job == record->id) {
+          entry.wait_reason = static_cast<std::uint8_t>(skip.reason);
+          if ((admin || record->spec.owner_uid == peer.uid) && skip.target) {
+            entry.wait_detail = skip.target->value();
+          }
+          break;
+        }
+      }
+    }
+    response.queue.push_back(std::move(entry));
   }
   return response;
 }
@@ -597,6 +709,12 @@ IpcResponse IpcService::handle_inspect(const PeerCredentials& peer, std::uint64_
       }
       break;
     }
+  }
+
+  // placement 输入（DEC-012）：INSPECT 仅 owner/admin 可达，无脱敏分支。
+  inspect.gpu_placement_mode = static_cast<std::uint8_t>(record->spec.gpu_placement.mode);
+  if (record->spec.gpu_placement.mode == job::GpuPlacementMode::kRequired) {
+    inspect.gpu_placement_device = record->spec.gpu_placement.devices.front().value();
   }
 
   inspect.submit_time_unix_ns = unix_ns(record->spec.submit_time);

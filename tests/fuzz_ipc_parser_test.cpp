@@ -52,6 +52,20 @@ std::vector<std::vector<std::uint8_t>> seed_corpus() {
   YORI_CHECK(append_request_frame(submit_v1, frame));
   corpus.push_back(frame);
 
+  // M9（DEC-012）：v3 SUBMIT（placement 输入 gpu_spec：index 与 UUID 两形态）
+  // 与 v2 帧（无 gpu_spec 尾部）。
+  IpcRequest submit_v3 = submit;
+  submit_v3.submit.executable = std::string("/opt/conda/envs/t/bin/python");
+  submit_v3.submit.gpu_spec = std::string("2");
+  frame.clear();
+  YORI_CHECK(append_request_frame(submit_v3, frame));
+  corpus.push_back(frame);
+
+  submit_v3.submit.gpu_spec = std::string("GPU-f3c1-fuzz-seed");
+  frame.clear();
+  YORI_CHECK(append_request_frame(submit_v3, frame));
+  corpus.push_back(frame);
+
   IpcRequest inspect_request;
   inspect_request.kind = IpcRequestKind::kInspect;
   inspect_request.inspect.job_id = 9;
@@ -164,9 +178,19 @@ std::vector<std::vector<std::uint8_t>> seed_corpus() {
   IpcResponse ps;
   ps.kind = IpcRequestKind::kPs;
   ps.error = IpcError::kNone;
+  ps.jobs.push_back(IpcJobSummary{1,
+                                  2,
+                                  1000,
+                                  3,
+                                  false,
+                                  {"python"},
+                                  "/srv",
+                                  std::string("r"),
+                                  IpcExitStatus{true, 0},
+                                  0,
+                                  std::nullopt});
   ps.jobs.push_back(IpcJobSummary{
-      1, 2, 1000, 3, false, {"python"}, "/srv", std::string("r"), IpcExitStatus{true, 0}});
-  ps.jobs.push_back(IpcJobSummary{2, 0, 1001, 0, true, {}, "", std::nullopt, std::nullopt});
+      2, 0, 1001, 0, true, {}, "", std::nullopt, std::nullopt, 3, std::string("GPU-fuzz")});
   frame.clear();
   YORI_CHECK(append_response_frame(ps, frame));
   corpus.push_back(frame);

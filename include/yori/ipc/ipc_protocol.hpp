@@ -10,15 +10,17 @@
 namespace yori::ipc {
 
 // ---------------------------------------------------------------------------
-// IPC 协议（设计第 13 节；v1 于 M5 冻结，v2 于 M8 按 DEC-011 增量扩展）。
+// IPC 协议（设计第 13 节；v1 于 M5 冻结，v2 于 M8 按 DEC-011 增量扩展，v3 于
+// M9 按 DEC-012 增量扩展）。
 //
 // 帧格式（两个方向一致）：
 //   [u32 LE payload_bytes][payload]
 //   payload = [u8 version][u8 kind][kind body]
 //
-// v2 只增量扩展 SUBMIT（尾部追加可选 executable/env 元数据）并新增 INSPECT
-// kind；v1 帧仍被接受（缺省字段按无捕获处理）。流式帧族（M6）冻结于
-// version=1，不随请求/响应 v2 变化。
+// v3 只增量扩展：SUBMIT 尾部追加可选 gpu_spec（placement 输入，存在即
+// REQUIRED）；PS/QUEUE 条目尾部追加 wait_reason 与可选 detail；INSPECT 尾部
+// 追加 placement。v1/v2 帧仍被接受（缺省字段按无亲和/无 wait_reason 处理）。
+// 流式帧族（M6）冻结于 version=1，不随请求/响应版本变化。
 //
 // 协议层只承担结构安全：负载/字符串/计数/字节数组上限、NUL 禁止、全量消费、
 // 枚举值域校验；语义上限（argv/env/cwd/logdir 的精确 JobSpec 限制）由
@@ -31,7 +33,7 @@ struct IpcProtocolLimits final {
   // + cwd/logdir 等）与 LOGS 响应（两路尾部各 256 KiB），留余量。
   static constexpr std::uint32_t kMaxPayloadBytes = 1u << 20;  // 1 MiB
   static constexpr std::uint32_t kMinPayloadBytes = 2;         // version + kind
-  static constexpr std::uint8_t kProtocolVersion = 2;
+  static constexpr std::uint8_t kProtocolVersion = 3;
   static constexpr std::uint8_t kMinProtocolVersion = 1;  // daemon 接受的最低版本
   // 流式帧族（M6 冻结）的协议版本，独立于请求/响应版本。
   static constexpr std::uint8_t kStreamFrameVersion = 1;
@@ -76,6 +78,19 @@ enum class IpcRequestKind : std::uint8_t {
 
 [[nodiscard]] const char* to_string(IpcRequestKind kind) noexcept;
 
+// PS/QUEUE 条目的等待原因 wire 值（DEC-012 决策 5；数值与
+// scheduler::WaitReason 一致，由服务端映射）。0 = 无（未评估或非 QUEUED）。
+// detail 仅 owner/admin 视图携带（kRequired 目标 UUID；脱敏视图不传输）。
+enum class IpcWaitReason : std::uint8_t {
+  kNone = 0,
+  kNoFreeGpu = 1,
+  kAffinityGpuAllocated = 2,
+  kAffinityGpuExternal = 3,
+  kAffinityGpuState = 4,
+};
+
+[[nodiscard]] const char* to_string(IpcWaitReason reason) noexcept;
+
 // 提交时环境来源元数据（DEC-011；wire 数值与 job::EnvSource 对齐：
 // 0 = none，1 = conda，2 = venv）。
 struct IpcEnvMetadata final {
@@ -94,6 +109,10 @@ struct IpcSubmitRequest final {
   // 缺省（无捕获语义）。
   std::optional<std::string> executable;
   std::optional<IpcEnvMetadata> env_metadata;
+  // v3（DEC-012）：placement 输入（存在即 REQUIRED 硬亲和）。值为用户输入的
+  // NVML index（十进制数字）或 GPU UUID 字符串，由 daemon 在提交处理时以
+  // 当前观测解析为 GpuUuid；v1/v2 帧缺省（kAny）。
+  std::optional<std::string> gpu_spec;
 };
 
 struct IpcCancelRequest final {
@@ -185,6 +204,11 @@ struct IpcJobSummary final {
   std::string cwd;
   std::optional<std::string> tensorboard_logdir;
   std::optional<IpcExitStatus> exit;
+  // v3（DEC-012）：QUEUED Job 的等待原因（IpcWaitReason 数值；其余状态为 0）
+  // 与 owner/admin 附带的目标 UUID。wait_detail 不受 masked 影响——脱敏视图
+  // 由服务端直接不填充。
+  std::uint8_t wait_reason{0};
+  std::optional<std::string> wait_detail;
 };
 
 struct IpcQueueEntry final {
@@ -192,6 +216,9 @@ struct IpcQueueEntry final {
   std::uint32_t owner_uid{0};
   std::uint64_t submit_time_unix_ns{0};
   std::uint8_t state{0};
+  // v3（DEC-012）：同 IpcJobSummary 的等待原因与 owner/admin 目标明细。
+  std::uint8_t wait_reason{0};
+  std::optional<std::string> wait_detail;
 };
 
 // gpu 响应的单设备视图。observed_state 为 gpu::GpuObservedState 数值，
@@ -251,9 +278,13 @@ struct IpcInspectPayload final {
   std::vector<std::string> argv;
   std::optional<IpcEnvMetadata> env_metadata;
   std::vector<IpcEnvEntry> env;
-  // 分配结果（lease 事实；placement 输入属 M9）。
+  // 分配结果（lease 事实；物理索引来自当前观测）。
   std::optional<std::string> gpu_uuid;
   std::optional<std::uint32_t> gpu_index;
+  // v3（DEC-012）：placement 输入（mode：0 = any，1 = required，与
+  // job::GpuPlacementMode 数值一致；required 时携带目标 UUID）。
+  std::uint8_t gpu_placement_mode{0};
+  std::optional<std::string> gpu_placement_device;
   // provenance。
   std::uint64_t submit_time_unix_ns{0};
   std::optional<IpcExitStatus> exit;

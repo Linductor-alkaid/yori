@@ -329,7 +329,8 @@ int main() {
   YORI_CHECK(wait_for_state(1, "RUNNING"));
 
   phase("submit job2");
-  // job 2：无空闲 GPU，保持 QUEUED（FIFO 头部阻塞，不绕过）。
+  // job 2：无空闲 GPU，保持 QUEUED（全局无空闲 -> NO_FREE_GPU；DEC-012 的
+  // wait_reason 视图可见）。
   code = run_cli(directory, socket_path,
                  "submit -- /bin/sh -c 'echo e2e-stdout; echo e2e-stderr 1>&2'", out, err);
   YORI_CHECK(code == 0);
@@ -339,6 +340,8 @@ int main() {
   code = run_cli(directory, socket_path, "queue", out, err);
   YORI_CHECK(code == 0);
   YORI_CHECK(contains(out, "2") && contains(out, "QUEUED"));
+  // M9：最近一次调度评估的等待原因（全局无空闲 GPU）。
+  YORI_CHECK(contains(out, "NO_FREE_GPU"));
 
   code = run_cli(directory, socket_path, "ps", out, err);
   YORI_CHECK(code == 0);
@@ -514,6 +517,53 @@ int main() {
   code = run_cli(directory, socket_path, "queue", out, err);
   YORI_CHECK(code == 0);
   YORI_CHECK(!contains(out, "QUEUED"));
+
+  phase("M9 section begin");
+  // ---- M9（DEC-012）：--gpu 硬亲和的端到端 ----------------------------------
+  {
+    // --gpu 1 = GPU-e2e-b（EXTERNAL_BUSY）：REQUIRED 保持 QUEUED，wait_reason
+    // 解释为 AFFINITY_GPU_EXTERNAL（不 fallback 到空闲的 GPU-e2e-a）。
+    code = run_cli(directory, socket_path, "submit --gpu 1 -- /bin/sh -c 'sleep 30'", out, err);
+    YORI_CHECK(code == 0);
+    YORI_CHECK(contains(out, "Submitted job 5"));
+    std::this_thread::sleep_for(300ms);
+    {
+      std::string line;
+      YORI_CHECK(ps_state_of(5, line));
+      YORI_CHECK(contains(line, "QUEUED"));
+      YORI_CHECK(contains(line, "AFFINITY_GPU_EXTERNAL"));
+      YORI_CHECK(contains(line, "GPU-e2e-b"));
+    }
+    code = run_cli(directory, socket_path, "inspect 5", out, err);
+    YORI_CHECK(code == 0);
+    YORI_CHECK(contains(out, "placement:   required GPU-e2e-b"));
+
+    // --gpu 与 --gpus 显式互斥：本地用法错误。
+    code = run_cli(directory, socket_path, "submit --gpu 0 --gpus 1 -- /bin/true", out, err);
+    YORI_CHECK(code == 2);
+    YORI_CHECK(contains(err, "mutually exclusive"));
+
+    // --gpu 9：索引不存在，daemon 拒绝提交（请求失败 1）。
+    code = run_cli(directory, socket_path, "submit --gpu 9 -- /bin/true", out, err);
+    YORI_CHECK(code == 1);
+    YORI_CHECK(contains(err, "GPU_INDEX_NOT_FOUND"));
+
+    // --gpu 0 = GPU-e2e-a（job 2 结束后空闲）：REQUIRED 在目标卡启动。
+    code = run_cli(directory, socket_path, "submit --gpu 0 -- /bin/sh -c 'sleep 30'", out, err);
+    YORI_CHECK(code == 0);
+    YORI_CHECK(contains(out, "Submitted job 6"));
+    YORI_CHECK(wait_for_state(6, "RUNNING"));
+    code = run_cli(directory, socket_path, "inspect 6", out, err);
+    YORI_CHECK(code == 0);
+    YORI_CHECK(contains(out, "placement:   required GPU-e2e-a"));
+    YORI_CHECK(contains(out, "assigned:    GPU-e2e-a"));
+
+    // 清理两个长驻 Job。
+    static_cast<void>(run_cli(directory, socket_path, "cancel 5", out, err));
+    static_cast<void>(run_cli(directory, socket_path, "cancel 6", out, err));
+    YORI_CHECK(wait_for_state(5, "CANCELLED"));
+    YORI_CHECK(wait_for_state(6, "CANCELLED"));
+  }
 
   // 用法错误：--gpus 2（POST-01）、未知命令、缺失 --。
   code = run_cli(directory, socket_path, "submit --gpus 2 -- python x.py", out, err);

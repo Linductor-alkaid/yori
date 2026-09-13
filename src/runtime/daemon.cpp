@@ -158,8 +158,9 @@ DaemonStartResult Daemon::start() {
   }
 
   log_reader_ = ipc::file_log_snapshot_reader();
+  // ScheduleStatusSource 由 JobManager 直接实现（DEC-012：comm 最新值视图）。
   service_ = std::make_unique<ipc::IpcService>(config_.service, *store_, *gpu_status_, *log_reader_,
-                                               *job_manager_);
+                                               *job_manager_, *job_manager_);
   log_follow_ =
       std::make_unique<LogFollowService>(executor_, *service_, *log_streamer_, config_.log_follow);
   // Topic 无 fd 可 poll：发布/终态经变更监听显式唤醒会话 worker（EXEC-03/04）。

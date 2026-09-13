@@ -177,5 +177,63 @@ int main() {
   YORI_CHECK(std::string_view{"venv"} == yori::job::to_string(yori::job::EnvSource::kVenv));
   YORI_CHECK(std::string_view{"none"} == yori::job::to_string(yori::job::EnvSource::kNone));
 
+  // ---- M9：gpu_placement（DEC-012）------------------------------------------
+  spec = valid_spec();
+  // 缺省 kAny（无设备）合法。
+  YORI_CHECK(yori::job::validate(spec));
+
+  spec = valid_spec();
+  spec.gpu_placement.mode = yori::job::GpuPlacementMode::kRequired;
+  spec.gpu_placement.devices.push_back(yori::gpu::GpuUuid{"GPU-abc-123"});
+  YORI_CHECK(yori::job::validate(spec));
+
+  // kAny 携带设备非法。
+  spec = valid_spec();
+  spec.gpu_placement.devices.push_back(yori::gpu::GpuUuid{"GPU-abc-123"});
+  check_error(spec, JobSpecErrorCode::kInvalidGpuPlacement);
+
+  // kRequired 缺设备 / 多设备非法（单 GPU Job 约束）。
+  spec = valid_spec();
+  spec.gpu_placement.mode = yori::job::GpuPlacementMode::kRequired;
+  check_error(spec, JobSpecErrorCode::kInvalidGpuPlacement);
+
+  spec = valid_spec();
+  spec.gpu_placement.mode = yori::job::GpuPlacementMode::kRequired;
+  spec.gpu_placement.devices.push_back(yori::gpu::GpuUuid{"GPU-abc"});
+  spec.gpu_placement.devices.push_back(yori::gpu::GpuUuid{"GPU-def"});
+  check_error(spec, JobSpecErrorCode::kInvalidGpuPlacement);
+
+  // kRequired 设备身份非法（空/超长/含 NUL）。
+  spec = valid_spec();
+  spec.gpu_placement.mode = yori::job::GpuPlacementMode::kRequired;
+  spec.gpu_placement.devices.push_back(yori::gpu::GpuUuid{""});
+  check_error(spec, JobSpecErrorCode::kInvalidGpuPlacement);
+
+  spec = valid_spec();
+  spec.gpu_placement.mode = yori::job::GpuPlacementMode::kRequired;
+  spec.gpu_placement.devices.push_back(
+      yori::gpu::GpuUuid{std::string(yori::gpu::GpuUuid::kMaxBytes + 1, 'g')});
+  check_error(spec, JobSpecErrorCode::kInvalidGpuPlacement);
+
+  // REQUIRED 与 gpu_request 计数互斥：错误码与通用 UNSUPPORTED_GPU_REQUEST 可区分。
+  spec = valid_spec();
+  spec.gpu_request = 2;
+  check_error(spec, JobSpecErrorCode::kUnsupportedGpuRequest);
+
+  spec = valid_spec();
+  spec.gpu_placement.mode = yori::job::GpuPlacementMode::kRequired;
+  spec.gpu_placement.devices.push_back(yori::gpu::GpuUuid{"GPU-abc"});
+  spec.gpu_request = 2;
+  check_error(spec, JobSpecErrorCode::kPlacementGpuRequestConflict);
+
+  // GpuPlacement 相等比较（mutation_core same_spec 完整性依赖）。
+  yori::job::GpuPlacement any_a;
+  yori::job::GpuPlacement any_b;
+  YORI_CHECK(any_a == any_b);
+  yori::job::GpuPlacement required;
+  required.mode = yori::job::GpuPlacementMode::kRequired;
+  required.devices.push_back(yori::gpu::GpuUuid{"GPU-abc"});
+  YORI_CHECK(!(any_a == required));
+
   return yori::testing::failure_count == 0 ? 0 : 1;
 }

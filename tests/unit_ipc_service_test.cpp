@@ -67,6 +67,20 @@ class FakeLogReader final : public LogSnapshotReader {
   bool fail{false};
 };
 
+class FakeScheduleStatus final : public ScheduleStatusSource {
+ public:
+  bool try_get_schedule_evaluation(yori::scheduler::ScheduleEvaluation& out) override {
+    if (!has_evaluation) {
+      return false;
+    }
+    out = evaluation;
+    return true;
+  }
+
+  bool has_evaluation{false};
+  yori::scheduler::ScheduleEvaluation evaluation{};
+};
+
 struct Fixture final {
   Fixture() {
     QueueErrorCode queue_error = QueueErrorCode::kNone;
@@ -77,6 +91,7 @@ struct Fixture final {
   std::unique_ptr<GlobalJobQueue> queue;
   FakeGpuStatus gpu_status;
   FakeLogReader log_reader;
+  FakeScheduleStatus schedule_status;
 };
 
 // 服务层测试的 JobControl 假实现（M7 起 submit/cancel 委派给守护承载）：执行
@@ -186,7 +201,7 @@ IpcServiceConfig service_config() {
 
 IpcService make_service(Fixture& fixture, FakeJobControl& control) {
   return IpcService(service_config(), fixture.store, fixture.gpu_status, fixture.log_reader,
-                    control);
+                    control, fixture.schedule_status);
 }
 
 IpcResponse submit(IpcService& service, std::uint32_t uid, std::uint32_t gid,
@@ -361,7 +376,7 @@ void test_ps_masking_and_admin() {
   IpcServiceConfig with_admin_uid = service_config();
   with_admin_uid.admin_uids = {kBobUid};
   IpcService uid_admin(with_admin_uid, fixture.store, fixture.gpu_status, fixture.log_reader,
-                       control);
+                       control, fixture.schedule_status);
   const IpcResponse uid_admin_view = call_ps(uid_admin, kBobUid, kBobGid);
   YORI_CHECK(!uid_admin_view.jobs[0].masked);
 }
@@ -371,7 +386,8 @@ void test_ps_limit() {
   IpcServiceConfig config = service_config();
   config.max_listed_jobs = 2;
   FakeJobControl control(fixture);
-  IpcService service(config, fixture.store, fixture.gpu_status, fixture.log_reader, control);
+  IpcService service(config, fixture.store, fixture.gpu_status, fixture.log_reader, control,
+                     fixture.schedule_status);
   for (int i = 0; i < 3; ++i) {
     YORI_CHECK(submit(service, kAliceUid, kAliceGid).error == IpcError::kNone);
   }
@@ -824,7 +840,8 @@ void test_inspect() {
   IpcServiceConfig config = service_config();
   config.sensitive_env_patterns = {"PRIVATE"};
   FakeJobControl control2(fixture);
-  IpcService custom(config, fixture.store, fixture.gpu_status, fixture.log_reader, control2);
+  IpcService custom(config, fixture.store, fixture.gpu_status, fixture.log_reader, control2,
+                    fixture.schedule_status);
   IpcSubmitRequest plain = valid_submit();
   plain.env = {{"HF_TOKEN", "v"}, {"MY_PRIVATE_VAR", "v"}};
   YORI_CHECK(submit(custom, kAliceUid, kAliceGid, std::move(plain)).error == IpcError::kNone);
@@ -881,6 +898,189 @@ void test_inspect_allocation_view() {
   YORI_CHECK(!no_observation.inspect.gpu_index.has_value());
 }
 
+// 快照内定位 Job 的 spec（M9 断言辅助）。
+const yori::job::JobSpec& require_spec(const yori::store::StateSnapshot& snapshot,
+                                       std::uint64_t id) {
+  for (const auto& record : snapshot.jobs) {
+    if (record.id == JobId{id}) {
+      return record.spec;
+    }
+  }
+  std::fprintf(stderr, "required Job %llu spec is missing\n", static_cast<unsigned long long>(id));
+  std::exit(1);
+}
+
+// ---- M9（DEC-012）：placement 输入解析与 wait_reason 视图 -------------------
+
+void seed_observation(Fixture& fixture) {
+  yori::gpu::GpuObservationSnapshot snapshot;
+  snapshot.revision = 1;
+  snapshot.observed_at = std::chrono::system_clock::now();
+  yori::gpu::GpuObservation first;
+  first.uuid = yori::gpu::GpuUuid{"GPU-a"};
+  first.index = 0;
+  first.state = yori::gpu::GpuObservedState::kFree;
+  yori::gpu::GpuObservation second;
+  second.uuid = yori::gpu::GpuUuid{"GPU-b"};
+  second.index = 7;
+  second.state = yori::gpu::GpuObservedState::kFree;
+  snapshot.devices = {first, second};
+  fixture.gpu_status.snapshot = snapshot;
+  fixture.gpu_status.has_snapshot = true;
+}
+
+yori::store::StoredJob seed_required_job(Fixture& fixture, const char* uuid) {
+  yori::job::JobSpec spec;
+  spec.owner_uid = kAliceUid;
+  spec.owner_gid = kAliceGid;
+  spec.argv = {"python", "train.py"};
+  spec.cwd = "/srv/training";
+  spec.gpu_placement.mode = yori::job::GpuPlacementMode::kRequired;
+  spec.gpu_placement.devices.push_back(yori::gpu::GpuUuid{uuid});
+  spec.submit_time = std::chrono::system_clock::now();
+  yori::store::StoredJob record{JobId{1}, spec, JobState::kQueued, 0};
+  yori::store::StateMutation create;
+  create.create_jobs = {record};
+  YORI_CHECK(fixture.store.apply(create));
+  const auto loaded = fixture.store.load();
+  YORI_CHECK(fixture.queue->restore(loaded.snapshot));
+  return record;
+}
+
+void test_m9_placement() {
+  // 提交解析：index -> UUID。
+  {
+    Fixture fixture;
+    FakeJobControl control(fixture);
+    IpcService service = make_service(fixture, control);
+    seed_observation(fixture);
+
+    IpcSubmitRequest request = valid_submit();
+    request.gpu_spec = std::string("7");  // GPU-b 的 NVML index
+    const IpcResponse accepted = submit(service, kAliceUid, kAliceGid, std::move(request));
+    YORI_CHECK(accepted.error == IpcError::kNone);
+    const auto loaded = fixture.store.load();
+    YORI_CHECK(require_spec(loaded.snapshot, 1).gpu_placement.mode ==
+               yori::job::GpuPlacementMode::kRequired);
+    YORI_CHECK(require_spec(loaded.snapshot, 1).gpu_placement.devices.front() ==
+               yori::gpu::GpuUuid{"GPU-b"});
+  }
+
+  // 提交解析：UUID 输入直接命中。
+  {
+    Fixture fixture;
+    FakeJobControl control(fixture);
+    IpcService service = make_service(fixture, control);
+    seed_observation(fixture);
+    IpcSubmitRequest request = valid_submit();
+    request.gpu_spec = std::string("GPU-a");
+    YORI_CHECK(submit(service, kAliceUid, kAliceGid, std::move(request)).error == IpcError::kNone);
+    const auto loaded = fixture.store.load();
+    YORI_CHECK(require_spec(loaded.snapshot, 1).gpu_placement.devices.front() ==
+               yori::gpu::GpuUuid{"GPU-a"});
+  }
+
+  // 无观测：placement 无法解析，显式 kNotAvailable（观测就绪后重试可行）。
+  {
+    Fixture fixture;
+    FakeJobControl control(fixture);
+    IpcService service = make_service(fixture, control);
+    IpcSubmitRequest request = valid_submit();
+    request.gpu_spec = std::string("0");
+    const IpcResponse response = submit(service, kAliceUid, kAliceGid, std::move(request));
+    YORI_CHECK(response.error == IpcError::kNotAvailable);
+  }
+
+  // 解析失败矩阵：未知 index / 未知 UUID / 与 gpu_request 互斥。
+  {
+    Fixture fixture;
+    FakeJobControl control(fixture);
+    IpcService service = make_service(fixture, control);
+    seed_observation(fixture);
+
+    IpcSubmitRequest bad_index = valid_submit();
+    bad_index.gpu_spec = std::string("9");
+    IpcResponse response = submit(service, kAliceUid, kAliceGid, std::move(bad_index));
+    YORI_CHECK(response.error == IpcError::kInvalidSpec);
+    YORI_CHECK(response.detail.find("GPU_INDEX_NOT_FOUND") != std::string::npos);
+
+    IpcSubmitRequest bad_uuid = valid_submit();
+    bad_uuid.gpu_spec = std::string("GPU-nope");
+    response = submit(service, kAliceUid, kAliceGid, std::move(bad_uuid));
+    YORI_CHECK(response.error == IpcError::kInvalidSpec);
+    YORI_CHECK(response.detail.find("GPU_UUID_NOT_FOUND") != std::string::npos);
+
+    IpcSubmitRequest conflict = valid_submit();
+    conflict.gpu_spec = std::string("0");
+    conflict.gpu_request = 2;
+    response = submit(service, kAliceUid, kAliceGid, std::move(conflict));
+    YORI_CHECK(response.error == IpcError::kInvalidSpec);
+    YORI_CHECK(response.detail.find("PLACEMENT_GPU_REQUEST_CONFLICT") != std::string::npos);
+  }
+
+  // ps/queue 的 wait_reason：owner 附目标 UUID，脱敏视图只有原因。
+  {
+    Fixture fixture;
+    FakeJobControl control(fixture);
+    IpcService service = make_service(fixture, control);
+    static_cast<void>(seed_required_job(fixture, "GPU-a"));
+
+    // 尚无评估：wait_reason 为空。
+    IpcResponse ps = call_ps(service, kAliceUid, kAliceGid);
+    YORI_CHECK(ps.error == IpcError::kNone && ps.jobs[0].wait_reason == 0);
+    IpcResponse queue_view = call_queue(service, kAliceUid);
+    YORI_CHECK(queue_view.queue[0].wait_reason == 0);
+
+    // 最近一次评估：目标被 lease。
+    fixture.schedule_status.has_evaluation = true;
+    fixture.schedule_status.evaluation.skipped.push_back(
+        {JobId{1}, yori::scheduler::WaitReason::kAffinityGpuAllocated,
+         yori::gpu::GpuUuid{"GPU-a"}});
+
+    ps = call_ps(service, kAliceUid, kAliceGid);
+    YORI_CHECK(ps.jobs[0].wait_reason ==
+               static_cast<std::uint8_t>(yori::scheduler::WaitReason::kAffinityGpuAllocated));
+    YORI_CHECK(ps.jobs[0].wait_detail == std::string("GPU-a"));
+
+    // 非 owner 非 admin：原因可见，placement 明细（UUID）不传输。
+    ps = call_ps(service, kBobUid, kBobGid);
+    YORI_CHECK(ps.jobs[0].masked);
+    YORI_CHECK(ps.jobs[0].wait_reason ==
+               static_cast<std::uint8_t>(yori::scheduler::WaitReason::kAffinityGpuAllocated));
+    YORI_CHECK(!ps.jobs[0].wait_detail.has_value());
+
+    queue_view = call_queue(service, kBobUid);
+    YORI_CHECK(queue_view.queue[0].wait_reason ==
+               static_cast<std::uint8_t>(yori::scheduler::WaitReason::kAffinityGpuAllocated));
+    YORI_CHECK(!queue_view.queue[0].wait_detail.has_value());
+    queue_view = call_queue(service, kAliceUid);
+    YORI_CHECK(queue_view.queue[0].wait_detail == std::string("GPU-a"));
+
+    // 评估中不存在的 Job（如新提交未评估）：保持空。
+    fixture.schedule_status.evaluation.skipped.clear();
+    ps = call_ps(service, kAliceUid, kAliceGid);
+    YORI_CHECK(ps.jobs[0].wait_reason == 0);
+  }
+
+  // inspect placement：owner/admin 视图携带 mode 与目标。
+  {
+    Fixture fixture;
+    FakeJobControl control(fixture);
+    IpcService service = make_service(fixture, control);
+    static_cast<void>(seed_required_job(fixture, "GPU-b"));
+
+    const IpcResponse owner_view = call_inspect(service, kAliceUid, kAliceGid, 1);
+    YORI_CHECK(owner_view.error == IpcError::kNone);
+    YORI_CHECK(owner_view.inspect.gpu_placement_mode ==
+               static_cast<std::uint8_t>(yori::job::GpuPlacementMode::kRequired));
+    YORI_CHECK(owner_view.inspect.gpu_placement_device == std::string("GPU-b"));
+
+    const IpcResponse admin_view = call_inspect(service, kBobUid, kAdminGid, 1);
+    YORI_CHECK(admin_view.error == IpcError::kNone);
+    YORI_CHECK(admin_view.inspect.gpu_placement_device == std::string("GPU-b"));
+  }
+}
+
 int main() {
   test_submit_basics();
   test_queue_capacity_rollback();
@@ -896,6 +1096,7 @@ int main() {
   test_submit_v2_fields();
   test_inspect();
   test_inspect_allocation_view();
+  test_m9_placement();
   if (yori::testing::failure_count != 0) {
     std::fprintf(stderr, "ipc service: %d failure(s)\n", yori::testing::failure_count);
     return 1;
