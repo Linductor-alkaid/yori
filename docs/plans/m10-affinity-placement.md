@@ -1,8 +1,8 @@
 # M10：亲和感知 ANY 设备选择
 
-> 状态：In Progress（实现与验证完成，PR
-> [#23](https://github.com/Linductor-alkaid/yori/pull/23) CI 9/9 全绿，等待
-> 负责人评审与合并授权）
+> 状态：Completed（2026-09-13 PR
+> [#23](https://github.com/Linductor-alkaid/yori/pull/23) 合并于 master
+> `dbdd0d0`（负责人授权）；随 `v0.4.0` 发布）
 > 负责人：Linductor-alkaid
 > 所属计划：[Yori 实施总计划](yori-implementation-plan.md)
 > 前置：M9（GPU placement 亲和调度，PR [#20](https://github.com/Linductor-alkaid/yori/pull/20)）
@@ -10,8 +10,8 @@
 > 随 M10 启动冻结；扩展 [DEC-012](../decisions/DEC-012-gpu-placement-policy.md) 决策 3）
 > 需求来源：[Issue #22](https://github.com/Linductor-alkaid/yori/issues/22)（POST-11 中
 > "affinity-aware ANY 设备选择"子项的提前实现）
-> 建议发布点：`v0.4.0`（未定，随下一次发版）
-> 更新日期：2026-09-13（PR #23 CI 全绿，验证记录回填）
+> 建议发布点：`v0.4.0`（2026-09-13 发布，负责人授权）
+> 更新日期：2026-09-13（PR #23 合并，v0.4.0 发布收口）
 
 ## 目标
 
@@ -107,5 +107,6 @@
   9/9 全绿——clang-format、clang-tidy、gcc-13/clang-18 × debug/release、
   sanitizers（asan+ubsan+tsan）、deb 打包冒烟（ubuntu-22.04 / gcc-12 符号
   版本红线）、依赖锁定校验。
-- **限制与剩余项**：合并 PR 与发版（`v0.4.0` 未定）需负责人授权；无其他
-  未执行验证。
+- **限制与剩余项**：无。合并与发版已收口：PR #23 于 2026-09-13 经负责人
+  授权合并（master `dbdd0d0`），issue #22 随交付关闭；随发版 PR 定稿
+  `v0.4.0`（CHANGELOG 定稿、project VERSION 0.4.0、README M10 版本标注）。

@@ -20,7 +20,7 @@ yori submit 提交 Job -> yorid 全局队列排队 -> Scheduler 匹配空闲 GPU
 
 | 能力 | 说明 |
 | --- | --- |
-| 队列与调度 | 服务器级全局 FIFO（公平排队，单卡 MVP）；GPU lease 记账；事件驱动调度（提交/退出/取消/GPU 状态变化/恢复完成）；GPU 亲和（`--gpu` 硬亲和 + 有界跳过，v0.3.0） |
+| 队列与调度 | 服务器级全局 FIFO（公平排队，单卡 MVP）；GPU lease 记账；事件驱动调度（提交/退出/取消/GPU 状态变化/恢复完成）；GPU 亲和（`--gpu` 硬亲和 + 有界跳过，v0.3.0；亲和感知 ANY 选择，v0.4.0） |
 | 进程守护 | 独立进程组；取消升级 `SIGTERM -> 宽限（默认 10s）-> SIGKILL`；退出回收并释放 GPU 后自动调度下一个 Job |
 | GPU 管理 | NVML 发现/遥测/外部占用检测（`EXTERNAL_BUSY`，不接管不误杀）；物理 GPU 对训练透明（`CUDA_VISIBLE_DEVICES` 或物理参数模板） |
 | 持久化与恢复 | SQLite 状态库；daemon 重启恢复队列与 RUNNING Job（身份核验，无法确认转 `LOST`）；placement 随任务恢复不漂移 |
@@ -152,8 +152,8 @@ yori submit --gpu GPU-f3c1aa88-... -- train.py  # 或稳定 UUID
   目标 UUID。
 - 硬亲和任务**不会阻塞全局队列**：调度按 FIFO 顺序做有界跳过——排在你
   后面的可满足任务会先启动，你的任务保持排队位置，目标空闲后自动启动。
-- 普通任务（缺省 ANY）**不会挤占硬亲和目标的唯一选择**
-  （[DEC-013](docs/decisions/DEC-013-affinity-aware-any-placement.md)）：ANY
+- 普通任务（缺省 ANY）**不会挤占硬亲和目标的唯一选择**（v0.4.0，
+  [DEC-013](docs/decisions/DEC-013-affinity-aware-any-placement.md)）：ANY
   任务在多张空闲卡之间选择时，避开同队列窗口内等待中 REQUIRED 任务指定的
   卡；只有当全部空闲卡都是硬亲和目标时才会使用其一（利用率优先，不为等待
   者留空卡）。保护是软性的调度偏好，不产生预留。
