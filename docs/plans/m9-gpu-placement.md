@@ -196,3 +196,12 @@
 - 限制与补跑：真实 NVML 多卡环境下的 `--gpu` 端到端（NVML index 与
   CUDA_VISIBLE_DEVICES 的物理对应）未在本机执行（无 GPU），补跑条件沿用
   M7 真机矩阵；Linux Clang 编译矩阵由 CI 覆盖（本机仅 GCC 13.3）。
+
+2026-09-13（CI）：PR
+[#20](https://github.com/Linductor-alkaid/yori/pull/20)（分支
+`feat/m9-gpu-placement`，格式修复提交后 run
+[34739143912](https://github.com/Linductor-alkaid/yori/actions/runs/34739143912)）
+9/9 全绿：gcc-13 与 clang-18 的 debug/release、asan+ubsan+tsan、deb 打包
+冒烟（ubuntu-22.04 / gcc-12 符号版本红线）、依赖锁定校验、clang-format、
+clang-tidy。首轮 run 34710065418 仅 clang-format 失败（GCC -O3 误报修复晚于
+本地格式化轮；补跑 `clang-format` 后修复，见提交 `497e738`）。
