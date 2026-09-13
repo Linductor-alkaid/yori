@@ -3,7 +3,7 @@
 本文件记录 Yori 的版本化变更（工程规范第 10.5 节）。日期为 YYYY-MM-DD；
 条目按版本倒序排列。未发布条目置于 `## Unreleased`。
 
-## Unreleased
+## v0.5.0 - 2026-09-13
 
 ### 新增（M11：GPU Set 与 PREFERRED，DEC-014）
 

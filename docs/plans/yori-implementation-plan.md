@@ -103,12 +103,16 @@
   候选亲和 ranking（窗口内等待 REQUIRED 目标软保护 + 无替代回退）、
   `selection_reason` 可观察与 `JobManagerStats` 计数；契约零变更。证据见
   [M10 验证记录](m10-affinity-placement.md)。
-- M11 已启动（2026-09-13，负责人以"依照设计与计划推进下一步开发"确认按
-  总计划推进）：POST-11 余项（GPU Set `--gpu-any-of` 与 `PREFERRED` 模式）
-  立项为 M11，[DEC-014](../decisions/DEC-014-preferred-gpu-set-placement.md)
-  随启动冻结为 Accepted，里程碑文档
-  [m11-preferred-gpu-set.md](m11-preferred-gpu-set.md) 已创建。
-- 当前里程碑：M11（InProgress；POST-12～14 延后项按触发条件评估）。
+- M11 已合并（2026-09-13 负责人授权）：PR
+  [#25](https://github.com/Linductor-alkaid/yori/pull/25)（merge commit
+  `9309eb3`，5 实现 + 2 CI 修复 + 1 证据提交；最终 CI run
+  34764999918 9/9 全绿），随发版 PR 交付 `v0.5.0`，POST-11 全部收口。
+  交付：GPU Set（`--gpu-any-of`，kRequired 集合硬约束）、PREFERRED
+  （`--gpu-preferred`，软偏好回退 + `PREFERRED_FALLBACK` 可观察）、
+  IPC 协议 v4、schema v4 迁移。证据见
+  [M11 验证记录](m11-preferred-gpu-set.md)。
+- 当前里程碑：无（M11 已随 `v0.5.0` 收口；POST-12～14 延后项按触发条件
+  评估）。
 - MVP 端到端验收以设计文档第 19 节判据为准，由 M7 执行并记录证据（见第 10 节）。
 - 里程碑文档在各自启动时创建（工程规范第 2 节）；当前实体文件：M0-M10。
 
@@ -146,7 +150,7 @@ MVP 后已立项增强（2026-09-12 第一批，依据 issue #16/#10；2026-09-1
 | `SCOPE-16` | 提交时执行上下文捕获与恢复：环境捕获白名单 + `--env`/`--inherit-env`、executable 提交时解析、四层环境合并（含 `LD_LIBRARY_PATH` 保留键修订）、`yori inspect` 与 env 脱敏、schema v2 | M8 | [DEC-011](../decisions/DEC-011-execution-context-capture.md)（Accepted） |
 | `SCOPE-17` | GPU placement 亲和调度：`ANY`/`REQUIRED`、daemon 侧 index→UUID 解析、候选集过滤、FIFO 有界跳过（修订 DEC-005 队首条款）、`wait_reason` 展示、schema v3 | M9 | [DEC-012](../decisions/DEC-012-gpu-placement-policy.md)（Accepted） |
 | `SCOPE-18` | 亲和感知 `ANY` 设备选择：扫描窗口内等待 REQUIRED 目标的软保护（候选 ranking + 回退，不引入预留）、`selection_reason` 可观察与计数；无协议/schema 变化 | M10 | [DEC-013](../decisions/DEC-013-affinity-aware-any-placement.md)（Accepted） |
-| M11 | GPU Set 与 PREFERRED 模式 | M9、M10 | `--gpu-any-of` GPU Set（REQUIRED 集合）、`--gpu-preferred` 软偏好回退、`PREFERRED_FALLBACK` 可观察、IPC 协议 v4、schema v4 迁移 | v0.5.0 | InProgress |
+| M11 | GPU Set 与 PREFERRED 模式 | M9、M10 | `--gpu-any-of` GPU Set（REQUIRED 集合）、`--gpu-preferred` 软偏好回退、`PREFERRED_FALLBACK` 可观察、IPC 协议 v4、schema v4 迁移 | v0.5.0 | Completed（2026-09-13，PR [#25](https://github.com/Linductor-alkaid/yori/pull/25)，`v0.5.0` 发布） |
 
 ## 3. 不可破坏架构约束（RULE）
 

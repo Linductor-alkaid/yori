@@ -1,7 +1,8 @@
 # M11：GPU Set（--gpu-any-of）与 PREFERRED 模式
 
-> 状态：InProgress（2026-09-13 启动；负责人以"依照设计与计划推进下一步开发"
-> 确认按总计划推进 POST-11 余项）
+> 状态：Completed（2026-09-13 PR
+> [#25](https://github.com/Linductor-alkaid/yori/pull/25) 合并于 master
+> `9309eb3`（负责人授权）；随 `v0.5.0` 发布）
 > 负责人：Linductor-alkaid
 > 所属计划：[Yori 实施总计划](yori-implementation-plan.md)
 > 前置：M9（PR [#20](https://github.com/Linductor-alkaid/yori/pull/20)）、
@@ -12,8 +13,8 @@
 > 需求来源：[Issue #10](https://github.com/Linductor-alkaid/yori/issues/10)
 > （总计划 POST-11："M9/M10 交付后出现软偏好需求"——issue #10 的软偏好
 > 反馈在 M9/M10 交付后仍未有对应能力）
-> 建议发布点：`v0.5.0`
-> 更新日期：2026-09-13（启动）
+> 建议发布点：`v0.5.0`（2026-09-13 发布，负责人授权）
+> 更新日期：2026-09-13（PR #25 合并，v0.5.0 发布收口）
 
 ## 目标
 
