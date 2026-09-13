@@ -20,7 +20,7 @@ yori submit 提交 Job -> yorid 全局队列排队 -> Scheduler 匹配空闲 GPU
 
 | 能力 | 说明 |
 | --- | --- |
-| 队列与调度 | 服务器级全局 FIFO（公平排队，单卡 MVP）；GPU lease 记账；事件驱动调度（提交/退出/取消/GPU 状态变化/恢复完成）；GPU 亲和（`--gpu` 硬亲和 + 有界跳过，v0.3.0；亲和感知 ANY 选择，v0.4.0） |
+| 队列与调度 | 服务器级全局 FIFO（公平排队，单卡 MVP）；GPU lease 记账；事件驱动调度（提交/退出/取消/GPU 状态变化/恢复完成）；GPU 亲和（`--gpu` 硬亲和 + 有界跳过，v0.3.0；亲和感知 ANY 选择，v0.4.0；GPU Set `--gpu-any-of` 与 PREFERRED `--gpu-preferred`，v0.5.0） |
 | 进程守护 | 独立进程组；取消升级 `SIGTERM -> 宽限（默认 10s）-> SIGKILL`；退出回收并释放 GPU 后自动调度下一个 Job |
 | GPU 管理 | NVML 发现/遥测/外部占用检测（`EXTERNAL_BUSY`，不接管不误杀）；物理 GPU 对训练透明（`CUDA_VISIBLE_DEVICES` 或物理参数模板） |
 | 持久化与恢复 | SQLite 状态库；daemon 重启恢复队列与 RUNNING Job（身份核验，无法确认转 `LOST`）；placement 随任务恢复不漂移 |
