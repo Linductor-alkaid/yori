@@ -642,7 +642,7 @@ int main() {
     }
     {
       RawSql sql(path);
-      sql.run("UPDATE yori_meta SET value = 4 WHERE key = 'schema_version';");
+      sql.run("UPDATE yori_meta SET value = 5 WHERE key = 'schema_version';");
     }
     {
       SqliteStateStore store{config_for(path)};
@@ -763,6 +763,114 @@ int main() {
     {
       RawSql sql(path);
       sql.run("UPDATE yori_jobs SET gpu_placement_mode = NULL WHERE job_id = 1;");
+      SqliteStateStore store{config_for(path)};
+      YORI_CHECK(store.open().ok());
+      YORI_CHECK(store.load().code == StateStoreErrorCode::kInvalidJob);
+    }
+  }
+
+  // ---- M11（DEC-014）：required 集合与 preferred roundtrip ------------------
+  {
+    const std::string path = directory + "/v4-placement.db";
+    {
+      SqliteStateStore store{config_for(path)};
+      YORI_CHECK(store.open().ok());
+      StateMutation create;
+      auto set_required = queued(1);
+      set_required.spec.gpu_placement.mode = yori::job::GpuPlacementMode::kRequired;
+      for (const char* uuid : {"GPU-set-a", "GPU-set-b", "GPU-set-c"}) {
+        set_required.spec.gpu_placement.devices.push_back(yori::gpu::GpuUuid{uuid});
+      }
+      create.create_jobs.push_back(std::move(set_required));
+      auto preferred = queued(2);
+      preferred.spec.gpu_placement.mode = yori::job::GpuPlacementMode::kPreferred;
+      preferred.spec.gpu_placement.devices.push_back(yori::gpu::GpuUuid{"GPU-pref"});
+      create.create_jobs.push_back(std::move(preferred));
+      YORI_CHECK(store.apply(create).ok());
+    }
+    {
+      SqliteStateStore store{config_for(path)};
+      YORI_CHECK(store.open().ok());
+      const auto load = store.load();
+      YORI_CHECK(load.ok());
+      const auto& set_spec = require_job(load.snapshot, 1).spec;
+      YORI_CHECK(set_spec.gpu_placement.mode == yori::job::GpuPlacementMode::kRequired);
+      YORI_CHECK(set_spec.gpu_placement.devices.size() == 3);
+      YORI_CHECK(set_spec.gpu_placement.devices.front() == yori::gpu::GpuUuid{"GPU-set-a"});
+      YORI_CHECK(set_spec.gpu_placement.devices.back() == yori::gpu::GpuUuid{"GPU-set-c"});
+      const auto& preferred_spec = require_job(load.snapshot, 2).spec;
+      YORI_CHECK(preferred_spec.gpu_placement.mode == yori::job::GpuPlacementMode::kPreferred);
+      YORI_CHECK(preferred_spec.gpu_placement.devices.size() == 1);
+      YORI_CHECK(preferred_spec.gpu_placement.devices.front() == yori::gpu::GpuUuid{"GPU-pref"});
+    }
+  }
+
+  // ---- M11：v3 库打开时迁移到 v4，required 行回填集合列 ---------------------
+  {
+    const std::string path = directory + "/v3-migrate-v4.db";
+    create_v2_database(path);
+    {
+      RawSql sql(path);
+      // 以 v3 形态写入 required 单设备行（无集合列）。
+      sql.run("ALTER TABLE yori_jobs ADD COLUMN gpu_placement_mode TEXT;");
+      sql.run("ALTER TABLE yori_jobs ADD COLUMN gpu_placement_device TEXT;");
+      sql.run("UPDATE yori_meta SET value = 3 WHERE key = 'schema_version';");
+      sql.run(
+          "UPDATE yori_jobs SET gpu_placement_mode = 'required',"
+          " gpu_placement_device = 'GPU-legacy-required' WHERE job_id = 1;");
+    }
+    {
+      SqliteStateStore store{config_for(path)};
+      YORI_CHECK(store.open().ok());
+      const auto load = store.load();
+      YORI_CHECK(load.ok());
+      const auto& spec = require_job(load.snapshot, 1).spec;
+      YORI_CHECK(spec.gpu_placement.mode == yori::job::GpuPlacementMode::kRequired);
+      YORI_CHECK(spec.gpu_placement.devices.size() == 1);
+      YORI_CHECK(spec.gpu_placement.devices.front() == yori::gpu::GpuUuid{"GPU-legacy-required"});
+    }
+  }
+
+  // ---- M11：placement 集合列篡改显式失败 -------------------------------------
+  {
+    const std::string path = directory + "/tampered-placement-set.db";
+    {
+      SqliteStateStore store{config_for(path)};
+      YORI_CHECK(store.open().ok());
+      StateMutation create;
+      auto set_required = queued(1);
+      set_required.spec.gpu_placement.mode = yori::job::GpuPlacementMode::kRequired;
+      set_required.spec.gpu_placement.devices.push_back(yori::gpu::GpuUuid{"GPU-set-a"});
+      set_required.spec.gpu_placement.devices.push_back(yori::gpu::GpuUuid{"GPU-set-b"});
+      create.create_jobs.push_back(std::move(set_required));
+      YORI_CHECK(store.apply(create).ok());
+    }
+    // 集合列与单值列首设备不一致。
+    {
+      RawSql sql(path);
+      sql.run("UPDATE yori_jobs SET gpu_placement_devices = 'GPU-x,GPU-set-b' WHERE job_id = 1;");
+      SqliteStateStore store{config_for(path)};
+      YORI_CHECK(store.open().ok());
+      YORI_CHECK(store.load().code == StateStoreErrorCode::kInvalidJob);
+      sql.run(
+          "UPDATE yori_jobs SET gpu_placement_devices = 'GPU-set-a,GPU-set-b' WHERE job_id = 1;");
+    }
+    // 集合列出现空条目（非法 UUID 字符串在此模型下可能仍"合法"，空条目必败）。
+    {
+      RawSql sql(path);
+      sql.run("UPDATE yori_jobs SET gpu_placement_devices = 'GPU-set-a,' WHERE job_id = 1;");
+      SqliteStateStore store{config_for(path)};
+      YORI_CHECK(store.open().ok());
+      YORI_CHECK(store.load().code == StateStoreErrorCode::kInvalidJob);
+      sql.run(
+          "UPDATE yori_jobs SET gpu_placement_devices = 'GPU-set-a,GPU-set-b' WHERE job_id = 1;");
+    }
+    // preferred 携带集合列。
+    {
+      RawSql sql(path);
+      sql.run(
+          "UPDATE yori_jobs SET gpu_placement_mode = 'preferred',"
+          " gpu_placement_devices = 'GPU-set-a,GPU-set-b' WHERE job_id = 1;");
       SqliteStateStore store{config_for(path)};
       YORI_CHECK(store.open().ok());
       YORI_CHECK(store.load().code == StateStoreErrorCode::kInvalidJob);
