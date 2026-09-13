@@ -199,8 +199,8 @@ void test_malformed_requests() {
   result = decode_request_payload(only_version, 1);
   YORI_CHECK(result.error == IpcDecodeError::kTruncated);
 
-  // 坏版本（v3 起接受 1/2/3，4 仍非法）。
-  const std::uint8_t bad_version[2] = {4, static_cast<std::uint8_t>(IpcRequestKind::kPs)};
+  // 坏版本（v4 起接受 1/2/3/4，5 仍非法）。
+  const std::uint8_t bad_version[2] = {5, static_cast<std::uint8_t>(IpcRequestKind::kPs)};
   result = decode_request_payload(bad_version, sizeof(bad_version));
   YORI_CHECK(result.error == IpcDecodeError::kBadVersion);
 
@@ -890,7 +890,7 @@ void test_m8_golden_vectors() {
   YORI_CHECK(append_request_frame(request, buffer));
   const std::vector<std::uint8_t> expected_inspect = {
       0x0a, 0x00, 0x00, 0x00,                          // 长度 10（2 头 + 8）
-      0x03, 0x09,                                      // version 3（缺省）, INSPECT
+      0x04, 0x09,                                      // version 4（缺省）, INSPECT
       0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // job 5
   };
   YORI_CHECK(buffer == expected_inspect);
@@ -1026,6 +1026,89 @@ void test_m9_protocol_v3() {
   YORI_CHECK(std::string(to_string(IpcWaitReason::kNone)) == "NONE");
 }
 
+void test_m11_protocol_v4() {
+  // SUBMIT v4：gpu_spec 逗号分隔列表（GPU Set，DEC-014）与 preferred 输入
+  // roundtrip。
+  IpcRequest request;
+  request.kind = IpcRequestKind::kSubmit;
+  request.submit = sample_submit();
+  request.submit.gpu_spec = std::string("0,3,GPU-abc");
+  IpcRequest decoded;
+  YORI_CHECK(roundtrip_request(request, decoded));
+  YORI_CHECK(decoded.submit.gpu_spec == std::string("0,3,GPU-abc"));
+
+  request.submit.gpu_spec.reset();
+  request.submit.gpu_preferred_spec = std::string("GPU-f3c1aa88-...");
+  YORI_CHECK(roundtrip_request(request, decoded));
+  YORI_CHECK(decoded.submit.gpu_preferred_spec == std::string("GPU-f3c1aa88-..."));
+
+  // v3 SUBMIT：preferred 字段不随帧写出，解码缺省。
+  request.version = 3;
+  request.submit.gpu_preferred_spec.reset();
+  YORI_CHECK(roundtrip_request(request, decoded));
+  YORI_CHECK(!decoded.submit.gpu_preferred_spec.has_value());
+  request.version = IpcProtocolLimits::kProtocolVersion;
+
+  // v3 帧携带 gpu_preferred_spec：编码拒绝（版本与字段一致性）。
+  IpcRequest inconsistent;
+  inconsistent.kind = IpcRequestKind::kSubmit;
+  inconsistent.version = 3;
+  inconsistent.submit = sample_submit();
+  inconsistent.submit.gpu_preferred_spec = std::string("1");
+  std::vector<std::uint8_t> rejected;
+  YORI_CHECK(!append_request_frame(inconsistent, rejected));
+
+  // INSPECT v4：required 集合设备列表 roundtrip；mode 2（preferred）合法。
+  IpcResponse response;
+  response.kind = IpcRequestKind::kInspect;
+  response.inspect.job_id = 9;
+  response.inspect.state = 0;
+  response.inspect.owner_uid = 1000;
+  response.inspect.cwd = "/srv";
+  response.inspect.argv = {"train"};
+  response.inspect.gpu_placement_mode = 1;
+  response.inspect.gpu_placement_device = std::string("GPU-a");
+  response.inspect.gpu_placement_devices = {"GPU-a", "GPU-b", "GPU-c"};
+  IpcResponse decoded_response;
+  YORI_CHECK(roundtrip_response(response, decoded_response));
+  YORI_CHECK(decoded_response.inspect.gpu_placement_devices.size() == 3);
+  YORI_CHECK(decoded_response.inspect.gpu_placement_devices[2] == std::string("GPU-c"));
+
+  response.inspect.gpu_placement_mode = 2;
+  response.inspect.gpu_placement_devices.clear();
+  YORI_CHECK(roundtrip_response(response, decoded_response));
+  YORI_CHECK(decoded_response.inspect.gpu_placement_mode == 2);
+  YORI_CHECK(decoded_response.inspect.gpu_placement_devices.empty());
+
+  // mode 3 非法：编码拒绝 + 手工帧（基于 v4 缺省 INSPECT 帧，mode 置 3）
+  // 解码 kInvalidValue。
+  response.inspect.gpu_placement_mode = 3;
+  std::vector<std::uint8_t> bad_frame;
+  YORI_CHECK(!append_response_frame(response, bad_frame));
+  const std::vector<std::uint8_t> hand_crafted = {
+      0x04, 0x09,                                      // version 4, INSPECT
+      0x00,                                            // error kNone
+      0x00, 0x00, 0x00, 0x00,                          // detail ""
+      0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // job 1
+      0x00,                                            // state
+      0xe8, 0x03, 0x00, 0x00,                          // owner 1000
+      // revision/cwd/executable/argv/env_metadata/env/gpu_uuid/gpu_index/
+      // submit_time/exit/log_path 均为缺省（0/空）
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00,
+      0x03,  // placement mode 3（非法）
+      0x00,  // placement_device 无
+      0x00,  // placement_devices count 0
+  };
+  const IpcResponseDecodeResult bad_result =
+      decode_response_payload(hand_crafted.data(), hand_crafted.size());
+  if (bad_result.error != IpcDecodeError::kInvalidValue) {
+    std::fprintf(stderr, "  mode3 frame decode: %s\n", to_string(bad_result.error));
+  }
+  YORI_CHECK(bad_result.error == IpcDecodeError::kInvalidValue);
+}
+
 int main() {
   test_request_roundtrips();
   test_response_roundtrips();
@@ -1042,6 +1125,7 @@ int main() {
   test_m8_inspect_roundtrip();
   test_m8_golden_vectors();
   test_m9_protocol_v3();
+  test_m11_protocol_v4();
   if (yori::testing::failure_count != 0) {
     std::fprintf(stderr, "ipc protocol: %d failure(s)\n", yori::testing::failure_count);
     return 1;

@@ -1018,6 +1018,63 @@ void test_m9_placement() {
     YORI_CHECK(response.detail.find("PLACEMENT_GPU_REQUEST_CONFLICT") != std::string::npos);
   }
 
+  // M11（DEC-014）：gpu_spec 逗号分隔列表 → 去重 UUID 集合（kRequired）；
+  // preferred 输入 → kPreferred；两者互斥。
+  {
+    Fixture fixture;
+    FakeJobControl control(fixture);
+    IpcService service = make_service(fixture, control);
+    seed_observation(fixture);
+
+    IpcSubmitRequest set_request = valid_submit();
+    set_request.gpu_spec = std::string("7,0,GPU-a");  // 7→GPU-b，0→GPU-a（去重）
+    YORI_CHECK(submit(service, kAliceUid, kAliceGid, std::move(set_request)).error ==
+               IpcError::kNone);
+    const auto loaded = fixture.store.load();
+    const auto& set_spec = require_spec(loaded.snapshot, 1).gpu_placement;
+    YORI_CHECK(set_spec.mode == yori::job::GpuPlacementMode::kRequired);
+    YORI_CHECK(set_spec.devices.size() == 2);
+    YORI_CHECK(set_spec.devices.front() == yori::gpu::GpuUuid{"GPU-b"});
+    YORI_CHECK(set_spec.devices.back() == yori::gpu::GpuUuid{"GPU-a"});
+  }
+  {
+    Fixture fixture;
+    FakeJobControl control(fixture);
+    IpcService service = make_service(fixture, control);
+    seed_observation(fixture);
+
+    IpcSubmitRequest preferred = valid_submit();
+    preferred.gpu_preferred_spec = std::string("GPU-b");
+    YORI_CHECK(submit(service, kAliceUid, kAliceGid, std::move(preferred)).error ==
+               IpcError::kNone);
+    const auto loaded = fixture.store.load();
+    const auto& preferred_spec = require_spec(loaded.snapshot, 1).gpu_placement;
+    YORI_CHECK(preferred_spec.mode == yori::job::GpuPlacementMode::kPreferred);
+    YORI_CHECK(preferred_spec.devices.size() == 1);
+    YORI_CHECK(preferred_spec.devices.front() == yori::gpu::GpuUuid{"GPU-b"});
+
+    // 互斥：两者同时存在显式拒绝。
+    IpcSubmitRequest both = valid_submit();
+    both.gpu_spec = std::string("0");
+    both.gpu_preferred_spec = std::string("GPU-a");
+    const IpcResponse rejected = submit(service, kAliceUid, kAliceGid, std::move(both));
+    YORI_CHECK(rejected.error == IpcError::kInvalidSpec);
+
+    // 集合条目数超上限拒绝。
+    IpcSubmitRequest overflow = valid_submit();
+    overflow.gpu_spec = std::string("0,0,0,0,0,0,0,0,0");
+    const IpcResponse overflow_response =
+        submit(service, kAliceUid, kAliceGid, std::move(overflow));
+    YORI_CHECK(overflow_response.error == IpcError::kInvalidSpec);
+
+    // 列表内单条解析失败显式拒绝。
+    IpcSubmitRequest bad_entry = valid_submit();
+    bad_entry.gpu_spec = std::string("0,GPU-nope");
+    const IpcResponse bad_response = submit(service, kAliceUid, kAliceGid, std::move(bad_entry));
+    YORI_CHECK(bad_response.error == IpcError::kInvalidSpec);
+    YORI_CHECK(bad_response.detail.find("GPU_UUID_NOT_FOUND") != std::string::npos);
+  }
+
   // ps/queue 的 wait_reason：owner 附目标 UUID，脱敏视图只有原因。
   {
     Fixture fixture;

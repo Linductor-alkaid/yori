@@ -103,8 +103,12 @@
   候选亲和 ranking（窗口内等待 REQUIRED 目标软保护 + 无替代回退）、
   `selection_reason` 可观察与 `JobManagerStats` 计数；契约零变更。证据见
   [M10 验证记录](m10-affinity-placement.md)。
-- 当前里程碑：无（M10 已随 `v0.4.0` 收口；POST-11 余项（PREFERRED/GPU
-  Set）与 POST-12～14 延后项按触发条件评估）。
+- M11 已启动（2026-09-13，负责人以"依照设计与计划推进下一步开发"确认按
+  总计划推进）：POST-11 余项（GPU Set `--gpu-any-of` 与 `PREFERRED` 模式）
+  立项为 M11，[DEC-014](../decisions/DEC-014-preferred-gpu-set-placement.md)
+  随启动冻结为 Accepted，里程碑文档
+  [m11-preferred-gpu-set.md](m11-preferred-gpu-set.md) 已创建。
+- 当前里程碑：M11（InProgress；POST-12～14 延后项按触发条件评估）。
 - MVP 端到端验收以设计文档第 19 节判据为准，由 M7 执行并记录证据（见第 10 节）。
 - 里程碑文档在各自启动时创建（工程规范第 2 节）；当前实体文件：M0-M10。
 
@@ -142,6 +146,7 @@ MVP 后已立项增强（2026-09-12 第一批，依据 issue #16/#10；2026-09-1
 | `SCOPE-16` | 提交时执行上下文捕获与恢复：环境捕获白名单 + `--env`/`--inherit-env`、executable 提交时解析、四层环境合并（含 `LD_LIBRARY_PATH` 保留键修订）、`yori inspect` 与 env 脱敏、schema v2 | M8 | [DEC-011](../decisions/DEC-011-execution-context-capture.md)（Accepted） |
 | `SCOPE-17` | GPU placement 亲和调度：`ANY`/`REQUIRED`、daemon 侧 index→UUID 解析、候选集过滤、FIFO 有界跳过（修订 DEC-005 队首条款）、`wait_reason` 展示、schema v3 | M9 | [DEC-012](../decisions/DEC-012-gpu-placement-policy.md)（Accepted） |
 | `SCOPE-18` | 亲和感知 `ANY` 设备选择：扫描窗口内等待 REQUIRED 目标的软保护（候选 ranking + 回退，不引入预留）、`selection_reason` 可观察与计数；无协议/schema 变化 | M10 | [DEC-013](../decisions/DEC-013-affinity-aware-any-placement.md)（Accepted） |
+| M11 | GPU Set 与 PREFERRED 模式 | M9、M10 | `--gpu-any-of` GPU Set（REQUIRED 集合）、`--gpu-preferred` 软偏好回退、`PREFERRED_FALLBACK` 可观察、IPC 协议 v4、schema v4 迁移 | v0.5.0 | InProgress |
 
 ## 3. 不可破坏架构约束（RULE）
 
@@ -212,7 +217,8 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
   [M7 打包与 MVP 端到端验收](m7-packaging-acceptance.md)、
   [M8 提交时执行上下文](m8-execution-context.md)、
   [M9 GPU placement 亲和调度](m9-gpu-placement.md)、
-  [M10 亲和感知 ANY 设备选择](m10-affinity-placement.md)。
+  [M10 亲和感知 ANY 设备选择](m10-affinity-placement.md)、
+  [M11 GPU Set 与 PREFERRED](m11-preferred-gpu-set.md)。
 
 ## 6. 暂定默认值与未决问题
 
@@ -280,7 +286,7 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | `POST-08` | pidfd 进程生命周期增强 | 守护总装（M7）已确认 wait + 启动时间核验的不足：采纳进程（daemon 重启后恢复的 Job）非子进程，自然退出的状态不可得（FAILED + 显式原因），且退出发现有约 1 个探测周期的延迟；pidfd（`waitid(P_PIDFD)`）可消除两者 | §10.2、§6.2 |
 | `POST-09` | 拆分 `yori-launch-helper`（最小特权 launcher） | MVP 稳定后的安全演进 | §5、DEC-004 |
 | `POST-10` | daemon 托管常驻指标面板 | 用户提出常驻 TensorBoard 需求；届时必须新建设计与决策记录 | §11.6、DEC-003 |
-| `POST-11` | GPU placement 第二批余项：`PREFERRED` 模式、GPU Set（`--gpu-any-of`）（原第三子项"affinity-aware 的 `ANY` 设备选择"已于 2026-09-13 依 issue #22 提前由 M10/[DEC-013](../decisions/DEC-013-affinity-aware-any-placement.md) 承接） | M9/M10 交付后出现软偏好需求 | DEC-012、DEC-013、issue #10、issue #22 |
+| `POST-11` | 已于 2026-09-13 全部承接：affinity-aware ANY 选择由 M10/DEC-013 交付；`PREFERRED` 模式与 GPU Set（`--gpu-any-of`）由 M11/[DEC-014](../decisions/DEC-014-preferred-gpu-set-placement.md) 交付 | M9/M10 交付后出现软偏好需求（issue #10） | DEC-012、DEC-013、DEC-014、issue #10、issue #22 |
 | `POST-12` | GPU tag/pool 资源池、项目级默认 placement profile、管理员静态 user/project→GPU 映射 | 团队规模化后"专卡专用"需要集中治理 | DEC-012、issue #10 |
 | `POST-13` | 独立 `--shell` 提交接口 | 用户普遍需要管道/`&&` 且 `-- bash -c` 表达被证明不足 | DEC-011 |
 | `POST-14` | 完整环境 provenance（git commit/dirty、PyTorch/CUDA 版本探测）与训练复现报告 | `yori inspect` 基础 provenance（M8）使用后出现复现/排障需求 | DEC-011、issue #16 |

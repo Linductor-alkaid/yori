@@ -120,15 +120,37 @@ JobSpecValidationResult validate(const JobSpec& spec) noexcept {
     ++environment_index;
   }
 
-  // DEC-012：kAny 不携带设备；kRequired 恰 1 个合法 UUID（单 GPU Job 约束），
-  // 且与 gpu_request 计数语义互斥（--gpu 与 --gpus 组合输入在错误码上可区分）。
+  // DEC-012/DEC-014：kAny 不携带设备；kRequired 携带 1..kMaxPlacementDevices
+  // 个去重合法 UUID（GPU Set；单设备即 DEC-012 硬亲和）；kPreferred 恰 1 个
+  // 合法 UUID（软偏好）。placement 与 gpu_request 计数语义互斥（--gpu 与
+  // --gpus 组合输入在错误码上可区分）。
   switch (spec.gpu_placement.mode) {
     case GpuPlacementMode::kAny:
       if (!spec.gpu_placement.devices.empty()) {
         return {JobSpecErrorCode::kInvalidGpuPlacement, std::nullopt};
       }
       break;
-    case GpuPlacementMode::kRequired:
+    case GpuPlacementMode::kRequired: {
+      if (spec.gpu_placement.devices.empty() ||
+          spec.gpu_placement.devices.size() > JobSpecLimits::kMaxPlacementDevices) {
+        return {JobSpecErrorCode::kInvalidGpuPlacement, std::nullopt};
+      }
+      for (std::size_t index = 0; index < spec.gpu_placement.devices.size(); ++index) {
+        if (!spec.gpu_placement.devices[index].valid()) {
+          return {JobSpecErrorCode::kInvalidGpuPlacement, std::nullopt};
+        }
+        for (std::size_t prior = 0; prior < index; ++prior) {
+          if (spec.gpu_placement.devices[prior] == spec.gpu_placement.devices[index]) {
+            return {JobSpecErrorCode::kInvalidGpuPlacement, std::nullopt};
+          }
+        }
+      }
+      if (spec.gpu_request != 1) {
+        return {JobSpecErrorCode::kPlacementGpuRequestConflict, std::nullopt};
+      }
+      break;
+    }
+    case GpuPlacementMode::kPreferred:
       if (spec.gpu_placement.devices.size() != 1 || !spec.gpu_placement.devices.front().valid()) {
         return {JobSpecErrorCode::kInvalidGpuPlacement, std::nullopt};
       }

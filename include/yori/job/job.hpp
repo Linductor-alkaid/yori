@@ -38,6 +38,9 @@ struct JobSpecLimits final {
   static constexpr std::size_t kMaxEnvironmentValueBytes = 32 * 1024;
   static constexpr std::size_t kMaxEnvironmentBytes = 256 * 1024;
   static constexpr std::size_t kMaxLaunchProfileBytes = 128;
+  // DEC-014：kRequired 集合与协议 gpu_spec 列表的设备数上限（单 GPU Job
+  // 约束不变，集合只是约束范围）。
+  static constexpr std::size_t kMaxPlacementDevices = 8;
   static constexpr std::size_t kMaxTensorboardLogdirBytes = 4096;
   static constexpr std::size_t kMaxExecutableBytes = 4096;
   static constexpr std::size_t kMaxPythonVersionBytes = 64;
@@ -62,19 +65,23 @@ struct EnvMetadata final {
   bool operator==(const EnvMetadata&) const noexcept = default;
 };
 
-// GPU placement 亲和约束（DEC-012）：kAny = 全部 GPU 候选（现行为）；
-// kRequired = 只允许运行在指定 GPU 上，目标不可用保持 QUEUED，绝不 fallback
-// 到其他设备。设备身份复用 gpu::GpuUuid（lease 与 StateStore 的稳定身份），
-// 由 daemon 在提交时从 index/UUID 输入解析。单 GPU Job 约束下 kRequired
-// 恰 1 个设备；kPREFERRED 与 GPU Set 延后（POST-11）。
+// GPU placement 亲和约束（DEC-012/DEC-014）：kAny = 全部 GPU 候选（现行为）；
+// kRequired = 只允许运行在声明集合内的 GPU 上（1..kMaxPlacementDevices 个
+// 去重设备；集合内无可用设备保持 QUEUED，绝不 fallback 到集合外），单设备
+// 即 DEC-012 的硬亲和；kPreferred = 优先指定设备（恰 1 个），目标不可用时
+// 允许回退到其他 GPU（DEC-014）。设备身份复用 gpu::GpuUuid（lease 与
+// StateStore 的稳定身份），由 daemon 在提交时从 index/UUID 输入解析。
 enum class GpuPlacementMode : std::uint8_t {
   kAny = 0,
   kRequired = 1,
+  kPreferred = 2,  // DEC-014：软偏好，目标不可用时回退
 };
 
 struct GpuPlacement final {
   GpuPlacementMode mode{GpuPlacementMode::kAny};
-  std::vector<gpu::GpuUuid> devices;  // kRequired 时恰 1 个
+  // kRequired：1..kMaxPlacementDevices 个去重 UUID（GPU Set，DEC-014）；
+  // kPreferred：恰 1 个；kAny：空。
+  std::vector<gpu::GpuUuid> devices;
 
   bool operator==(const GpuPlacement&) const = default;
 };

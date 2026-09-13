@@ -166,6 +166,45 @@ std::optional<std::string> resolve_gpu_spec(const std::string& gpu_spec,
   return std::string{"GPU_UUID_NOT_FOUND: "} + gpu_spec;
 }
 
+// GPU Set 输入解析（DEC-014 决策 3）：逗号分隔条目逐条按 DEC-012 规则解析
+// 为稳定 UUID，去重（保留首次出现顺序）；条目数与解析失败都显式拒绝。
+std::optional<std::string> resolve_gpu_spec_list(const std::string& gpu_spec,
+                                                 const gpu::GpuObservationSnapshot& snapshot,
+                                                 std::vector<gpu::GpuUuid>& out) {
+  std::size_t entry_count = 0;
+  std::size_t begin = 0;
+  while (begin <= gpu_spec.size()) {
+    const auto comma = gpu_spec.find(',', begin);
+    const std::string entry =
+        gpu_spec.substr(begin, comma == std::string::npos ? std::string::npos : comma - begin);
+    if (++entry_count > job::JobSpecLimits::kMaxPlacementDevices) {
+      return std::string{"GPU_SPEC_INVALID: "} + gpu_spec;
+    }
+    gpu::GpuUuid resolved;
+    if (const auto failure = resolve_gpu_spec(entry, snapshot, resolved)) {
+      return failure;
+    }
+    bool duplicate = false;
+    for (const gpu::GpuUuid& known : out) {
+      if (known == resolved) {
+        duplicate = true;
+        break;
+      }
+    }
+    if (!duplicate) {
+      out.push_back(std::move(resolved));
+    }
+    if (comma == std::string::npos) {
+      break;
+    }
+    begin = comma + 1;
+  }
+  if (out.empty()) {
+    return std::string{"GPU_SPEC_INVALID: "} + gpu_spec;
+  }
+  return std::nullopt;
+}
+
 }  // namespace
 
 bool IpcServiceConfig::valid() const noexcept {
@@ -269,9 +308,15 @@ IpcResponse IpcService::handle_submit(const PeerCredentials& peer,
     metadata.python_version = request.env_metadata->python_version;
     spec.env_metadata = std::move(metadata);
   }
-  // v3 扩展（DEC-012）：placement 输入由 daemon 以当前观测解析为稳定 UUID
-  // 并写入 JobSpec；与 gpu_request 计数语义互斥。解析失败显式拒绝提交。
-  if (request.gpu_spec) {
+  // v3/v4 扩展（DEC-012/DEC-014）：placement 输入由 daemon 以当前观测解析
+  // 为稳定 UUID 并写入 JobSpec；REQUIRED 集合（gpu_spec，v4 起逗号分隔）
+  // 与 PREFERRED 软偏好（gpu_preferred_spec）互斥，与 gpu_request 计数语义
+  // 互斥。解析失败显式拒绝提交。
+  if (request.gpu_spec || request.gpu_preferred_spec) {
+    if (request.gpu_spec && request.gpu_preferred_spec) {
+      return error_response(IpcRequestKind::kSubmit, IpcError::kInvalidSpec,
+                            "gpu_spec and gpu_preferred_spec are mutually exclusive");
+    }
     if (request.gpu_request != 1) {
       return error_response(IpcRequestKind::kSubmit, IpcError::kInvalidSpec,
                             job::to_string(job::JobSpecErrorCode::kPlacementGpuRequestConflict));
@@ -281,12 +326,21 @@ IpcResponse IpcService::handle_submit(const PeerCredentials& peer,
       return error_response(IpcRequestKind::kSubmit, IpcError::kNotAvailable,
                             "no gpu observation available for placement resolution");
     }
-    gpu::GpuUuid target;
-    if (const auto failure = resolve_gpu_spec(*request.gpu_spec, snapshot, target)) {
-      return error_response(IpcRequestKind::kSubmit, IpcError::kInvalidSpec, *failure);
+    if (request.gpu_preferred_spec) {
+      gpu::GpuUuid target;
+      if (const auto failure = resolve_gpu_spec(*request.gpu_preferred_spec, snapshot, target)) {
+        return error_response(IpcRequestKind::kSubmit, IpcError::kInvalidSpec, *failure);
+      }
+      spec.gpu_placement.mode = job::GpuPlacementMode::kPreferred;
+      spec.gpu_placement.devices.push_back(std::move(target));
+    } else {
+      std::vector<gpu::GpuUuid> devices;
+      if (const auto failure = resolve_gpu_spec_list(*request.gpu_spec, snapshot, devices)) {
+        return error_response(IpcRequestKind::kSubmit, IpcError::kInvalidSpec, *failure);
+      }
+      spec.gpu_placement.mode = job::GpuPlacementMode::kRequired;
+      spec.gpu_placement.devices = std::move(devices);
     }
-    spec.gpu_placement.mode = job::GpuPlacementMode::kRequired;
-    spec.gpu_placement.devices.push_back(std::move(target));
   }
   spec.submit_time = std::chrono::system_clock::now();
 
@@ -711,9 +765,16 @@ IpcResponse IpcService::handle_inspect(const PeerCredentials& peer, std::uint64_
     }
   }
 
-  // placement 输入（DEC-012）：INSPECT 仅 owner/admin 可达，无脱敏分支。
+  // placement 输入（DEC-012/DEC-014）：INSPECT 仅 owner/admin 可达，无脱敏
+  // 分支。required 集合写入 v4 设备列表（首设备同时进单值字段，兼容展示）；
+  // preferred 目标进单值字段。
   inspect.gpu_placement_mode = static_cast<std::uint8_t>(record->spec.gpu_placement.mode);
   if (record->spec.gpu_placement.mode == job::GpuPlacementMode::kRequired) {
+    for (const gpu::GpuUuid& device : record->spec.gpu_placement.devices) {
+      inspect.gpu_placement_devices.push_back(device.value());
+    }
+    inspect.gpu_placement_device = record->spec.gpu_placement.devices.front().value();
+  } else if (record->spec.gpu_placement.mode == job::GpuPlacementMode::kPreferred) {
     inspect.gpu_placement_device = record->spec.gpu_placement.devices.front().value();
   }
 

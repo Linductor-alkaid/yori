@@ -11,15 +11,17 @@ namespace yori::ipc {
 
 // ---------------------------------------------------------------------------
 // IPC 协议（设计第 13 节；v1 于 M5 冻结，v2 于 M8 按 DEC-011 增量扩展，v3 于
-// M9 按 DEC-012 增量扩展）。
+// M9 按 DEC-012 增量扩展，v4 于 M11 按 DEC-014 增量扩展）。
 //
 // 帧格式（两个方向一致）：
 //   [u32 LE payload_bytes][payload]
 //   payload = [u8 version][u8 kind][kind body]
 //
-// v3 只增量扩展：SUBMIT 尾部追加可选 gpu_spec（placement 输入，存在即
-// REQUIRED）；PS/QUEUE 条目尾部追加 wait_reason 与可选 detail；INSPECT 尾部
-// 追加 placement。v1/v2 帧仍被接受（缺省字段按无亲和/无 wait_reason 处理）。
+// v4 只增量扩展：SUBMIT 尾部在 gpu_spec 之后追加可选 gpu_preferred_spec
+// （PREFERRED 软偏好输入）；gpu_spec 允许逗号分隔 1..8 个条目（GPU Set，
+// 解析语义见 IpcSubmitRequest）；INSPECT 尾部追加 required 集合设备列表。
+// v1/v2/v3 帧仍被接受（缺省字段按无亲和/无 wait_reason 处理；v3 及更早帧
+// 的 gpu_spec 保持单条目语义）。
 // 流式帧族（M6）冻结于 version=1，不随请求/响应版本变化。
 //
 // 协议层只承担结构安全：负载/字符串/计数/字节数组上限、NUL 禁止、全量消费、
@@ -33,7 +35,7 @@ struct IpcProtocolLimits final {
   // + cwd/logdir 等）与 LOGS 响应（两路尾部各 256 KiB），留余量。
   static constexpr std::uint32_t kMaxPayloadBytes = 1u << 20;  // 1 MiB
   static constexpr std::uint32_t kMinPayloadBytes = 2;         // version + kind
-  static constexpr std::uint8_t kProtocolVersion = 3;
+  static constexpr std::uint8_t kProtocolVersion = 4;
   static constexpr std::uint8_t kMinProtocolVersion = 1;  // daemon 接受的最低版本
   // 流式帧族（M6 冻结）的协议版本，独立于请求/响应版本。
   static constexpr std::uint8_t kStreamFrameVersion = 1;
@@ -111,8 +113,13 @@ struct IpcSubmitRequest final {
   std::optional<IpcEnvMetadata> env_metadata;
   // v3（DEC-012）：placement 输入（存在即 REQUIRED 硬亲和）。值为用户输入的
   // NVML index（十进制数字）或 GPU UUID 字符串，由 daemon 在提交处理时以
-  // 当前观测解析为 GpuUuid；v1/v2 帧缺省（kAny）。
+  // 当前观测解析为 GpuUuid；v1/v2 帧缺省（kAny）。v4（DEC-014）起允许逗号
+  // 分隔 1..job::JobSpecLimits::kMaxPlacementDevices 个条目（GPU Set，混用
+  // index/UUID，daemon 解析为去重集合）；v3 及更早帧保持单条目语义。
   std::optional<std::string> gpu_spec;
+  // v4（DEC-014）：PREFERRED 软偏好输入（单条目，语义同上）；与 gpu_spec
+  // 互斥（同时存在为无效请求）。
+  std::optional<std::string> gpu_preferred_spec;
 };
 
 struct IpcCancelRequest final {
@@ -281,10 +288,14 @@ struct IpcInspectPayload final {
   // 分配结果（lease 事实；物理索引来自当前观测）。
   std::optional<std::string> gpu_uuid;
   std::optional<std::uint32_t> gpu_index;
-  // v3（DEC-012）：placement 输入（mode：0 = any，1 = required，与
-  // job::GpuPlacementMode 数值一致；required 时携带目标 UUID）。
+  // v3（DEC-012）：placement 输入（mode：0 = any，1 = required，2 =
+  // preferred（v4，DEC-014），与 job::GpuPlacementMode 数值一致；required
+  // 单设备/preferred 时携带目标 UUID）。
   std::uint8_t gpu_placement_mode{0};
   std::optional<std::string> gpu_placement_device;
+  // v4（DEC-014）：required 集合的设备 UUID 列表（单设备/preferred/any 为
+  // 空；旧版本帧缺省）。
+  std::vector<std::string> gpu_placement_devices;
   // provenance。
   std::uint64_t submit_time_unix_ns{0};
   std::optional<IpcExitStatus> exit;

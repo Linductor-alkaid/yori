@@ -3,6 +3,26 @@
 本文件记录 Yori 的版本化变更（工程规范第 10.5 节）。日期为 YYYY-MM-DD；
 条目按版本倒序排列。未发布条目置于 `## Unreleased`。
 
+## Unreleased
+
+### 新增（M11：GPU Set 与 PREFERRED，DEC-014）
+
+- **GPU Set（`--gpu-any-of`）**：`kRequired` 扩展为允许 1..8 个去重设备
+  （index/UUID 混用，daemon 以当前观测解析为去重 UUID 集合）；硬约束作用于
+  集合，集合内按物理 index 取第一张空闲卡，绝不 fallback 到集合外；等待
+  原因按 lease > 外部占用 > 状态聚合（`wait_reason` 复用现有枚举），并携带
+  集合内代表设备。单设备 `--gpu` 语义不变。
+- **PREFERRED（`--gpu-preferred`）**：软偏好目标；目标空闲时优先命中，
+  否则回退 kAny 亲和感知选择（DEC-013 ranking），回退结论以
+  `selection_reason = PREFERRED_FALLBACK` 可观察；全局无空闲时保持
+  `QUEUED`（`NO_FREE_GPU`）。DEC-013 的亲和保护集合扩展为等待中 REQUIRED
+  Job 的全部集合设备。
+- **IPC 协议 v4（增量）**：`SUBMIT.gpu_spec` 允许逗号分隔 1..8 条目，尾部
+  追加可选 `gpu_preferred_spec`；`INSPECT` 尾部追加 required 集合设备列表，
+  mode 值域扩展（2 = preferred）。v1-v3 帧仍被接受。
+- **持久化 schema v4（增量）**：新增 `gpu_placement_devices` 列（required
+  集合权威），v1-v3 库打开时按单事务迁移链补齐并回填 required 行。
+
 ## v0.4.0 - 2026-09-13
 
 ### 新增（M10：亲和感知 ANY 设备选择，DEC-013）

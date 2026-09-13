@@ -99,12 +99,15 @@ void print_usage() {
                "usage: yori [--socket PATH] <command> [args]\n"
                "commands:\n"
                "  submit [--gpus N] [--gpu INDEX-or-UUID] [--tensorboard-logdir DIR]\n"
-               "         [--cwd DIR] [--env K=V]... [--inherit-env]\n"
-               "         [--capture-env KEY]... -- CMD [ARG]...\n"
+               "         [--gpu-any-of LIST] [--gpu-preferred DEV] [--cwd DIR]\n"
+               "         [--env K=V]... [--inherit-env] [--capture-env KEY]... -- CMD [ARG]...\n"
                "         (captures the current execution context per DEC-011:\n"
                "          whitelist env, resolves CMD via the captured PATH)\n"
                "         (--gpu N pins the job to one GPU per DEC-012: hard\n"
-               "          affinity, mutually exclusive with --gpus)\n"
+               "          affinity; --gpu-any-of takes a comma-separated list of\n"
+               "          up to 8 indexes/UUIDs per DEC-014 (GPU Set); \n"
+               "          --gpu-preferred prefers one device with fallback;\n"
+               "          placement flags are mutually exclusive with --gpus)\n"
                "  ps                          list jobs (own jobs in full, others masked)\n"
                "  queue                       list queued jobs in FIFO order\n"
                "  gpu                         list GPUs with logical state\n"
@@ -196,6 +199,7 @@ int command_submit(const std::string& socket_path, std::vector<std::string> argu
   std::uint32_t gpus = 1;
   bool gpus_explicit = false;
   std::optional<std::string> gpu_spec;
+  std::optional<std::string> gpu_preferred_spec;
   bool inherit_env = false;
   std::vector<std::string> capture_extra;
 
@@ -221,22 +225,77 @@ int command_submit(const std::string& socket_path, std::vector<std::string> argu
     // DEC-012：REQUIRED 硬亲和；index/UUID 由 daemon 以当前观测解析。
     gpu_spec = value;
   }
+  while (parser.take_flag("--gpu-any-of", value)) {
+    // DEC-014：REQUIRED 集合（GPU Set）；条目为 index/UUID，重复出现即
+    // 追加为列表，daemon 逐条解析。
+    gpu_spec = gpu_spec ? *gpu_spec + "," + value : value;
+  }
+  while (parser.take_flag("--gpu-preferred", value)) {
+    // DEC-014：PREFERRED 软偏好；目标不可用时回退（daemon 侧语义）。
+    gpu_preferred_spec = value;
+  }
+  if (gpu_spec && gpu_preferred_spec) {
+    std::fprintf(stderr, "yori: --gpu/--gpu-any-of and --gpu-preferred are mutually exclusive\n");
+    return kExitUsage;
+  }
   if (gpu_spec) {
     if (gpus_explicit) {
       std::fprintf(stderr, "yori: --gpu and --gpus are mutually exclusive\n");
       return kExitUsage;
     }
-    // 本地格式预检（fail-fast；daemon 侧解析与拒绝是权威）。
-    bool numeric =
-        !gpu_spec->empty() && gpu_spec->find_first_not_of("0123456789") == std::string::npos;
-    const bool uuid_like = !gpu_spec->empty() &&
-                           gpu_spec->size() <= yori::gpu::GpuUuid::kMaxBytes &&
-                           gpu_spec->find('\0') == std::string::npos;
-    if (!numeric && !uuid_like) {
-      std::fprintf(stderr, "yori: --gpu expects a GPU index or UUID\n");
+    // 本地格式预检（fail-fast；daemon 侧解析与拒绝是权威）：逗号分隔
+    // 1..8 个条目（DEC-014），每个条目为 index 或 UUID。
+    std::size_t entry_count = 1;
+    for (const char c : *gpu_spec) {
+      if (c == ',') {
+        ++entry_count;
+      }
+    }
+    if (entry_count > yori::job::JobSpecLimits::kMaxPlacementDevices) {
+      std::fprintf(stderr, "yori: --gpu/--gpu-any-of accepts at most %zu devices\n",
+                   yori::job::JobSpecLimits::kMaxPlacementDevices);
+      return kExitUsage;
+    }
+    std::size_t begin = 0;
+    bool valid = true;
+    while (begin <= gpu_spec->size()) {
+      const auto comma = gpu_spec->find(',', begin);
+      const std::string entry =
+          gpu_spec->substr(begin, comma == std::string::npos ? std::string::npos : comma - begin);
+      const bool numeric =
+          !entry.empty() && entry.find_first_not_of("0123456789") == std::string::npos;
+      const bool uuid_like = !entry.empty() && entry.size() <= yori::gpu::GpuUuid::kMaxBytes &&
+                             entry.find('\0') == std::string::npos;
+      if (!numeric && !uuid_like) {
+        valid = false;
+        break;
+      }
+      if (comma == std::string::npos) {
+        break;
+      }
+      begin = comma + 1;
+    }
+    if (!valid) {
+      std::fprintf(stderr, "yori: --gpu/--gpu-any-of expects GPU indexes or UUIDs\n");
       return kExitUsage;
     }
     submit.gpu_spec = gpu_spec;
+  }
+  if (gpu_preferred_spec) {
+    if (gpus_explicit) {
+      std::fprintf(stderr, "yori: --gpu-preferred and --gpus are mutually exclusive\n");
+      return kExitUsage;
+    }
+    const bool numeric = !gpu_preferred_spec->empty() &&
+                         gpu_preferred_spec->find_first_not_of("0123456789") == std::string::npos;
+    const bool uuid_like = !gpu_preferred_spec->empty() &&
+                           gpu_preferred_spec->size() <= yori::gpu::GpuUuid::kMaxBytes &&
+                           gpu_preferred_spec->find('\0') == std::string::npos;
+    if (!numeric && !uuid_like) {
+      std::fprintf(stderr, "yori: --gpu-preferred expects a GPU index or UUID\n");
+      return kExitUsage;
+    }
+    submit.gpu_preferred_spec = gpu_preferred_spec;
   }
   while (parser.take_flag("--tensorboard-logdir", value)) {
     submit.tensorboard_logdir = value;
@@ -758,10 +817,24 @@ int command_inspect(const std::string& socket_path, const std::string& job_text)
     command += inspect.argv[i];
   }
   std::printf("command:     %s\n", command.c_str());
-  // placement 输入（DEC-012）：owner/admin 视图（INSPECT 拒绝非 owner/admin）。
+  // placement 输入（DEC-012/DEC-014）：owner/admin 视图（INSPECT 拒绝非
+  // owner/admin）。
   if (inspect.gpu_placement_mode ==
       static_cast<std::uint8_t>(yori::job::GpuPlacementMode::kRequired)) {
-    std::printf("placement:   required %s\n",
+    std::string devices;
+    for (std::size_t i = 0; i < inspect.gpu_placement_devices.size(); ++i) {
+      if (i > 0) {
+        devices += "|";
+      }
+      devices += inspect.gpu_placement_devices[i];
+    }
+    if (devices.empty() && inspect.gpu_placement_device) {
+      devices = *inspect.gpu_placement_device;
+    }
+    std::printf("placement:   required %s\n", devices.c_str());
+  } else if (inspect.gpu_placement_mode ==
+             static_cast<std::uint8_t>(yori::job::GpuPlacementMode::kPreferred)) {
+    std::printf("placement:   preferred %s\n",
                 inspect.gpu_placement_device ? inspect.gpu_placement_device->c_str() : "(missing)");
   } else {
     std::printf("placement:   any\n");

@@ -43,6 +43,11 @@ struct SqliteSymbols final {
 
 // detail 截断上限：errmsg/dlerror 只做诊断摘要，不进入结构化错误。
 constexpr std::size_t kDetailLimit = 200;
+// DEC-014：gpu_placement_devices 文本上限 = 8 个 UUID（各 ≤96 字节）+ 7 个
+// 逗号；超出即损坏数据，读取侧快速拒绝。
+constexpr std::size_t kMaxPlacementDevicesTextLength =
+    job::JobSpecLimits::kMaxPlacementDevices * gpu::GpuUuid::kMaxBytes +
+    job::JobSpecLimits::kMaxPlacementDevices - 1;
 
 std::string truncate_detail(const char* raw) {
   if (raw == nullptr) {
@@ -55,13 +60,15 @@ std::string truncate_detail(const char* raw) {
   return detail;
 }
 
-// schema v3（DEC-012 的持久化格式承诺；兼容性变更需决策记录）。argv/env 以
-// length-prefixed blob 编码，时间以 Unix epoch 纳秒编码，可空字段以独立
-// has_* 标志或 SQL NULL 表示。v2 新增执行上下文列（executable/
+// schema v4（DEC-012/DEC-014 的持久化格式承诺；兼容性变更需决策记录）。
+// argv/env 以 length-prefixed blob 编码，时间以 Unix epoch 纳秒编码，可空
+// 字段以独立 has_* 标志或 SQL NULL 表示。v2 新增执行上下文列（executable/
 // environment_type/python_version，均 NULL = 未捕获）；v3 新增 GPU placement
 // 列（gpu_placement_mode：NULL/'any' = kAny、'required' = kRequired；
-// gpu_placement_device：仅 required 时非空 UUID）；v1/v2 库打开时按单事务
-// 增量迁移链补齐（migrate_schema_v1_to_v2 -> v2_to_v3）。
+// gpu_placement_device：required 单设备/preferred 时非空 UUID）；v4 新增
+// gpu_placement_devices（required 集合逗号连接 UUID，读取权威；扩展
+// gpu_placement_mode 取值 'preferred' = kPreferred）；v1-v3 库打开时按单事务
+// 增量迁移链补齐（migrate_schema_v1_to_v2 -> v2_to_v3 -> v3_to_v4）。
 constexpr const char* kSchemaSql =
     "BEGIN IMMEDIATE;"
     "CREATE TABLE IF NOT EXISTS yori_meta("
@@ -97,11 +104,12 @@ constexpr const char* kSchemaSql =
     "  environment_type TEXT,"
     "  python_version TEXT,"
     "  gpu_placement_mode TEXT,"
-    "  gpu_placement_device TEXT);"
+    "  gpu_placement_device TEXT,"
+    "  gpu_placement_devices TEXT);"
     "CREATE TABLE IF NOT EXISTS yori_leases("
     "  gpu_uuid TEXT PRIMARY KEY,"
     "  job_id INTEGER NOT NULL UNIQUE) WITHOUT ROWID;"
-    "INSERT OR IGNORE INTO yori_meta(key, value) VALUES ('schema_version', 3);"
+    "INSERT OR IGNORE INTO yori_meta(key, value) VALUES ('schema_version', 4);"
     "INSERT OR IGNORE INTO yori_meta(key, value) VALUES ('revision', 0);"
     "COMMIT;";
 
@@ -122,6 +130,16 @@ constexpr const char* kMigrationV2ToV3Sql =
     "ALTER TABLE yori_jobs ADD COLUMN gpu_placement_mode TEXT;"
     "ALTER TABLE yori_jobs ADD COLUMN gpu_placement_device TEXT;"
     "UPDATE yori_meta SET value = 3 WHERE key = 'schema_version';"
+    "COMMIT;";
+
+// v3 -> v4 增量迁移（单事务；DEC-014）：追加 required 集合列并回填既有
+// required 行（单设备集合）；preferred 取值为 v4 新语义，无回填需要。
+constexpr const char* kMigrationV3ToV4Sql =
+    "BEGIN IMMEDIATE;"
+    "ALTER TABLE yori_jobs ADD COLUMN gpu_placement_devices TEXT;"
+    "UPDATE yori_jobs SET gpu_placement_devices = gpu_placement_device"
+    " WHERE gpu_placement_mode = 'required';"
+    "UPDATE yori_meta SET value = 4 WHERE key = 'schema_version';"
     "COMMIT;";
 
 void put_u32_le(std::string& out, std::uint32_t value) {
@@ -409,7 +427,15 @@ SqliteStoreOpenResult SqliteStateStore::Impl::open() {
       }
       schema_version = 3;
     }
-    if (schema_version != 3) {
+    if (schema_version == 3) {
+      if (!exec_simple(kMigrationV3ToV4Sql)) {
+        const std::string detail = describe_error();
+        close();
+        return {SqliteStoreOpenCode::kSchemaInitFailed, "v3->v4 migration failed: " + detail};
+      }
+      schema_version = 4;
+    }
+    if (schema_version != 4) {
       close();
       return {SqliteStoreOpenCode::kSchemaInitFailed,
               "unsupported schema version " + std::to_string(schema_version)};
@@ -466,7 +492,7 @@ bool SqliteStateStore::Impl::decode_jobs(DecodedState& state, StateStoreErrorCod
                  " start_time_nanos, has_end_time, end_time_nanos, has_exit,"
                  " exit_reason, exit_code, exit_signal, failure_reason, log_path,"
                  " executable, environment_type, python_version,"
-                 " gpu_placement_mode, gpu_placement_device"
+                 " gpu_placement_mode, gpu_placement_device, gpu_placement_devices"
                  " FROM yori_jobs ORDER BY job_id;");
   if (!stmt.prepared()) {
     error = StateStoreErrorCode::kBackendUnavailable;
@@ -597,23 +623,64 @@ bool SqliteStateStore::Impl::decode_jobs(DecodedState& state, StateStoreErrorCod
       return false;
     }
 
-    // v3 placement 列（DEC-012）：NULL/'any' = kAny（v2 行补全语义）；
-    // 'required' 必须携带合法 UUID；device 不得脱离 required 单独出现。
-    // 篡改/损坏数据显式失败，不静默降级为 kAny。
+    // v3/v4 placement 列（DEC-012/DEC-014）：NULL/'any' = kAny（v2 行补全
+    // 语义）；'required' 必须携带合法 UUID 集合（gpu_placement_devices 为
+    // 读取权威，gpu_placement_device 须等于首设备，保持 v3 一致性约束）；
+    // 'preferred'（v4）恰 1 个合法 UUID 且集合列必须为空。篡改/损坏数据
+    // 显式失败，不静默降级为 kAny。
     const auto placement_mode = nullable_text(symbols, stmt.get(), 28);
     const auto placement_device = nullable_text(symbols, stmt.get(), 29);
+    const auto placement_devices = nullable_text(symbols, stmt.get(), 30);
     if (!placement_mode || *placement_mode == "any") {
-      if (placement_device) {
+      if (placement_device || placement_devices) {
         error = StateStoreErrorCode::kInvalidJob;
         return false;
       }
       record.spec.gpu_placement.mode = job::GpuPlacementMode::kAny;
     } else if (*placement_mode == "required") {
-      if (!placement_device || !gpu::GpuUuid{*placement_device}.valid()) {
+      if (!placement_devices || !placement_device) {
+        error = StateStoreErrorCode::kInvalidJob;
+        return false;
+      }
+      const std::string& devices_text = *placement_devices;
+      const std::string& device_text = *placement_device;
+      if (devices_text.empty() || devices_text.size() > kMaxPlacementDevicesTextLength) {
+        error = StateStoreErrorCode::kInvalidJob;
+        return false;
+      }
+      std::vector<gpu::GpuUuid> devices;
+      std::size_t begin = 0;
+      while (begin <= devices_text.size()) {
+        const auto comma = devices_text.find(',', begin);
+        const std::string entry = devices_text.substr(
+            begin, comma == std::string::npos ? std::string::npos : comma - begin);
+        if (entry.empty()) {
+          error = StateStoreErrorCode::kInvalidJob;
+          return false;
+        }
+        const gpu::GpuUuid uuid{entry};
+        if (!uuid.valid()) {
+          error = StateStoreErrorCode::kInvalidJob;
+          return false;
+        }
+        devices.push_back(uuid);
+        if (comma == std::string::npos) {
+          break;
+        }
+        begin = comma + 1;
+      }
+      if (device_text.empty() || device_text != devices.front().value()) {
         error = StateStoreErrorCode::kInvalidJob;
         return false;
       }
       record.spec.gpu_placement.mode = job::GpuPlacementMode::kRequired;
+      record.spec.gpu_placement.devices = std::move(devices);
+    } else if (*placement_mode == "preferred") {
+      if (!placement_device || !gpu::GpuUuid{*placement_device}.valid() || placement_devices) {
+        error = StateStoreErrorCode::kInvalidJob;
+        return false;
+      }
+      record.spec.gpu_placement.mode = job::GpuPlacementMode::kPreferred;
       record.spec.gpu_placement.devices.push_back(gpu::GpuUuid{*placement_device});
     } else {
       error = StateStoreErrorCode::kInvalidJob;
@@ -715,9 +782,9 @@ bool SqliteStateStore::Impl::write_job_row(const StoredJob& record) {
                  " has_end_time, end_time_nanos, has_exit, exit_reason, exit_code,"
                  " exit_signal, failure_reason, log_path, executable,"
                  " environment_type, python_version, gpu_placement_mode,"
-                 " gpu_placement_device)"
+                 " gpu_placement_device, gpu_placement_devices)"
                  " VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,"
-                 " ?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30);");
+                 " ?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31);");
   if (!stmt.prepared()) {
     return false;
   }
@@ -739,6 +806,33 @@ bool SqliteStateStore::Impl::write_job_row(const StoredJob& record) {
     }
     return bind_text(symbols, stmt.get(), index, *value);
   };
+
+  // placement 列（DEC-014）：required 时单值列为首设备（v3 一致性约束）、
+  // 集合列为完整列表；preferred 只写单值列；any 全空。
+  std::optional<std::string> placement_mode_text;
+  std::optional<std::string> placement_device_text;
+  std::optional<std::string> placement_devices_text;
+  switch (record.spec.gpu_placement.mode) {
+    case job::GpuPlacementMode::kAny:
+      break;
+    case job::GpuPlacementMode::kRequired: {
+      placement_mode_text = std::string{"required"};
+      placement_device_text = record.spec.gpu_placement.devices.front().value();
+      std::string joined;
+      for (std::size_t index = 0; index < record.spec.gpu_placement.devices.size(); ++index) {
+        if (index > 0) {
+          joined.push_back(',');
+        }
+        joined += record.spec.gpu_placement.devices[index].value();
+      }
+      placement_devices_text = std::move(joined);
+      break;
+    }
+    case job::GpuPlacementMode::kPreferred:
+      placement_mode_text = std::string{"preferred"};
+      placement_device_text = record.spec.gpu_placement.devices.front().value();
+      break;
+  }
 
   if (!bind_i64(1, static_cast<sqlite3_int64>(record.id.value())) ||
       !bind_i64(2, static_cast<sqlite3_int64>(record.state)) ||
@@ -775,13 +869,9 @@ bool SqliteStateStore::Impl::write_job_row(const StoredJob& record) {
                                                        : std::nullopt) ||
       !bind_nullable_text(
           28, record.spec.env_metadata ? record.spec.env_metadata->python_version : std::nullopt) ||
-      !bind_nullable_text(29, record.spec.gpu_placement.mode == job::GpuPlacementMode::kRequired
-                                  ? std::optional<std::string>{"required"}
-                                  : std::nullopt) ||
-      !bind_nullable_text(
-          30, record.spec.gpu_placement.mode == job::GpuPlacementMode::kRequired
-                  ? std::optional<std::string>{record.spec.gpu_placement.devices.front().value()}
-                  : std::nullopt)) {
+      !bind_nullable_text(29, placement_mode_text) ||
+      !bind_nullable_text(30, placement_device_text) ||
+      !bind_nullable_text(31, placement_devices_text)) {
     return false;
   }
 
