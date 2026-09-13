@@ -320,6 +320,204 @@ int main() {
     YORI_CHECK(!wide.evaluation.window_truncated);
   }
 
+  // ---- issue #22：affinity-aware ANY 选择（DEC-013 软保护）----------------
+  using yori::scheduler::GpuSelectionReason;
+
+  // 场景 1：存在等价替代资源时，ANY 避开等待中 REQUIRED 的唯一目标。
+  {
+    Scenario scenario{2};
+    scenario.seed({queued(1, std::chrono::seconds{10}, 1001),
+                   queued_required(2, std::chrono::seconds{20}, 1002, "GPU-0")});
+    yori::scheduler::FifoScheduler scheduler{*scenario.queue, scenario.store};
+    const auto observation = snapshot(
+        {gpu("GPU-0", 0, GpuObservedState::kFree), gpu("GPU-1", 1, GpuObservedState::kFree)});
+    auto result = scheduler.run_once(SchedulerTrigger::kJobSubmitted, observation);
+    YORI_CHECK(result.scheduled());
+    YORI_CHECK(result.event.job_id == JobId{1});
+    YORI_CHECK(result.event.gpu_uuid == yori::gpu::GpuUuid{"GPU-1"});
+    YORI_CHECK(result.event.selection_reason == GpuSelectionReason::kAvoidRequiredAffinity);
+    // J2 的唯一目标未被占用：两 Job 均立即运行，不产生 placement 碎片。
+    result = scheduler.run_once(SchedulerTrigger::kGpuStateChanged, observation);
+    YORI_CHECK(result.scheduled());
+    YORI_CHECK(result.event.job_id == JobId{2});
+    YORI_CHECK(result.event.gpu_uuid == yori::gpu::GpuUuid{"GPU-0"});
+    // kRequired 目标唯一，选择不经过亲和 ranking，恒 DEFAULT。
+    YORI_CHECK(result.event.selection_reason == GpuSelectionReason::kDefault);
+  }
+
+  // 场景 2：无可替代资源时回退（软保护不得为 REQUIRED 人为空闲 GPU）。
+  {
+    Scenario scenario{2};
+    scenario.seed({queued(1, std::chrono::seconds{10}, 1001),
+                   queued_required(2, std::chrono::seconds{20}, 1002, "GPU-0")});
+    yori::scheduler::FifoScheduler scheduler{*scenario.queue, scenario.store};
+    const auto observation = snapshot({gpu("GPU-0", 0, GpuObservedState::kFree),
+                                       gpu("GPU-1", 1, GpuObservedState::kExternalBusy)});
+    const auto result = scheduler.run_once(SchedulerTrigger::kJobSubmitted, observation);
+    YORI_CHECK(result.scheduled());
+    YORI_CHECK(result.event.job_id == JobId{1});
+    YORI_CHECK(result.event.gpu_uuid == yori::gpu::GpuUuid{"GPU-0"});
+    YORI_CHECK(result.event.selection_reason == GpuSelectionReason::kAffinityFallback);
+    const auto state = scenario.store.load();
+    YORI_CHECK(require_job(state.snapshot, 2).state == JobState::kQueued);
+    YORI_CHECK(state.snapshot.leases.size() == 1);
+  }
+
+  // 场景 3：多个受保护 GPU，ANY 选择唯一非冲突候选。
+  {
+    Scenario scenario{3};
+    scenario.seed({queued(1, std::chrono::seconds{10}, 1001),
+                   queued_required(2, std::chrono::seconds{20}, 1002, "GPU-0"),
+                   queued_required(3, std::chrono::seconds{30}, 1003, "GPU-1")});
+    yori::scheduler::FifoScheduler scheduler{*scenario.queue, scenario.store};
+    const auto observation = snapshot({gpu("GPU-0", 0, GpuObservedState::kFree),
+                                       gpu("GPU-1", 1, GpuObservedState::kFree),
+                                       gpu("GPU-2", 2, GpuObservedState::kFree)});
+    const auto result = scheduler.run_once(SchedulerTrigger::kJobSubmitted, observation);
+    YORI_CHECK(result.scheduled());
+    YORI_CHECK(result.event.job_id == JobId{1});
+    YORI_CHECK(result.event.gpu_uuid == yori::gpu::GpuUuid{"GPU-2"});
+    YORI_CHECK(result.event.selection_reason == GpuSelectionReason::kAvoidRequiredAffinity);
+  }
+
+  // 场景 4：全部 FREE 候选均被保护命中，ANY 仍然运行（不演变成隐式预留）。
+  {
+    Scenario scenario{3};
+    scenario.seed({queued(1, std::chrono::seconds{10}, 1001),
+                   queued_required(2, std::chrono::seconds{20}, 1002, "GPU-0"),
+                   queued_required(3, std::chrono::seconds{30}, 1003, "GPU-1")});
+    yori::scheduler::FifoScheduler scheduler{*scenario.queue, scenario.store};
+    const auto observation = snapshot(
+        {gpu("GPU-0", 0, GpuObservedState::kFree), gpu("GPU-1", 1, GpuObservedState::kFree)});
+    const auto result = scheduler.run_once(SchedulerTrigger::kJobSubmitted, observation);
+    YORI_CHECK(result.scheduled());
+    YORI_CHECK(result.event.job_id == JobId{1});
+    YORI_CHECK(result.event.gpu_uuid == yori::gpu::GpuUuid{"GPU-0"});
+    YORI_CHECK(result.event.selection_reason == GpuSelectionReason::kAffinityFallback);
+  }
+
+  // 场景 5：REQUIRED 在前正常服务后，ANY 使用剩余 GPU，保护已随 lease 消失。
+  {
+    Scenario scenario{2};
+    scenario.seed({queued_required(1, std::chrono::seconds{10}, 1001, "GPU-0"),
+                   queued(2, std::chrono::seconds{20}, 1002)});
+    yori::scheduler::FifoScheduler scheduler{*scenario.queue, scenario.store};
+    const auto observation = snapshot(
+        {gpu("GPU-0", 0, GpuObservedState::kFree), gpu("GPU-1", 1, GpuObservedState::kFree)});
+    auto result = scheduler.run_once(SchedulerTrigger::kJobSubmitted, observation);
+    YORI_CHECK(result.scheduled());
+    YORI_CHECK(result.event.job_id == JobId{1});
+    YORI_CHECK(result.event.gpu_uuid == yori::gpu::GpuUuid{"GPU-0"});
+    YORI_CHECK(result.event.selection_reason == GpuSelectionReason::kDefault);
+    result = scheduler.run_once(SchedulerTrigger::kGpuStateChanged, observation);
+    YORI_CHECK(result.scheduled());
+    YORI_CHECK(result.event.job_id == JobId{2});
+    YORI_CHECK(result.event.gpu_uuid == yori::gpu::GpuUuid{"GPU-1"});
+    // GPU-0 已被 lease，从 free_candidates 消失：保护集合是否包含它不影响结果。
+    YORI_CHECK(result.event.selection_reason == GpuSelectionReason::kDefault);
+  }
+
+  // 场景 6：REQUIRED 目标忙时不影响 ANY 的候选（保护仅作用于 FREE 候选集）。
+  {
+    Scenario scenario{2};
+    scenario.seed({queued_required(1, std::chrono::seconds{10}, 1001, "GPU-0"),
+                   queued(2, std::chrono::seconds{20}, 1002)});
+    yori::scheduler::FifoScheduler scheduler{*scenario.queue, scenario.store};
+    const auto observation = snapshot({gpu("GPU-0", 0, GpuObservedState::kExternalBusy),
+                                       gpu("GPU-1", 1, GpuObservedState::kFree)});
+    const auto result = scheduler.run_once(SchedulerTrigger::kJobSubmitted, observation);
+    YORI_CHECK(result.scheduled());
+    YORI_CHECK(result.event.job_id == JobId{2});
+    YORI_CHECK(result.event.gpu_uuid == yori::gpu::GpuUuid{"GPU-1"});
+    // GPU-0 非 FREE 候选：选择与默认规则一致。
+    YORI_CHECK(result.event.selection_reason == GpuSelectionReason::kDefault);
+  }
+
+  // 场景 7：两个 REQUIRED 指向同一 GPU——保护集合去重，REQUIRED 间 FIFO 决胜。
+  {
+    Scenario scenario{3};
+    scenario.seed({queued(1, std::chrono::seconds{10}, 1001),
+                   queued_required(2, std::chrono::seconds{20}, 1002, "GPU-0"),
+                   queued_required(3, std::chrono::seconds{30}, 1003, "GPU-0")});
+    yori::scheduler::FifoScheduler scheduler{*scenario.queue, scenario.store};
+    const auto observation = snapshot(
+        {gpu("GPU-0", 0, GpuObservedState::kFree), gpu("GPU-1", 1, GpuObservedState::kFree)});
+    auto result = scheduler.run_once(SchedulerTrigger::kJobSubmitted, observation);
+    YORI_CHECK(result.scheduled());
+    YORI_CHECK(result.event.job_id == JobId{1});
+    YORI_CHECK(result.event.gpu_uuid == yori::gpu::GpuUuid{"GPU-1"});
+    YORI_CHECK(result.event.selection_reason == GpuSelectionReason::kAvoidRequiredAffinity);
+    result = scheduler.run_once(SchedulerTrigger::kGpuStateChanged, observation);
+    YORI_CHECK(result.scheduled());
+    YORI_CHECK(result.event.job_id == JobId{2});
+    YORI_CHECK(result.event.gpu_uuid == yori::gpu::GpuUuid{"GPU-0"});
+    result = scheduler.run_once(SchedulerTrigger::kJobExited, observation);
+    // J3 与 J2 同目标：竞争保持 FIFO，J3 等待（AFFINITY_GPU_ALLOCATED）。
+    YORI_CHECK(result.code == ScheduleResultCode::kNoCandidate);
+    const auto* skip = find_skip(result.evaluation, 3);
+    YORI_CHECK(skip != nullptr && skip->reason == WaitReason::kAffinityGpuAllocated);
+  }
+
+  // 场景 8：REQUIRED 目标位于扫描窗口外——不参与本轮 affinity 保护。
+  {
+    Scenario scenario{2};
+    scenario.seed({queued(1, std::chrono::seconds{10}, 1001),
+                   queued_required(2, std::chrono::seconds{20}, 1002, "GPU-0")});
+    const auto observation = snapshot(
+        {gpu("GPU-0", 0, GpuObservedState::kFree), gpu("GPU-1", 1, GpuObservedState::kFree)});
+    yori::scheduler::SchedulerConfig narrow;
+    narrow.scan_window = 1;
+    yori::scheduler::FifoScheduler narrow_scheduler{*scenario.queue, scenario.store, narrow};
+    const auto narrow_result =
+        narrow_scheduler.run_once(SchedulerTrigger::kJobSubmitted, observation);
+    // 窗口只含 J1：J2 的目标不在保护集合，选择保持默认最低 index。
+    YORI_CHECK(narrow_result.scheduled());
+    YORI_CHECK(narrow_result.event.gpu_uuid == yori::gpu::GpuUuid{"GPU-0"});
+    YORI_CHECK(narrow_result.event.selection_reason == GpuSelectionReason::kDefault);
+  }
+
+  // 场景 8 对照：同一队列窗口覆盖 J2 时产生保护（窗口语义一致性）。
+  {
+    Scenario scenario{2};
+    scenario.seed({queued(1, std::chrono::seconds{10}, 1001),
+                   queued_required(2, std::chrono::seconds{20}, 1002, "GPU-0")});
+    yori::scheduler::FifoScheduler scheduler{*scenario.queue, scenario.store};
+    const auto observation = snapshot(
+        {gpu("GPU-0", 0, GpuObservedState::kFree), gpu("GPU-1", 1, GpuObservedState::kFree)});
+    const auto result = scheduler.run_once(SchedulerTrigger::kJobSubmitted, observation);
+    YORI_CHECK(result.scheduled());
+    YORI_CHECK(result.event.gpu_uuid == yori::gpu::GpuUuid{"GPU-1"});
+    YORI_CHECK(result.event.selection_reason == GpuSelectionReason::kAvoidRequiredAffinity);
+  }
+
+  // 场景 9：REQUIRED Job 被取消——下一次调度重算保护集合，不残留预留。
+  {
+    Scenario scenario{2};
+    scenario.seed({queued(1, std::chrono::seconds{10}, 1001),
+                   queued_required(2, std::chrono::seconds{20}, 1002, "GPU-0")});
+    // 取消 J2：store 落终态 + 派生队列移除。
+    auto state = scenario.store.load();
+    YORI_CHECK(state);
+    yori::store::StoredJob cancelled = require_job(state.snapshot, 2);
+    cancelled.state = JobState::kCancelled;
+    ++cancelled.revision;
+    yori::store::StateMutation cancel_mutation;
+    cancel_mutation.expected_revision = state.snapshot.revision;
+    cancel_mutation.update_jobs.push_back(std::move(cancelled));
+    YORI_CHECK(scenario.store.apply(cancel_mutation));
+    YORI_CHECK(scenario.queue->remove(JobId{2}));
+
+    yori::scheduler::FifoScheduler scheduler{*scenario.queue, scenario.store};
+    const auto observation = snapshot(
+        {gpu("GPU-0", 0, GpuObservedState::kFree), gpu("GPU-1", 1, GpuObservedState::kFree)});
+    const auto result = scheduler.run_once(SchedulerTrigger::kJobCancelled, observation);
+    // 保护全部信息由队列派生：J2 离开后 GPU-0 不再被保护，J1 回到最低 index。
+    YORI_CHECK(result.scheduled());
+    YORI_CHECK(result.event.job_id == JobId{1});
+    YORI_CHECK(result.event.gpu_uuid == yori::gpu::GpuUuid{"GPU-0"});
+    YORI_CHECK(result.event.selection_reason == GpuSelectionReason::kDefault);
+  }
+
   // ---- 队列一致性核对：store 与派生队列分歧显式失败 -----------------------
   {
     auto divergent_queue = make_queue(1);
@@ -378,6 +576,14 @@ int main() {
       WaitReason::kAffinityGpuState,
   };
   for (const auto reason : wait_reasons) {
+    YORI_CHECK(std::string(yori::scheduler::to_string(reason)) != "UNKNOWN");
+  }
+  constexpr std::array selection_reasons{
+      yori::scheduler::GpuSelectionReason::kDefault,
+      yori::scheduler::GpuSelectionReason::kAvoidRequiredAffinity,
+      yori::scheduler::GpuSelectionReason::kAffinityFallback,
+  };
+  for (const auto reason : selection_reasons) {
     YORI_CHECK(std::string(yori::scheduler::to_string(reason)) != "UNKNOWN");
   }
 

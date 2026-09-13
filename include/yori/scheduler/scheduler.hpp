@@ -47,6 +47,17 @@ enum class WaitReason : std::uint8_t {
 
 [[nodiscard]] const char* to_string(WaitReason reason) noexcept;
 
+// kAny 一次成功选择的亲和结论（DEC-013）：解释 GPU 选择为何偏离"物理 index
+// 升序取第一张 FREE"的默认规则。仅诊断语义，不构成新的 Job/GPU 状态，也
+// 不持久化；kRequired 的选择恒为 kDefault（目标唯一，无排序参与）。
+enum class GpuSelectionReason : std::uint8_t {
+  kDefault = 0,                // 亲和保护未改变选择（含无等待 REQUIRED 的场景）
+  kAvoidRequiredAffinity = 1,  // 存在非冲突候选，实际避开了等待中 REQUIRED 目标
+  kAffinityFallback = 2,  // 全部 FREE 候选均为等待中 REQUIRED 目标，回退使用其一
+};
+
+[[nodiscard]] const char* to_string(GpuSelectionReason reason) noexcept;
+
 // 单个被跳过 Job 的结构化跳过事件：原因 +（kRequired 时）目标设备。
 struct ScheduleSkip final {
   job::JobId job{};
@@ -80,6 +91,8 @@ struct SchedulerEvent final {
   ScheduleResultCode code{ScheduleResultCode::kQueueEmpty};
   std::optional<job::JobId> job_id;
   std::optional<gpu::GpuUuid> gpu_uuid;
+  // 本次选择结论（DEC-013）：仅 kScheduled 且该 Job 为 kAny 时可能非 kDefault。
+  GpuSelectionReason selection_reason{GpuSelectionReason::kDefault};
   gpu::GpuObservationValidationResult gpu_validation{};
   store::StateStoreErrorCode store_error{store::StateStoreErrorCode::kNone};
   queue::QueueErrorCode queue_error{queue::QueueErrorCode::kNone};
@@ -104,11 +117,13 @@ struct ScheduleResult final {
   }
 };
 
-// 单 owner、事件驱动的 FIFO 调度 Core（DEC-005 + DEC-012 有界跳过修订）。
-// 一次调用只处理一个触发事件：按 (submit_time, JobId) 顺序扫描队首开始的
-// 有界窗口，跳过当前不可调度的 Job（placement 候选集过滤 + FREE/lease 排除），
-// 把窗口内第一个可调度 Job 原子推进到 STARTING 并建立一个 GPU lease；被跳过
-// Job 保持 QUEUED 与原队列位置，结论以 ScheduleEvaluation 返回。
+// 单 owner、事件驱动的 FIFO 调度 Core（DEC-005 + DEC-012 有界跳过修订 +
+// DEC-013 亲和感知 ANY 选择）。一次调用只处理一个触发事件：按
+// (submit_time, JobId) 顺序扫描队首开始的有界窗口，跳过当前不可调度的 Job
+// （placement 候选集过滤 + FREE/lease 排除），把窗口内第一个可调度 Job 原子
+// 推进到 STARTING 并建立一个 GPU lease；被跳过 Job 保持 QUEUED 与原队列位置，
+// 结论以 ScheduleEvaluation 返回。kAny Job 的多候选选择避开同窗口内等待中
+// REQUIRED Job 指定的 GPU（软保护：无非冲突候选时回退，不人为空闲资源）。
 class FifoScheduler final {
  public:
   FifoScheduler(queue::GlobalJobQueue& queue, store::StateStore& store, SchedulerConfig config = {})
