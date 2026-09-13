@@ -1,6 +1,8 @@
 # M10：亲和感知 ANY 设备选择
 
-> 状态：In Progress（2026-09-13 依 issue #22 立项并启动；负责人确认依计划推进）
+> 状态：In Progress（实现与验证完成，PR
+> [#23](https://github.com/Linductor-alkaid/yori/pull/23) CI 9/9 全绿，等待
+> 负责人评审与合并授权）
 > 负责人：Linductor-alkaid
 > 所属计划：[Yori 实施总计划](yori-implementation-plan.md)
 > 前置：M9（GPU placement 亲和调度，PR [#20](https://github.com/Linductor-alkaid/yori/pull/20)）
@@ -9,7 +11,7 @@
 > 需求来源：[Issue #22](https://github.com/Linductor-alkaid/yori/issues/22)（POST-11 中
 > "affinity-aware ANY 设备选择"子项的提前实现）
 > 建议发布点：`v0.4.0`（未定，随下一次发版）
-> 更新日期：2026-09-13
+> 更新日期：2026-09-13（PR #23 CI 全绿，验证记录回填）
 
 ## 目标
 
@@ -57,14 +59,14 @@
 
 ## 工作项
 
-- [ ] `M10-01` `FifoScheduler` 亲和感知 `kAny` 选择：窗口内 `affinity_targets`
+- [x] `M10-01` `FifoScheduler` 亲和感知 `kAny` 选择：窗口内 `affinity_targets`
   预计算 + 候选 ranking（冲突优先级、物理 index 决胜）+ 回退语义，公开
   `GpuSelectionReason` 与 `SchedulerEvent.selection_reason`。
-- [ ] `M10-02` `JobManagerStats` 亲和选择计数（avoids/fallbacks），调度结果
+- [x] `M10-02` `JobManagerStats` 亲和选择计数（avoids/fallbacks），调度结果
   消费路径归类递增。
-- [ ] `M10-03` issue #22 测试矩阵 10 场景落地（Core 单测、GpuManager 观测驱动
+- [x] `M10-03` issue #22 测试矩阵 10 场景落地（Core 单测、GpuManager 观测驱动
   集成、JobManager 总装回退路径与计数断言）。
-- [ ] `M10-04` 文档同步：DEC-013 新建、DEC-012 风险条目与关联更新、设计文档
+- [x] `M10-04` 文档同步：DEC-013 新建、DEC-012 风险条目与关联更新、设计文档
   §9/§16.2、总计划（状态/POST-11/里程碑索引）、CHANGELOG。
 
 ## 风险与阻塞
@@ -74,18 +76,36 @@
 
 ## 测试与退出条件
 
-- [ ] issue #22 矩阵 10 场景全部通过（`unit_fifo_scheduler_test`：
+- [x] issue #22 矩阵 10 场景全部通过（`unit_fifo_scheduler_test`：
   替代时避开 1/3/7、无替代回退 2/4、REQUIRED 在前 5、目标忙无保护效果 6、
   同目标去重与 FIFO 决胜 7、窗口外不保护 8、取消无残留 9、全命中回退
   可观察 10）。
-- [ ] `integration_gpu_manager_scheduler_test`：观测驱动下 ANY 避开 REQUIRED
+- [x] `integration_gpu_manager_scheduler_test`：观测驱动下 ANY 避开 REQUIRED
   目标且后者随后获得目标卡（lease 事实不破坏）。
-- [ ] `unit_job_manager_test`：总装 fallback 路径（利用率优先）+ 计数器
+- [x] `unit_job_manager_test`：总装 fallback 路径（利用率优先）+ 计数器
   断言 + J2 保持 QUEUED。
-- [ ] 全量 debug/ASAN/TSAN 套件通过；clang-format 18.1.3 与 clang-tidy
+- [x] 全量 debug/ASAN/TSAN 套件通过；clang-format 18.1.3 与 clang-tidy
   干净；CI（含 ubuntu-22.04 构建）全绿。
-- [ ] 文档同步完成（DEC-013/DEC-012/设计/总计划/CHANGELOG）。
+- [x] 文档同步完成（DEC-013/DEC-012/设计/总计划/CHANGELOG）。
 
 ## 验证记录
 
-（待实施后按日期追加：commit、环境、命令、结果、限制与剩余项。）
+2026-09-13：M10 实现与验证（PR
+[#23](https://github.com/Linductor-alkaid/yori/pull/23)，分支
+`feat/m10-affinity-placement`，提交 `52e0e38` scheduler + `77d020b` job
+计数 + `31eec80` 文档）。
+
+- **环境**：开发机 Ubuntu 24.04（glibc 2.39）、GCC 13.3、CMake 3.28、
+  pip clang-format 18.1.3 / clang-tidy 18.1.8（本地门禁复现口径）。
+- **本地验证**：`ctest --preset debug|asan|tsan`（tsan 经 `setarch -R`）
+  均 44/44 通过、0 失败（4 项环境相关跳过与 master 基线一致：process
+  demotion、NVML 真机、两 example 项）；`clang-format --dry-run --Werror`
+  touched 文件干净；touched 文件 clang-tidy 无 error 类别
+  （bugprone/clang-analyzer/performance/portability）新增（apps/ 与部分
+  src 的 misc-include-cleaner 等非 error 类别告警为存量，与本变更无关）。
+- **CI（[run 34748713087](https://github.com/Linductor-alkaid/yori/actions/runs/34748713087)）**：
+  9/9 全绿——clang-format、clang-tidy、gcc-13/clang-18 × debug/release、
+  sanitizers（asan+ubsan+tsan）、deb 打包冒烟（ubuntu-22.04 / gcc-12 符号
+  版本红线）、依赖锁定校验。
+- **限制与剩余项**：合并 PR 与发版（`v0.4.0` 未定）需负责人授权；无其他
+  未执行验证。
