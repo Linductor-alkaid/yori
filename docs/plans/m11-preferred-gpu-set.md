@@ -120,6 +120,17 @@
   - `build/ubsan`：ctest 44/44 passed。
   - `build/tsan`（`setarch $(uname -m) -R` 规避 ptrace 限制）：44/44 passed。
   - `clang-format --dry-run --Werror`（全部变更文件）：无输出（通过）。
-- 未执行项与补跑条件：Clang 双编译与 Ubuntu 22.04 兼容构建依赖 CI runner
-  （本地无 clang）；push 后以 CI run 为准，MR 合并与 `v0.5.0` 发布需负责人
-  授权。
+- 未执行项与补跑条件：无——Clang 双编译与 Ubuntu 22.04 兼容构建已由 CI
+  runner 覆盖（见下）。
+
+### 2026-09-13：CI 收口
+
+- PR [#25](https://github.com/Linductor-alkaid/yori/pull/25)
+  （feat/m11-preferred-gpu-set，实现提交经 gh API 重建推送，本地 HEAD
+  `da3a61b` + 两个 CI 修复提交后远端 `11faf3c`）。
+- CI 修复：clang-18 `-Werror` 恒假比较（u8 vs kMaxItemCount）与 clang-tidy
+  `bugprone-unchecked-optional-access`（store 可选值局部引用化）。
+- 最终 CI run [34764999918](https://github.com/Linductor-alkaid/yori/actions/runs/34764999918)
+  **9/9 全绿**（clang-format、clang-tidy、gcc-13/clang-18 × debug/release、
+  sanitizers、deb 打包冒烟、依赖锁定校验）。
+- 待办：MR 合并需负责人授权；合并后随发版 PR 交付 `v0.5.0`。
