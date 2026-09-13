@@ -209,7 +209,7 @@ constexpr std::uint8_t kUnderlyingJobStateMax = 7;
 constexpr std::uint8_t kUnderlyingGpuObservedStateMax = 2;
 constexpr std::uint8_t kUnderlyingGpuLogicalStateMax = 3;
 constexpr std::uint8_t kUnderlyingWaitReasonMax = 4;
-constexpr std::uint8_t kUnderlyingGpuPlacementModeMax = 1;
+constexpr std::uint8_t kUnderlyingGpuPlacementModeMax = 2;
 
 // 编码请求 kind body（不含 version/kind 头）。返回 false 表示字段越界或
 // 版本与字段不一致（v1 帧不允许携带 v2 扩展字段）。
@@ -225,6 +225,9 @@ bool encode_request_body(std::uint8_t version, const IpcRequest& request, Writer
         return false;
       }
       if (version < 3 && submit.gpu_spec) {
+        return false;
+      }
+      if (version < 4 && submit.gpu_preferred_spec) {
         return false;
       }
       writer.u32(static_cast<std::uint32_t>(submit.argv.size()));
@@ -265,8 +268,14 @@ bool encode_request_body(std::uint8_t version, const IpcRequest& request, Writer
       }
       if (version >= 3) {
         // v3 尾部追加（DEC-012）：可选 placement 输入；v2 帧在此结束
-        // （缺省 = kAny）。
+        // （缺省 = kAny）。v4 起值为逗号分隔列表（DEC-014，解析在 daemon）。
         if (writer.string(submit.gpu_spec)) {
+          return false;
+        }
+      }
+      if (version >= 4) {
+        // v4 尾部追加（DEC-014）：可选 PREFERRED 软偏好输入。
+        if (writer.string(submit.gpu_preferred_spec)) {
           return false;
         }
       }
@@ -506,13 +515,26 @@ bool encode_response_body(std::uint8_t version, const IpcResponse& response, Wri
         return false;
       }
       if (version >= 3) {
-        // v3（DEC-012）：placement 输入（mode + required 时目标 UUID）。
+        // v3（DEC-012）：placement 输入（mode + required 单设备/preferred
+        // 时目标 UUID）。
         if (inspect.gpu_placement_mode > kUnderlyingGpuPlacementModeMax) {
           return false;
         }
         writer.u8(inspect.gpu_placement_mode);
         if (writer.string(inspect.gpu_placement_device)) {
           return false;
+        }
+      }
+      if (version >= 4) {
+        // v4 尾部追加（DEC-014）：required 集合设备列表。
+        if (inspect.gpu_placement_devices.size() > IpcProtocolLimits::kMaxItemCount) {
+          return false;
+        }
+        writer.u8(static_cast<std::uint8_t>(inspect.gpu_placement_devices.size()));
+        for (const std::string& device : inspect.gpu_placement_devices) {
+          if (writer.string(device)) {
+            return false;
+          }
         }
       }
       return true;
@@ -624,6 +646,13 @@ IpcDecodeError decode_request_body(Reader& reader, IpcRequest& out) {
       if (version >= 3) {
         // v3 尾部追加（DEC-012）：可选 placement 输入；v2 帧在此结束。
         error = reader.string(submit.gpu_spec);
+        if (error != IpcDecodeError::kNone) {
+          return error;
+        }
+      }
+      if (version >= 4) {
+        // v4 尾部追加（DEC-014）：可选 PREFERRED 软偏好输入。
+        error = reader.string(submit.gpu_preferred_spec);
         if (error != IpcDecodeError::kNone) {
           return error;
         }
@@ -1090,7 +1119,8 @@ IpcDecodeError decode_response_body(Reader& reader, IpcResponse& out) {
         return error;
       }
       if (version >= 3) {
-        // v3（DEC-012）：placement 输入（mode + required 时目标 UUID）。
+        // v3（DEC-012）：placement 输入（mode + required 单设备/preferred
+        // 时目标 UUID）。
         if (!reader.u8(inspect.gpu_placement_mode)) {
           return IpcDecodeError::kTruncated;
         }
@@ -1100,6 +1130,24 @@ IpcDecodeError decode_response_body(Reader& reader, IpcResponse& out) {
         error = reader.string(inspect.gpu_placement_device);
         if (error != IpcDecodeError::kNone) {
           return error;
+        }
+      }
+      if (version >= 4) {
+        // v4 尾部追加（DEC-014）：required 集合设备列表。
+        std::uint8_t device_count = 0;
+        if (!reader.u8(device_count)) {
+          return IpcDecodeError::kTruncated;
+        }
+        if (device_count > IpcProtocolLimits::kMaxItemCount) {
+          return IpcDecodeError::kInvalidValue;
+        }
+        for (std::uint8_t index = 0; index < device_count; ++index) {
+          std::string device;
+          error = reader.string(device);
+          if (error != IpcDecodeError::kNone) {
+            return error;
+          }
+          inspect.gpu_placement_devices.push_back(std::move(device));
         }
       }
       break;
