@@ -120,6 +120,9 @@ struct JobManagerStats final {
   std::uint64_t scheduler_runs{0};
   std::uint64_t scheduler_scheduled{0};
   std::uint64_t scheduler_failed{0};
+  // DEC-013：kAny 亲和感知选择结论计数（成功调度中按 selection_reason 归类）。
+  std::uint64_t scheduler_affinity_avoids{0};
+  std::uint64_t scheduler_affinity_fallbacks{0};
   std::uint64_t store_write_failures{0};
   std::uint64_t abandoned_at_stop{0};
   std::uint64_t active_supervised{0};
