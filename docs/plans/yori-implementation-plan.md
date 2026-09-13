@@ -1,8 +1,8 @@
 # Yori 实施总计划
 
 > 状态：Active
-> 版本：1.14
-> 更新日期：2026-09-12
+> 版本：1.15
+> 更新日期：2026-09-13
 > 负责人：Linductor-alkaid
 > 设计依据：[Yori 项目设计文档](../design/yori-project-design.md)（v0.5）
 > 治理依据：[AGENTS.md](../../AGENTS.md)、[项目管理与工程规范](../project/project-standards.md)
@@ -87,13 +87,18 @@
   工作分支已清理，合并后 master 本地 44/44 复验。随发版 PR 同步收口状态并
   交付 `v0.2.0`。M8 期间修复 M7 遗留丢失唤醒（`yori logs -f` 偶发悬挂：
   LogPump 完成事件不唤醒 JobManager，EOF 汇合永不触发）。
-- 当前里程碑：M9（GPU placement 亲和调度，In Progress，
-  [m9-gpu-placement.md](m9-gpu-placement.md)，分支
-  `feat/m9-gpu-placement`）；DEC-012 已于 2026-09-13 随 M9 启动冻结为
-  Accepted（部分修订 DEC-005 队首条款）。
+- M9 已合并（2026-09-13 负责人授权）：PR
+  [#20](https://github.com/Linductor-alkaid/yori/pull/20)（merge commit
+  `87292a5`，6 实现 + 1 修复 + 1 证据提交；最终 CI 9/9 全绿，run
+  34739143912/34740203775），随发版 PR 交付 `v0.3.0`。交付：`GpuPlacement`
+  （ANY/REQUIRED）、daemon 侧 index→UUID 解析、FIFO 有界跳过（修订 DEC-005
+  队首条款）、`wait_reason` 视图、协议 v3、schema v3 迁移；issue #10 场景
+  矩阵 10/12 项覆盖（PREFERRED 两项属 POST-11）。证据见
+  [M9 验证记录](m9-gpu-placement.md)。
+- 当前里程碑：无（M9 已随 `v0.3.0` 收口；MVP 后第二批增强未立项，
+  POST-11～14 延后项按触发条件评估）。
 - MVP 端到端验收以设计文档第 19 节判据为准，由 M7 执行并记录证据（见第 10 节）。
-- 里程碑文档在各自启动时创建（工程规范第 2 节）；当前实体文件：M0-M7
-  （M8/M9 文件在各自启动时创建）。
+- 里程碑文档在各自启动时创建（工程规范第 2 节）；当前实体文件：M0-M9。
 
 ## 2. 交付边界（SCOPE）
 
@@ -183,7 +188,7 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
 | M6 | 观察面 | M5 | `logs -f` 流式帧（offset 续传、`GAP`/`EOF`/`BACKPRESSURE`）、日志轮转、`yori tensorboard` | 无 | Completed |
 | M7 | 打包与 MVP 端到端验收 | M6 | systemd unit、安装打包、设计 §19 判据逐项验收；前置：守护总装收口 | `v0.1.0`（MVP；tag/发布需负责人授权） | Completed |
 | M8 | 提交时执行上下文 | M7 | 环境捕获（白名单/`--env`/`--inherit-env`）、executable 提交时解析、环境合并 v2 与保留键修订、`yori inspect`（owner/admin + 脱敏）、IPC 协议 v2、schema v2 迁移；Conda/venv 语义一致性验证 | `v0.2.0` | Completed（2026-09-12，PR [#18](https://github.com/Linductor-alkaid/yori/pull/18)，`v0.2.0` 发布） |
-| M9 | GPU placement 亲和调度 | M7（与 M8 无代码依赖，建议随后执行以共享迁移框架） | `GpuPlacement` Core 类型与校验、daemon 侧 `--gpu` 解析、Scheduler 候选集过滤与 FIFO 有界跳过、`wait_reason`、schema v3 与恢复一致性；issue #10 12 场景矩阵 | `v0.3.0` | In Progress（2026-09-13 启动，DEC-012 Accepted） |
+| M9 | GPU placement 亲和调度 | M7（与 M8 无代码依赖，建议随后执行以共享迁移框架） | `GpuPlacement` Core 类型与校验、daemon 侧 `--gpu` 解析、Scheduler 候选集过滤与 FIFO 有界跳过、`wait_reason`、schema v3 与恢复一致性；issue #10 12 场景矩阵 | `v0.3.0` | Completed（2026-09-13，PR [#20](https://github.com/Linductor-alkaid/yori/pull/20)，`v0.3.0` 发布） |
 
 - M3 与 M4 在 M2 完成后可并行推进。
 - 里程碑文件命名 `m<N>-<scope>.md`，在该里程碑启动时创建；当前实体文件：
@@ -195,7 +200,8 @@ Executor 生命周期，依赖经构造参数或显式 context 传递。
   [M5 IPC 与 CLI](m5-ipc-cli.md)、
   [M6 观察面](m6-observability.md)、
   [M7 打包与 MVP 端到端验收](m7-packaging-acceptance.md)、
-  [M8 提交时执行上下文](m8-execution-context.md)。
+  [M8 提交时执行上下文](m8-execution-context.md)、
+  [M9 GPU placement 亲和调度](m9-gpu-placement.md)。
 
 ## 6. 暂定默认值与未决问题
 
@@ -286,7 +292,8 @@ CI 无法覆盖的项按工程规范第 4 节保持未勾选并记录原因与�
   [M5 IPC 与 CLI](m5-ipc-cli.md)、
   [M6 观察面](m6-observability.md)、
   [M7 打包与 MVP 端到端验收](m7-packaging-acceptance.md)、
-  [M8 提交时执行上下文](m8-execution-context.md)
+  [M8 提交时执行上下文](m8-execution-context.md)、
+  [M9 GPU placement 亲和调度](m9-gpu-placement.md)
 - 决策：[DEC-001 Executor 依赖引入与锁定](../decisions/DEC-001-executor-pinning.md)、
   [DEC-002 MVP 纳入训练观察面](../decisions/DEC-002-mvp-observability.md)、
   [DEC-003 TensorBoard 由 CLI 拉起](../decisions/DEC-003-tensorboard-cli-hosting.md)、

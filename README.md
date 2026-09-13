@@ -20,11 +20,11 @@ yori submit 提交 Job -> yorid 全局队列排队 -> Scheduler 匹配空闲 GPU
 
 | 能力 | 说明 |
 | --- | --- |
-| 队列与调度 | 服务器级全局 FIFO（公平排队，单卡 MVP）；GPU lease 记账；事件驱动调度（提交/退出/取消/GPU 状态变化/恢复完成） |
+| 队列与调度 | 服务器级全局 FIFO（公平排队，单卡 MVP）；GPU lease 记账；事件驱动调度（提交/退出/取消/GPU 状态变化/恢复完成）；GPU 亲和（`--gpu` 硬亲和 + 有界跳过，v0.3.0） |
 | 进程守护 | 独立进程组；取消升级 `SIGTERM -> 宽限（默认 10s）-> SIGKILL`；退出回收并释放 GPU 后自动调度下一个 Job |
 | GPU 管理 | NVML 发现/遥测/外部占用检测（`EXTERNAL_BUSY`，不接管不误杀）；物理 GPU 对训练透明（`CUDA_VISIBLE_DEVICES` 或物理参数模板） |
-| 持久化与恢复 | SQLite 状态库；daemon 重启恢复队列与 RUNNING Job（身份核验，无法确认转 `LOST`） |
-| CLI | `submit` `ps` `queue` `gpu` `cancel` `logs`（快照与 `-f` 流式跟随，支持 offset 断线续传）`tensorboard` |
+| 持久化与恢复 | SQLite 状态库；daemon 重启恢复队列与 RUNNING Job（身份核验，无法确认转 `LOST`）；placement 随任务恢复不漂移 |
+| CLI | `submit`（含 `--gpu` 亲和与执行上下文捕获）`ps`（含等待原因）`queue` `gpu` `cancel` `logs`（快照与 `-f` 流式跟随，支持 offset 断线续传）`tensorboard` `inspect` |
 | 观察面 | 日志捕获/落盘/轮转；慢跟随客户端显式 `BACKPRESSURE` 断开，daemon 与训练不受影响 |
 
 ## 安装
@@ -72,7 +72,8 @@ sudo cmake --install build/release --prefix /usr/local
 
 ```bash
 yori submit -- python train.py --epochs 10        # 提交；返回 "Submitted job 1"
-yori queue                                        # 查看排队
+yori submit --gpu 2 -- python train.py            # 硬亲和：只在物理 2 号卡上运行
+yori queue                                        # 查看排队（含等待原因 WAIT 列）
 yori ps                                           # 查看全部 Job（他人脱敏）
 yori gpu                                          # GPU 占用与 lease 视图
 yori logs 1                                       # 日志快照
@@ -81,7 +82,8 @@ yori tensorboard 1                                # 以本人身份拉起 Tensor
 yori cancel 1                                     # 取消（排队期或运行期）
 ```
 
-提交选项：`--gpus N`（MVP 仅 1）、`--cwd DIR`（缺省取当前目录）、
+提交选项：`--gpus N`（MVP 仅 1）、`--gpu INDEX-or-UUID`（v0.3.0 起 REQUIRED
+硬亲和，见下节；与 `--gpus` 互斥）、`--cwd DIR`（缺省取当前目录）、
 `--env K=V`、`--inherit-env`（显式全量继承）、`--capture-env KEY`（扩展
 捕获白名单）、`--tensorboard-logdir DIR`；命令以 `--` 分隔。CLI 全局
 `--socket` 或 `YORI_SOCKET` 指定端点（默认 `/run/yori/yori.sock`）。
@@ -127,6 +129,32 @@ yori submit --cwd ~/train -- python train.py    # 直接可用
   `bash -lc 'conda activate ... && ...'` 依然可用；旧版 daemon（< 0.2.0）
   不做捕获，仍需这些配方或显式 `--env`。
 
+### GPU 亲和（v0.3.0，`--gpu`）
+
+**GPU 对训练任务不总是同质、可互换的**：长期验证稳定、复现排障、Isaac 类
+多设备路径都可能需要固定设备。`--gpu INDEX-or-UUID` 声明 **REQUIRED 硬
+亲和**——任务只允许运行在指定 GPU 上，目标被占用/外部使用/不可用时保持
+排队，**绝不 fallback 到其他卡**（DEC-012）：
+
+```bash
+yori submit --gpu 2 -- python train.py          # 物理索引（yori gpu 的 INDEX 列）
+yori submit --gpu GPU-f3c1aa88-... -- train.py  # 或稳定 UUID
+```
+
+- 设备身份使用稳定 **UUID**：索引只是易用输入，daemon 在提交时以当前观测
+  解析；设备枚举顺序变化不会错误迁移亲和目标。daemon 重启后亲和随任务
+  恢复；目标 GPU 从机器消失时任务保持排队并以 `AFFINITY_GPU_STATE` 解释，
+  由你取消或管理员处置。
+- 等待原因在 `yori queue`/`yori ps` 的 WAIT 列展示：
+  `NO_FREE_GPU`（全局无空闲）、`AFFINITY_GPU_ALLOCATED`（目标被 Yori
+  任务持有）、`AFFINITY_GPU_EXTERNAL`（目标被外部进程占用）、
+  `AFFINITY_GPU_STATE`（目标不可用/观测缺失）；自己或 admin 的视图附带
+  目标 UUID。
+- 硬亲和任务**不会阻塞全局队列**：调度按 FIFO 顺序做有界跳过——排在你
+  后面的可满足任务会先启动，你的任务保持排队位置，目标空闲后自动启动。
+- `--gpu` 与 `--gpus N` 计数语义互斥（显式同用即报错）；软偏好
+  （`PREFERRED`）与 GPU 集合是后续演进。
+
 ## 运维要点
 
 - **服务管理**：`systemctl status|stop|start yori`。停止 daemon 不终止训练；
@@ -136,7 +164,8 @@ yori submit --cwd ~/train -- python train.py    # 直接可用
   默认 256 MiB，可轮转）；服务日志经 journald。
 - **管理员**：`yorid --admin-gid <GID>`（组成员可查看/取消任何 Job）；
   其余守护参数见 `yorid --help`（`--log-root`、`--state-db`、
-  `--gpu-library`、`--sqlite-library`）。
+  `--gpu-library`、`--sqlite-library`、`--scheduler-scan-window` 调度跳过
+  扫描窗口，默认 32）。
 - **多 GPU 服务器**：默认采样 `libnvidia-ml.so.1`；被外部进程占用的 GPU
   标记 `EXTERNAL_BUSY`，不会被分配。
 

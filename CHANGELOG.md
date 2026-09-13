@@ -3,7 +3,7 @@
 本文件记录 Yori 的版本化变更（工程规范第 10.5 节）。日期为 YYYY-MM-DD；
 条目按版本倒序排列。未发布条目置于 `## Unreleased`。
 
-## Unreleased
+## v0.3.0 - 2026-09-13
 
 ### 新增（M9：GPU placement 亲和调度，DEC-012）
 
