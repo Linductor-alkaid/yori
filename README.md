@@ -1,7 +1,7 @@
 # Yori
 
 单节点、多用户的 GPU 训练任务排队、调度与进程守护系统。多人共享一台多 GPU
-Linux 服务器时，不再需要群里喊"2 号卡有人用吗"——提交即排队，Yori 替你
+Linux 服务器时，不再需要nvidia-smi看哪张卡空闲——提交即排队，Yori 替你
 盯着卡、抢到空闲 GPU 就以**你本人身份**启动训练，并守护到结束。
 
 ```text
@@ -18,7 +18,7 @@ yori submit 提交 Job -> yorid 全局队列排队 -> Scheduler 匹配空闲 GPU
   链接或感知 Yori；GPU 对训练透明（自动注入 `CUDA_VISIBLE_DEVICES`）。
 - **一台服务器一个 `yorid`**（唯一权威调度器）；`yori` CLI 是无状态客户端。
 
-## 60 秒上手
+## 快速上手
 
 管理员装好后（见[安装](#安装)），把你加入 `yori` 组，然后在激活了
 conda/venv 的终端里：
