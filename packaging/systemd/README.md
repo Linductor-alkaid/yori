@@ -78,6 +78,29 @@ sudo systemctl enable --now yori.service
 - unit 不使用 `KillMode=control-group`（默认会击杀 daemon 的全部后代，违反
   RULE-10）；yorid 退出前显式 abandon 受守护进程。
 
+## 加固边界
+
+unit 不使用、也不得经 drop-in 追加任何**改变挂载命名空间**的加固指令：
+`ProtectSystem`、`ProtectHome`、`PrivateTmp`、`PrivateMounts`、
+`ReadWritePaths`、`ReadOnlyPaths`、`InaccessiblePaths`。训练进程由 yorid
+`fork+exec` 派生并继承其挂载命名空间，这类指令会让所有 Job 在任意用户路径
+下的写入以 `EROFS`（errno 30）失败——v0.5.0 曾因 `ProtectSystem=strict`
+组指令导致真机训练无法创建 `outputs/`、Isaac Sim 无法写 kit 缓存
+（[issue #27](https://github.com/Linductor-alkaid/yori/issues/27)）。
+
+既有部署的临时缓解（重装新包之前的过渡）：`sudo systemctl edit yori` 追加
+
+```ini
+[Service]
+ProtectSystem=
+ProtectHome=
+PrivateTmp=
+ReadWritePaths=
+```
+
+置空回落默认值后 `sudo systemctl restart yori`。daemon 攻击面收敛依赖最小
+特权执行与状态库/日志根权限（设计 §10.1），不依赖挂载隔离。
+
 ## CI 覆盖与真机补跑
 
 - CI（非 root、无 systemd/NVML/多用户）覆盖：安装（`cmake --install`）后
