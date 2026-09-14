@@ -1,8 +1,8 @@
 # Yori 实施总计划
 
 > 状态：Active
-> 版本：1.17
-> 更新日期：2026-09-13
+> 版本：1.18
+> 更新日期：2026-09-14
 > 负责人：Linductor-alkaid
 > 设计依据：[Yori 项目设计文档](../design/yori-project-design.md)（v0.5）
 > 治理依据：[AGENTS.md](../../AGENTS.md)、[项目管理与工程规范](../project/project-standards.md)
@@ -111,6 +111,16 @@
   （`--gpu-preferred`，软偏好回退 + `PREFERRED_FALLBACK` 可观察）、
   IPC 协议 v4、schema v4 迁移。证据见
   [M11 验证记录](m11-preferred-gpu-set.md)。
+- v0.5.1 热修复已合并（2026-09-14 负责人授权）：PR
+  [#28](https://github.com/Linductor-alkaid/yori/pull/28)（merge commit
+  `1b37ed8`，CI run
+  [34798835460](https://github.com/Linductor-alkaid/yori/actions/runs/34798835460)
+  9/9 全绿）移除 `yori.service` 的挂载命名空间沙箱——训练进程经
+  `fork+exec` 继承 daemon 私有只读挂载命名空间，导致真机训练在任意用户
+  路径下写入 EROFS（issue
+  [#27](https://github.com/Linductor-alkaid/yori/issues/27)）；"unit 禁用
+  挂载命名空间加固"约束已固化至设计 §10.1 与部署 README，issue #27 随
+  交付关闭。
 - 当前里程碑：无（M11 已随 `v0.5.0` 收口；POST-12～14 延后项按触发条件
   评估）。
 - MVP 端到端验收以设计文档第 19 节判据为准，由 M7 执行并记录证据（见第 10 节）。
