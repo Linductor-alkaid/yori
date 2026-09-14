@@ -24,13 +24,15 @@ StateDirectoryMode=0750
 # 环境变量白名单（DEC-006）：只继承身份块与显式白名单键（PATH、LANG、
 # LC_*、CUDA 相关、NVIDIA 相关）；管理员扩展经 drop-in 追加。
 Environment=PATH=@CMAKE_INSTALL_FULL_BINDIR@:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-# 加固：不依赖特权以外的能力；匿名私有 tmp；系统调用不需要特权升级路径
-# 之外的额外能力。setuid/setgid 切换由 root euid 承担（CAP_SETUID/SETGID）。
+# 加固：不依赖特权以外的能力；setuid/setgid 切换由 root euid 承担
+# （CAP_SETUID/SETGID）。
+# 禁止任何改变挂载命名空间的加固指令（ProtectSystem/ProtectHome/PrivateTmp/
+# PrivateMounts/ReadWritePaths/ReadOnlyPaths/InaccessiblePaths，含 drop-in 追加）：
+# 训练进程由 daemon fork+exec 派生并继承服务的挂载命名空间，只读视图会让全部
+# Job 在任意用户路径下的写入以 EROFS 失败（issue #27：真机训练无法创建
+# outputs/、Isaac Sim 无法写 kit 缓存）。daemon 攻击面收敛依赖最小特权执行与
+# 状态库/日志根权限，不依赖挂载隔离。
 NoNewPrivileges=no
-PrivateTmp=yes
-ProtectHome=read-only
-ProtectSystem=strict
-ReadWritePaths=/run/yori /var/lib/yori
 LimitNICE=0
 # 日志走 journald（stdout/stderr）。
 

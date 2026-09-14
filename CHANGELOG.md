@@ -3,6 +3,19 @@
 本文件记录 Yori 的版本化变更（工程规范第 10.5 节）。日期为 YYYY-MM-DD；
 条目按版本倒序排列。未发布条目置于 `## Unreleased`。
 
+## Unreleased
+
+### 修复
+
+- **移除 `yori.service` 的挂载命名空间沙箱（issue #27）**：v0.5.0 unit 的
+  `ProtectSystem=strict`/`ProtectHome=read-only`/`PrivateTmp=yes`/
+  `ReadWritePaths=` 使 yorid 运行在私有只读挂载命名空间中，训练进程经
+  `fork+exec` 继承该命名空间，导致一切用户路径下的写入（Isaac Sim kit
+  缓存/配置、Hydra `outputs/` 目录）以 EROFS 失败、真机训练无法启动。
+  现已移除该指令组，并在设计 §10.1 与部署 README 固化"unit 禁用挂载
+  命名空间加固"约束；已部署环境需重装 unit（或以 drop-in 置空对应行）
+  并重启服务。
+
 ## v0.5.0 - 2026-09-13
 
 ### 新增（M11：GPU Set 与 PREFERRED，DEC-014）

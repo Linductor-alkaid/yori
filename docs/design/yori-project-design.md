@@ -703,6 +703,16 @@ WantedBy=multi-user.target
 `StateDirectory=yori` 与 RULE-10 守护语义说明——不以 control-group 方式回收
 后代；部署前置见 `packaging/systemd/README.md`）。
 
+unit 不得使用任何改变挂载命名空间的 systemd 加固指令：`ProtectSystem=`、
+`ProtectHome=`、`PrivateTmp=`、`PrivateMounts=`、`ReadWritePaths=`、
+`ReadOnlyPaths=`、`InaccessiblePaths=`（含管理员 drop-in 追加）。训练进程由
+`ProcessSupervisor` 经 `fork+exec` 派生，子进程无条件继承 daemon 的挂载
+命名空间，此类指令会把只读/私有挂载视图强加给所有 Job，使任意用户路径下的
+写入（conda 缓存、训练输出目录）以 EROFS 失败——v0.5.0 的 unit 曾因
+`ProtectSystem=strict` 等指令使真机训练全部失败（issue #27），该指令组已在
+后续版本移除。daemon 自身的攻击面收敛依赖最小特权执行、状态库与日志根权限
+收敛（DEC-009、威胁模型基线 6/8），不依赖挂载隔离。
+
 ### 10.2 训练进程守护
 
 训练进程由 `ProcessSupervisor` 管理，与提交 CLI 和 SSH 会话解耦。
